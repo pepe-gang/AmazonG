@@ -1,0 +1,459 @@
+import { randomUUID } from 'node:crypto';
+import type { Page } from 'playwright';
+import type { BGClient } from '../bg/client.js';
+import type { DriverSession } from '../browser/driver.js';
+import { openSession } from '../browser/driver.js';
+import { scrapeProduct } from '../actions/scrapeProduct.js';
+import { buyNow } from '../actions/buyNow.js';
+import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
+import { logger } from '../shared/logger.js';
+import type { AmazonProfile, AutoGJob, BuyResult } from '../shared/types.js';
+
+type Deps = {
+  bg: BGClient;
+  userDataRoot: string;
+  headless: boolean;
+  buyDryRun: boolean;
+  minCashbackPct: number;
+  allowedAddressPrefixes: string[];
+  /** Returns every enabled+loggedIn profile we should fan out the job to. */
+  listEligibleProfiles: () => Promise<AmazonProfile[]>;
+};
+
+export type WorkerHandle = {
+  stop(): Promise<void>;
+};
+
+const FANOUT_CONCURRENCY = 3;
+
+type ProfileResult = {
+  email: string;
+  status: 'completed' | 'failed';
+  orderId: string | null;
+  placedPrice: string | null;
+  placedCashbackPct: number | null;
+  placedAt: string | null;
+  error: string | null;
+  dryRun: boolean;
+};
+
+export function startWorker(deps: Deps): WorkerHandle {
+  let running = true;
+  let backoffMs = 5_000;
+  const sessions = new Map<string, DriverSession>();
+
+  let lastNoProfilesWarn = 0;
+  const NO_PROFILES_WARN_INTERVAL_MS = 60_000;
+
+  const loop = (async () => {
+    logger.info('worker.start');
+    while (running) {
+      try {
+        // Eligibility gate: don't claim a job if we have no enabled+signed-in
+        // Amazon profiles to run it on. Leaves the job in BG for another
+        // AutoG instance instead of claiming and immediately failing it
+        // (which would mark it permanently failed in BG).
+        const eligible = await deps.listEligibleProfiles();
+        if (eligible.length === 0) {
+          if (Date.now() - lastNoProfilesWarn > NO_PROFILES_WARN_INTERVAL_MS) {
+            logger.warn('worker.idle.no_profiles', {
+              note: 'No enabled + signed-in Amazon accounts. Worker is polling but will not claim jobs until at least one account is ready.',
+            });
+            lastNoProfilesWarn = Date.now();
+          }
+          await sleep(5_000, () => running);
+          continue;
+        }
+
+        const job = await deps.bg.claimJob();
+        if (!job) {
+          backoffMs = 5_000;
+          await sleep(5_000, () => running);
+          continue;
+        }
+        const cid = randomUUID();
+        logger.info('job.claim', { jobId: job.id, phase: job.phase, url: job.productUrl }, cid);
+        await handleJob(deps, sessions, job, cid);
+        backoffMs = 5_000;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error('worker.loop.error', { error: message });
+        await sleep(backoffMs, () => running);
+        backoffMs = Math.min(backoffMs * 2, 60_000);
+      }
+    }
+    for (const [email, s] of sessions) {
+      try {
+        await s.close();
+      } catch (err) {
+        logger.warn('session.close.error', { email, error: String(err) });
+      }
+    }
+    logger.info('worker.stop');
+  })();
+
+  return {
+    async stop() {
+      running = false;
+      await loop;
+    },
+  };
+}
+
+async function handleJob(
+  deps: Deps,
+  sessions: Map<string, DriverSession>,
+  job: AutoGJob,
+  cid: string,
+): Promise<void> {
+  const eligible = await deps.listEligibleProfiles();
+  if (eligible.length === 0) {
+    const error = 'No enabled, signed-in Amazon accounts. Add and sign in at least one account in the Amazon Accounts view.';
+    logger.error('job.no_profiles', { jobId: job.id }, cid);
+    try {
+      await deps.bg.reportStatus(job.id, { status: 'failed', error });
+    } catch (err) {
+      logger.error('job.report.error', { jobId: job.id, error: String(err) }, cid);
+    }
+    return;
+  }
+
+  logger.info(
+    'job.fanout.start',
+    {
+      jobId: job.id,
+      profiles: eligible.map((p) => p.email),
+      concurrency: Math.min(FANOUT_CONCURRENCY, eligible.length),
+    },
+    cid,
+  );
+
+  const results = await pMap(eligible, FANOUT_CONCURRENCY, (profile) =>
+    runForProfile(deps, sessions, job, profile.email, cid),
+  );
+
+  // Aggregate.
+  const successes = results.filter((r) => r.status === 'completed' && !r.dryRun);
+  const dryRunPasses = results.filter((r) => r.status === 'completed' && r.dryRun);
+  const failures = results.filter((r) => r.status === 'failed');
+
+  // Summary log line — celebratory for dry-run all-pass, neutral otherwise.
+  if (dryRunPasses.length === results.length && results.length > 0) {
+    logger.info(
+      'job.fanout.dryrun.success',
+      {
+        jobId: job.id,
+        total: results.length,
+        message: `✓ Dry run successful: all ${results.length} profile(s) would have placed an order`,
+      },
+      cid,
+    );
+  } else {
+    logger.info(
+      'job.fanout.done',
+      {
+        jobId: job.id,
+        total: results.length,
+        placed: successes.length,
+        dryRunPassed: dryRunPasses.length,
+        failed: failures.length,
+      },
+      cid,
+    );
+  }
+
+  // Choose the "winning" purchase (highest cashback %, ties broken by first
+  // success). Used to populate parent-level placed* fields on BG.
+  const winner = [...successes].sort(
+    (a, b) => (b.placedCashbackPct ?? 0) - (a.placedCashbackPct ?? 0),
+  )[0];
+
+  // Determine overall status reported to BG. Dry-run never reports as
+  // completed (BG would schedule a verify phase for an order that wasn't
+  // actually placed). Real completions take priority.
+  let overallStatus: 'completed' | 'partial' | 'failed';
+  let parentError: string | null = null;
+  if (successes.length > 0) {
+    overallStatus = failures.length === 0 ? 'completed' : 'partial';
+  } else if (dryRunPasses.length > 0) {
+    // All dry-run successes (no live orders) — BG status is 'failed' (no
+    // real order to verify), but the message clearly marks it as a
+    // successful test, not an actual failure.
+    overallStatus = 'failed';
+    parentError =
+      failures.length === 0
+        ? `[DRY RUN OK] All ${dryRunPasses.length} profile(s) passed all checks and would have placed orders. No real Place Order click — flip to LIVE mode to actually buy.`
+        : `[DRY RUN] ${dryRunPasses.length} profile(s) would have placed orders; ${failures.length} failed verification.`;
+  } else {
+    overallStatus = 'failed';
+    parentError = failures[0]?.error ?? 'all profiles failed';
+  }
+
+  // Per-profile purchase rows for BG. Only LIVE successes count as
+  // 'completed' in the purchases array — dry-runs report as failed there.
+  const purchases = results.map((r) => ({
+    amazonEmail: r.email,
+    status: r.dryRun
+      ? ('failed' as const)
+      : r.status === 'completed'
+        ? ('completed' as const)
+        : ('failed' as const),
+    orderId: r.orderId,
+    placedPrice: r.placedPrice,
+    placedCashbackPct: r.placedCashbackPct,
+    placedAt: r.placedAt,
+    error: r.error,
+  }));
+
+  try {
+    await deps.bg.reportStatus(job.id, {
+      status: overallStatus,
+      ...(parentError ? { error: parentError } : {}),
+      placedAt: winner?.placedAt ?? null,
+      placedPrice: winner?.placedPrice ?? null,
+      placedCashbackPct: winner?.placedCashbackPct ?? null,
+      placedOrderId: winner?.orderId ?? null,
+      placedEmail: winner?.email ?? null,
+      purchases,
+    });
+  } catch (err) {
+    logger.error('job.report.error', { jobId: job.id, error: String(err) }, cid);
+  }
+}
+
+async function runForProfile(
+  deps: Deps,
+  sessions: Map<string, DriverSession>,
+  job: AutoGJob,
+  profile: string,
+  parentCid: string,
+): Promise<ProfileResult> {
+  // Per-profile correlation id so logs across the parallel runs are
+  // distinguishable (parent cid is shared by all profiles in a fan-out).
+  const cid = `${parentCid}/${profile}`;
+
+  let page: Page | null = null;
+  try {
+    logger.info('job.profile.start', { jobId: job.id, profile }, cid);
+    const session = await getSession(deps, sessions, profile);
+    // Reuse the persistent context's existing tab (Chromium starts with an
+    // about:blank). Don't create a new tab for each job — that leaves the
+    // initial blank tab orphaned next to ours.
+    const existing = session.context.pages();
+    page = existing[0] ?? (await session.newPage());
+
+    const info = await scrapeProduct(page, job.productUrl);
+    logger.info(
+      'job.scrape.ok',
+      {
+        jobId: job.id,
+        profile,
+        title: info.title,
+        price: info.price,
+        cashbackPct: info.cashbackPct,
+        inStock: info.inStock,
+        condition: info.condition,
+        shipsToAddress: info.shipsToAddress,
+        isPrime: info.isPrime,
+        hasBuyNow: info.hasBuyNow,
+      },
+      cid,
+    );
+
+    const constraints = { ...DEFAULT_CONSTRAINTS, maxPrice: job.maxPrice };
+    const enabledChecks = [
+      ...(constraints.requireInStock ? ['inStock'] : []),
+      ...(constraints.maxPrice !== null ? ['price'] : []),
+      ...(constraints.requireNew ? ['condition'] : []),
+      ...(constraints.requireShipping ? ['shipping'] : []),
+      ...(constraints.requirePrime ? ['prime'] : []),
+      ...(constraints.requireBuyNow ? ['buyNow'] : []),
+    ];
+    logger.info(
+      'step.verify.start',
+      { jobId: job.id, profile, message: 'Running product page verification', checks: enabledChecks },
+      cid,
+    );
+
+    const report = verifyProductDetailed(info, constraints);
+    for (const step of report.steps) {
+      if (step.skipped) continue;
+      const event = step.pass ? 'step.verify.check.pass' : 'step.verify.check.fail';
+      const level: 'info' | 'warn' = step.pass ? 'info' : 'warn';
+      logger[level](
+        event,
+        {
+          jobId: job.id,
+          profile,
+          check: step.name,
+          observed: step.observed,
+          expected: step.expected,
+          ...(step.reason ? { reason: step.reason } : {}),
+          ...(step.detail ? { detail: step.detail } : {}),
+        },
+        cid,
+      );
+    }
+
+    if (!report.ok) {
+      const error = `${report.reason}: ${report.detail}`;
+      logger.error('step.verify.fail', { jobId: job.id, profile, reason: report.reason }, cid);
+      return failed(profile, error);
+    }
+    logger.info('step.verify.ok', { jobId: job.id, profile }, cid);
+
+    // Drive a real (or dry-run) Amazon checkout on the SAME tab.
+    const buy: BuyResult = await buyNow(page, {
+      dryRun: deps.buyDryRun,
+      minCashbackPct: deps.minCashbackPct,
+      maxPrice: job.maxPrice,
+      allowedAddressPrefixes: deps.allowedAddressPrefixes,
+      correlationId: cid,
+    });
+
+    if (!buy.ok) {
+      logger.error(
+        'step.buy.fail',
+        { jobId: job.id, profile, stage: buy.stage, reason: buy.reason },
+        cid,
+      );
+      return failed(profile, `buy.${buy.stage}: ${buy.reason}`);
+    }
+
+    if (buy.dryRun) {
+      logger.info(
+        'job.profile.dryrun.success',
+        {
+          jobId: job.id,
+          profile,
+          cashbackPct: buy.cashbackPct,
+          message: `✓ Dry run successful for ${profile} — would have placed an order (cashback ${buy.cashbackPct ?? 'n/a'}%)`,
+        },
+        cid,
+      );
+      // Close the session so the visible browser window goes away. Next
+      // job for this profile will reopen a fresh session.
+      logger.info(
+        'job.profile.dryrun.cleanup',
+        {
+          jobId: job.id,
+          profile,
+          message: 'Closing browser window after dry-run success',
+        },
+        cid,
+      );
+      await closeAndForgetSession(sessions, profile);
+    } else {
+      logger.info(
+        'job.profile.placed',
+        {
+          jobId: job.id,
+          profile,
+          orderId: buy.orderId,
+          finalPrice: buy.finalPrice,
+          cashbackPct: buy.cashbackPct,
+          message: `✓ Order placed for ${profile} — orderId ${buy.orderId ?? '(unknown)'}`,
+        },
+        cid,
+      );
+    }
+
+    const placedAt = new Date().toISOString();
+    return {
+      email: profile,
+      status: 'completed',
+      orderId: buy.orderId,
+      placedPrice: buy.finalPriceText,
+      placedCashbackPct: buy.cashbackPct,
+      placedAt,
+      error: null,
+      dryRun: buy.dryRun,
+    };
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const message = friendlyJobError(raw, profile);
+    logger.error('job.profile.fail', { jobId: job.id, profile, error: message }, cid);
+    return failed(profile, message);
+  } finally {
+    // Do NOT close the page — it's the session's only tab and closing it
+    // would terminate the persistent Chromium context (browser quits when
+    // the last page closes). Next job reuses the same tab via goto().
+  }
+}
+
+function failed(email: string, error: string): ProfileResult {
+  return {
+    email,
+    status: 'failed',
+    orderId: null,
+    placedPrice: null,
+    placedCashbackPct: null,
+    placedAt: null,
+    error,
+    dryRun: false,
+  };
+}
+
+function friendlyJobError(raw: string, profile: string): string {
+  if (/ProcessSingleton|profile is already in use|SingletonLock/i.test(raw)) {
+    return `Amazon profile "${profile}" is in use by another open window (e.g. Your Orders or a sign-in window). Close it before running jobs — Chromium only allows one process per profile.`;
+  }
+  if (/Target page, context or browser has been closed/i.test(raw)) {
+    return `Browser session for "${profile}" closed unexpectedly. Try Start again.`;
+  }
+  return raw;
+}
+
+async function getSession(
+  deps: Deps,
+  sessions: Map<string, DriverSession>,
+  profile: string,
+): Promise<DriverSession> {
+  const existing = sessions.get(profile);
+  if (existing) return existing;
+  const s = await openSession(profile, {
+    userDataRoot: deps.userDataRoot,
+    headless: deps.headless,
+  });
+  sessions.set(profile, s);
+  return s;
+}
+
+async function closeAndForgetSession(
+  sessions: Map<string, DriverSession>,
+  profile: string,
+): Promise<void> {
+  const s = sessions.get(profile);
+  if (!s) return;
+  sessions.delete(profile);
+  try {
+    await s.close();
+  } catch {
+    // already closed / browser exited
+  }
+}
+
+/** Concurrency-limited Promise.all. Preserves input order in results. */
+async function pMap<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (true) {
+        const i = next++;
+        if (i >= items.length) return;
+        results[i] = await fn(items[i]!);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+async function sleep(ms: number, stillRunning: () => boolean): Promise<void> {
+  const step = 200;
+  for (let elapsed = 0; elapsed < ms && stillRunning(); elapsed += step) {
+    await new Promise((r) => setTimeout(r, step));
+  }
+}

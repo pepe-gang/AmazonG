@@ -1,0 +1,50 @@
+import { contextBridge, ipcRenderer } from 'electron';
+import { IPC, type AutoGBridge, type Settings } from '../shared/ipc.js';
+import type { AmazonProfile, IdentityInfo, LogEvent, RendererStatus } from '../shared/types.js';
+
+const bridge: AutoGBridge = {
+  identityGet: () => ipcRenderer.invoke(IPC.identityGet) as Promise<IdentityInfo | null>,
+  identityConnect: (apiKey) =>
+    ipcRenderer.invoke(IPC.identityConnect, apiKey) as Promise<IdentityInfo>,
+  identityDisconnect: () => ipcRenderer.invoke(IPC.identityDisconnect) as Promise<void>,
+  workerStart: () => ipcRenderer.invoke(IPC.workerStart) as Promise<void>,
+  workerStop: () => ipcRenderer.invoke(IPC.workerStop) as Promise<void>,
+  statusGet: () => ipcRenderer.invoke(IPC.statusGet) as Promise<RendererStatus>,
+  settingsGet: () => ipcRenderer.invoke(IPC.settingsGet) as Promise<Settings>,
+  settingsSet: (p) => ipcRenderer.invoke(IPC.settingsSet, p) as Promise<Settings>,
+  openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url) as Promise<void>,
+
+  profilesList: () => ipcRenderer.invoke(IPC.profilesList) as Promise<AmazonProfile[]>,
+  profilesAdd: (email, displayName) =>
+    ipcRenderer.invoke(IPC.profilesAdd, email, displayName) as Promise<AmazonProfile[]>,
+  profilesRemove: (email) =>
+    ipcRenderer.invoke(IPC.profilesRemove, email) as Promise<AmazonProfile[]>,
+  profilesLogin: (email) =>
+    ipcRenderer.invoke(IPC.profilesLogin, email) as Promise<{ loggedIn: boolean; reason?: string }>,
+  profilesRefresh: (email) =>
+    ipcRenderer.invoke(IPC.profilesRefresh, email) as Promise<AmazonProfile | null>,
+  profilesSetEnabled: (email, enabled) =>
+    ipcRenderer.invoke(IPC.profilesSetEnabled, email, enabled) as Promise<AmazonProfile[]>,
+  profilesRename: (email, displayName) =>
+    ipcRenderer.invoke(IPC.profilesRename, email, displayName) as Promise<AmazonProfile[]>,
+  profilesOpenOrders: (email) =>
+    ipcRenderer.invoke(IPC.profilesOpenOrders, email) as Promise<void>,
+
+  onLog(cb) {
+    const listener = (_: unknown, ev: LogEvent) => cb(ev);
+    ipcRenderer.on(IPC.evtLog, listener);
+    return () => ipcRenderer.off(IPC.evtLog, listener);
+  },
+  onStatus(cb) {
+    const listener = (_: unknown, s: RendererStatus) => cb(s);
+    ipcRenderer.on(IPC.evtStatus, listener);
+    return () => ipcRenderer.off(IPC.evtStatus, listener);
+  },
+  onProfiles(cb) {
+    const listener = (_: unknown, p: AmazonProfile[]) => cb(p);
+    ipcRenderer.on(IPC.evtProfiles, listener);
+    return () => ipcRenderer.off(IPC.evtProfiles, listener);
+  },
+};
+
+contextBridge.exposeInMainWorld('autog', bridge);

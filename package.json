@@ -1,0 +1,39 @@
+{
+  "name": "amazong",
+  "productName": "AmazonG",
+  "version": "0.1.0",
+  "description": "Amazon automated checkout worker for BetterBG (rebuild on Playwright)",
+  "private": true,
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "save-fixture": "tsx src/scripts/saveFixture.ts",
+    "inspect-prime": "tsx src/scripts/inspectPrime.ts",
+    "verify-urls": "tsx src/scripts/verifyUrls.ts",
+    "show": "tsx src/scripts/showWhatWeSee.ts"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-vite": "^5.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "jsdom": "^25.0.1",
+    "playwright": "^1.49.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
