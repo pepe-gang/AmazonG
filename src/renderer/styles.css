@@ -449,6 +449,8 @@ a,
 .stat-icon.blue { background: linear-gradient(135deg, #3b82f6 0%, #6366f1 100%); }
 .stat-icon.purple { background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%); }
 .stat-icon.orange { background: linear-gradient(135deg, #f97316 0%, #ef4444 100%); }
+.stat-icon.green { background: linear-gradient(135deg, #16a34a 0%, #059669 100%); }
+.stat-icon.red { background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%); }
 .stat-title {
   font-size: 14px;
   font-weight: 700;
@@ -538,6 +540,14 @@ a,
   max-width: 680px;
   line-height: 1.45;
 }
+.prefix-status {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.prefix-status-ok { color: var(--success); }
+.prefix-status-info { color: var(--primary); }
+.prefix-status-err { color: var(--danger); }
 .prefix-chips {
   display: flex;
   flex-wrap: wrap;
@@ -997,6 +1007,43 @@ a,
   gap: 8px;
   margin-top: 8px;
 }
+
+/* "What's new" changelog modal — shown once per version after the
+   self-update completes and the new build first launches. */
+.changelog-modal {
+  max-width: 560px;
+  gap: 16px;
+}
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.changelog-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--primary);
+  margin-bottom: 2px;
+}
+.changelog-body {
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.changelog-line { min-height: 1.55em; }
+.changelog-line.muted { color: var(--text-muted); font-style: italic; }
 
 @keyframes fadeIn {
   from { opacity: 0; }

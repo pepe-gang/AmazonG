@@ -44,6 +44,7 @@ export const IPC = {
 
   updateCheck: 'update:check',
   updateApply: 'update:apply',
+  updateGetReleaseNotes: 'update:get-release-notes',
   appVersion: 'app:version',
 
   evtLog: 'evt:log',
@@ -65,6 +66,21 @@ export type Settings = {
    * saved address. Mirrors old AutoG's behavior.
    */
   allowedAddressPrefixes: string[];
+  /**
+   * The version we last showed the changelog for. On launch the renderer
+   * compares this against `app.getVersion()` and pops a "What's new"
+   * modal when they differ (and the current version is newer). Empty
+   * string on fresh installs — those get a one-time write to suppress
+   * the first-launch modal.
+   */
+  lastSeenVersion: string;
+  /**
+   * Whether the polling worker should start automatically when the app
+   * launches (assuming a connected BG identity exists). Off by default
+   * so a fresh launch doesn't start spending money before the user has
+   * had a chance to review settings.
+   */
+  autoStartWorker: boolean;
 };
 
 export type AutoGBridge = {
@@ -101,6 +117,7 @@ export type AutoGBridge = {
 
   updateCheck(): Promise<UpdateCheckResult>;
   updateApply(downloadUrl: string): Promise<void>;
+  updateGetReleaseNotes(version: string): Promise<{ tag: string; name: string; body: string } | null>;
   appVersion(): Promise<string>;
   onLog(cb: (ev: LogEvent) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;

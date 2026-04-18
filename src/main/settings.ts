@@ -14,6 +14,8 @@ const DEFAULTS: Settings = {
   // (e.g. "13132 NE Portland Way" — prefix "13132"). Users can override via
   // the Settings UI if they ship to a different set.
   allowedAddressPrefixes: ['13132', '13130', '1146'],
+  lastSeenVersion: '',
+  autoStartWorker: false,
 };
 
 function filePath(): string {

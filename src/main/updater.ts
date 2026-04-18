@@ -161,6 +161,32 @@ echo "[$(date)] ===== done ====="
   setTimeout(() => app.quit(), 250);
 }
 
+/**
+ * Fetch the GitHub release for a specific version (e.g. "0.2.0") and
+ * return the user-facing fields. Used by the in-app changelog modal to
+ * show "what's new" after a successful self-update.
+ */
+export async function getReleaseNotes(
+  version: string,
+): Promise<{ tag: string; name: string; body: string } | null> {
+  const tag = version.startsWith('v') ? version : `v${version}`;
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/pepe-gang/AmazonG/releases/tags/${encodeURIComponent(tag)}`,
+      { headers: { Accept: 'application/vnd.github+json' } },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { tag_name?: string; name?: string; body?: string };
+    return {
+      tag: data.tag_name ?? tag,
+      name: data.name ?? tag,
+      body: data.body ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Returns >0 if a > b, 0 if equal, <0 if a < b. Lenient on weird tags. */
 function compareSemver(a: string, b: string): number {
   const pa = a.split('.').map((n) => parseInt(n, 10) || 0);

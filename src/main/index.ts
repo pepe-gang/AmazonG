@@ -18,7 +18,7 @@ import {
   updateAttempt as storeUpdateAttempt,
 } from './jobStore.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
-import { applyUpdate, checkForUpdates } from './updater.js';
+import { applyUpdate, checkForUpdates, getReleaseNotes } from './updater.js';
 import { makeAttemptId } from '../shared/sanitize.js';
 import type { JobAttempt, JobAttemptStatus } from '../shared/types.js';
 import { BGApiError } from '../shared/errors.js';
@@ -154,6 +154,48 @@ function resizeToOnboarding(): void {
   mainWindow.center();
 }
 
+/**
+ * Start the polling worker with the current persisted settings + identity.
+ * Called from the workerStart IPC handler AND from the auto-start hook
+ * on app launch when settings.autoStartWorker is on.
+ *
+ * No-op if the worker is already running. Throws if there's no
+ * connected BG identity yet — caller decides whether to surface that.
+ */
+async function startWorkerNow(): Promise<void> {
+  if (worker) return;
+  if (!apiKey) throw new Error('not connected');
+  const settings = await loadSettings();
+  const bg = createBGClient(settings.bgBaseUrl, apiKey);
+  worker = startWorker({
+    bg,
+    userDataRoot: profileDir(),
+    debugDir: join(app.getPath('userData'), 'debug-screenshots'),
+    headless: settings.headless,
+    buyDryRun: settings.buyDryRun,
+    minCashbackPct: settings.minCashbackPct,
+    allowedAddressPrefixes: settings.allowedAddressPrefixes,
+    listEligibleProfiles: async () => {
+      const list = await loadProfiles();
+      return list.filter((p) => p.enabled && p.loggedIn);
+    },
+    jobAttempts: {
+      async create(partial) {
+        const a = await storeCreateAttempt(partial);
+        scheduleBroadcastJobs();
+        return a;
+      },
+      async update(attemptId, patch) {
+        const a = await storeUpdateAttempt(attemptId, patch);
+        scheduleBroadcastJobs();
+        return a;
+      },
+    },
+  });
+  lastError = null;
+  broadcastStatus();
+}
+
 app.whenReady().then(async () => {
   addLogSink((ev) => {
     mainWindow?.webContents.send(IPC.evtLog, ev);
@@ -182,6 +224,22 @@ app.whenReady().then(async () => {
   registerIpcHandlers();
   createWindow();
   broadcastStatus();
+
+  // Auto-start the worker if the setting is on AND we have a connected
+  // identity. Wrap in try/catch so a missing-identity case (e.g. the user
+  // disconnected, then enabled auto-start, then relaunched) doesn't crash
+  // the launch — we just log and let them flip Start manually.
+  try {
+    const settings = await loadSettings();
+    if (settings.autoStartWorker && apiKey) {
+      logger.info('worker.autostart');
+      await startWorkerNow();
+    }
+  } catch (err) {
+    logger.warn('worker.autostart.error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -279,39 +337,7 @@ function registerIpcHandlers(): void {
     broadcastStatus();
   });
 
-  ipcMain.handle(IPC.workerStart, async () => {
-    if (worker) return;
-    if (!apiKey) throw new Error('not connected');
-    const settings = await loadSettings();
-    const bg = createBGClient(settings.bgBaseUrl, apiKey);
-    worker = startWorker({
-      bg,
-      userDataRoot: profileDir(),
-      debugDir: join(app.getPath('userData'), 'debug-screenshots'),
-      headless: settings.headless,
-      buyDryRun: settings.buyDryRun,
-      minCashbackPct: settings.minCashbackPct,
-      allowedAddressPrefixes: settings.allowedAddressPrefixes,
-      listEligibleProfiles: async () => {
-        const list = await loadProfiles();
-        return list.filter((p) => p.enabled && p.loggedIn);
-      },
-      jobAttempts: {
-        async create(partial) {
-          const a = await storeCreateAttempt(partial);
-          scheduleBroadcastJobs();
-          return a;
-        },
-        async update(attemptId, patch) {
-          const a = await storeUpdateAttempt(attemptId, patch);
-          scheduleBroadcastJobs();
-          return a;
-        },
-      },
-    });
-    lastError = null;
-    broadcastStatus();
-  });
+  ipcMain.handle(IPC.workerStart, () => startWorkerNow());
 
   ipcMain.handle(IPC.workerStop, async () => {
     if (!worker) return;
@@ -484,6 +510,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC.updateApply, async (_e, downloadUrl: string) => {
     await applyUpdate(downloadUrl);
   });
+  ipcMain.handle(IPC.updateGetReleaseNotes, (_e, version: string) =>
+    getReleaseNotes(version),
+  );
   ipcMain.handle(IPC.appVersion, () => app.getVersion());
 
   async function openOrderPageInProfile(email: string, url: string): Promise<void> {
