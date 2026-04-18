@@ -25,6 +25,7 @@ export const IPC = {
   profilesSetEnabled: 'profiles:set-enabled',
   profilesRename: 'profiles:rename',
   profilesOpenOrders: 'profiles:open-orders',
+  profilesOpenOrder: 'profiles:open-order',
   profilesReorder: 'profiles:reorder',
 
   jobsList: 'jobs:list',
@@ -72,6 +73,7 @@ export type AutoGBridge = {
   profilesSetEnabled(email: string, enabled: boolean): Promise<AmazonProfile[]>;
   profilesRename(email: string, displayName: string | null): Promise<AmazonProfile[]>;
   profilesOpenOrders(email: string): Promise<void>;
+  profilesOpenOrder(email: string, orderId: string): Promise<void>;
   profilesReorder(orderedEmails: string[]): Promise<AmazonProfile[]>;
   jobsList(): Promise<JobAttempt[]>;
   jobsLogs(attemptId: string): Promise<LogEvent[]>;

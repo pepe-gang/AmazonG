@@ -341,20 +341,15 @@ function registerIpcHandlers(): void {
     return removed;
   });
 
-  ipcMain.handle(IPC.profilesOpenOrders, async (_e, email: string) => {
-    // Open Amazon's order history in this profile's persistent session so
-    // the user lands already-signed-in. The window stays open until the
-    // user closes it. We track one open session per email so:
+  async function openOrderPageInProfile(email: string, url: string): Promise<void> {
+    // Open an Amazon page in this profile's persistent session so the user
+    // lands already-signed-in. The window stays open until the user closes
+    // it. We track one open session per email so:
     //   1. Repeated clicks don't spawn multiple windows for the same account
-    //      — the existing window gets focused instead.
+    //      — the existing window's tab is reused and brought to front.
     //   2. After the user closes the window, we clear the reference so the
     //      next click opens a fresh one (fixes a bug where the second click
     //      did nothing because the previous session held the userDataDir lock).
-    // 1. If we think there's an existing window for this account, probe it.
-    //    The close event may not have fired yet (or never fires reliably for
-    //    persistent contexts), so we always verify the context still has
-    //    open pages before reusing it. If the probe fails, we treat the
-    //    session as dead and fall through to open a fresh one.
     const existing = openOrderSessions.get(email);
     if (existing) {
       let stillAlive = false;
@@ -362,6 +357,7 @@ function registerIpcHandlers(): void {
         const pages = existing.session.context.pages();
         const page = pages[pages.length - 1];
         if (page) {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
           await page.bringToFront();
           stillAlive = true;
         }
@@ -369,7 +365,7 @@ function registerIpcHandlers(): void {
         logger.warn('amazon.orders.focus.probe.error', { email, error: String(err) });
       }
       if (stillAlive) {
-        logger.info('amazon.orders.focus', { email });
+        logger.info('amazon.orders.focus', { email, url });
         return;
       }
       // Stale entry — clean up and continue to open a new window.
@@ -382,7 +378,7 @@ function registerIpcHandlers(): void {
       }
     }
 
-    logger.info('amazon.orders.open', { email });
+    logger.info('amazon.orders.open', { email, url });
     const session = await openSession(email, {
       userDataRoot: profileDir(),
       headless: false,
@@ -394,18 +390,32 @@ function registerIpcHandlers(): void {
     });
     try {
       // Reuse the about:blank tab Chromium opens with so the user sees a
-      // single tab on the order page, not blank+order.
+      // single tab on the target page, not blank+target.
       const existingPages = session.context.pages();
       const page = existingPages[0] ?? (await session.newPage());
-      await page.goto(
-        'https://www.amazon.com/gp/your-account/order-history?ref_=ya_d_c_yo',
-        { waitUntil: 'domcontentloaded', timeout: 30_000 },
-      );
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     } catch (err) {
       logger.warn('amazon.orders.nav.error', { email, error: String(err) });
     }
     // Don't close session — let the user keep the window open.
+  }
+
+  ipcMain.handle(IPC.profilesOpenOrders, async (_e, email: string) => {
+    await openOrderPageInProfile(
+      email,
+      'https://www.amazon.com/gp/your-account/order-history?ref_=ya_d_c_yo',
+    );
   });
+
+  ipcMain.handle(
+    IPC.profilesOpenOrder,
+    async (_e, email: string, orderId: string) => {
+      await openOrderPageInProfile(
+        email,
+        `https://www.amazon.com/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`,
+      );
+    },
+  );
 
   ipcMain.handle(
     IPC.profilesLogin,

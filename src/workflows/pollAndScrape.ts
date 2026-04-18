@@ -337,11 +337,10 @@ async function handleVerifyJob(
         },
         cid,
       );
-      if (buyAttemptId) {
-        await deps.jobAttempts
-          .update(buyAttemptId, { status: 'verified', error: null })
-          .catch(() => undefined);
-      }
+      await recordVerifyOutcome(deps, buyAttemptId, job, profile.email, {
+        status: 'verified',
+        error: null,
+      });
       await reportSafe(
         deps,
         job.id,
@@ -382,14 +381,10 @@ async function handleVerifyJob(
         },
         cid,
       );
-      if (buyAttemptId) {
-        await deps.jobAttempts
-          .update(buyAttemptId, {
-            status: 'cancelled_by_amazon',
-            error: 'order was cancelled by Amazon',
-          })
-          .catch(() => undefined);
-      }
+      await recordVerifyOutcome(deps, buyAttemptId, job, profile.email, {
+        status: 'cancelled_by_amazon',
+        error: 'order was cancelled by Amazon',
+      });
       await reportSafe(
         deps,
         job.id,
@@ -449,6 +444,51 @@ async function handleVerifyJob(
     );
     await closeAndForgetSession(sessions, profile.email);
   }
+}
+
+/**
+ * Write the verify outcome into the Jobs table. Preferred path: update the
+ * original buy-attempt row so the user sees a single lifecycle. If that row
+ * no longer exists (user hit "Clear All" or the row was pruned), create a
+ * brand-new phase='verify' row so the outcome isn't silently lost.
+ */
+async function recordVerifyOutcome(
+  deps: Deps,
+  buyAttemptId: string | null,
+  job: AutoGJob,
+  profileEmail: string,
+  patch: { status: JobAttemptStatus; error: string | null },
+): Promise<void> {
+  if (buyAttemptId) {
+    const updated = await deps.jobAttempts
+      .update(buyAttemptId, patch)
+      .catch(() => null);
+    if (updated) return;
+  }
+
+  // Fall-through: no buy row to update (missing buyJobId, or the row was
+  // cleared). Create a standalone verify row so the outcome is recorded.
+  await deps.jobAttempts
+    .create({
+      attemptId: makeAttemptId(job.id, profileEmail),
+      jobId: job.id,
+      amazonEmail: profileEmail,
+      phase: 'verify',
+      dealKey: job.dealKey,
+      dealId: job.dealId,
+      dealTitle: job.dealTitle,
+      productUrl: job.productUrl,
+      maxPrice: job.maxPrice,
+      price: job.price,
+      quantity: job.quantity,
+      cost: null,
+      cashbackPct: null,
+      orderId: job.placedOrderId,
+      status: patch.status,
+      error: patch.error,
+      dryRun: false,
+    })
+    .catch(() => undefined);
 }
 
 async function reportSafe(

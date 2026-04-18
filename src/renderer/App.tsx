@@ -302,7 +302,7 @@ function MainScreen({ status }: { status: RendererStatus }) {
             onViewLogs={(attempt) => setView({ kind: 'logs', attempt })}
           />
         ) : view === 'accounts' ? (
-          <AccountsView profiles={profiles} />
+          <AccountsView profiles={profiles} workerRunning={status.running} />
         ) : (
           <LogsView attempt={view.attempt} />
         )}
@@ -405,6 +405,29 @@ function JobsTable({
   const [statusFilter, setStatusFilter] = useState<JobAttemptStatus | 'all'>('all');
   const [accountFilter, setAccountFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
+  const [orderToast, setOrderToast] = useState<string | null>(null);
+
+  const openOrderInProfile = async (email: string, orderId: string) => {
+    try {
+      await window.autog.profilesOpenOrder(email, orderId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Profile is locked by the running worker — fall back to the system
+      // browser so the user can still look at the order.
+      if (/ProcessSingleton|profile is already in use|SingletonLock/i.test(msg)) {
+        setOrderToast(
+          `${email} is being used by the running worker. Opened in your default browser instead — stop the worker to open in the signed-in profile.`,
+        );
+        setTimeout(() => setOrderToast(null), 5000);
+        void window.autog.openExternal(
+          `https://www.amazon.com/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`,
+        );
+        return;
+      }
+      setOrderToast(msg);
+      setTimeout(() => setOrderToast(null), 5000);
+    }
+  };
 
   const accountOptions = useMemo(() => {
     return Array.from(new Set(attempts.map((a) => a.amazonEmail))).sort();
@@ -671,12 +694,10 @@ function JobsTable({
                       <a
                         href="#"
                         className="orderid-link"
-                        title="Open this order on Amazon"
+                        title={`Open in ${a.amazonEmail}'s signed-in session`}
                         onClick={(e) => {
                           e.preventDefault();
-                          void window.autog.openExternal(
-                            `https://www.amazon.com/gp/your-account/order-details?orderID=${encodeURIComponent(a.orderId!)}`,
-                          );
+                          void openOrderInProfile(a.amazonEmail, a.orderId!);
                         }}
                       >
                         {a.orderId}
@@ -700,6 +721,11 @@ function JobsTable({
           </table>
         )}
       </div>
+      {orderToast && (
+        <div className="lock-toast" role="status">
+          {orderToast}
+        </div>
+      )}
     </div>
   );
 }
@@ -881,12 +907,49 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
 /* ============================================================
    Accounts view (full page)
    ============================================================ */
-function AccountsView({ profiles }: { profiles: AmazonProfile[] }) {
+function AccountsView({
+  profiles,
+  workerRunning,
+}: {
+  profiles: AmazonProfile[];
+  workerRunning: boolean;
+}) {
+  const [lockedToast, setLockedToast] = useState(false);
+  const handleLockedClick = () => {
+    setLockedToast(true);
+    setTimeout(() => setLockedToast(false), 4000);
+  };
   return (
     <>
-      <AllowedPrefixesPanel />
-      <HeadlessTogglePanel />
-      <AccountsList profiles={profiles} />
+      {workerRunning && (
+        <div className="lock-banner" role="alert">
+          <span className="lock-banner-icon">🔒</span>
+          <span>
+            Account settings are locked while the worker is running. Click <b>Stop</b> in the
+            dashboard to edit accounts, prefixes, or headless mode.
+          </span>
+        </div>
+      )}
+      <div
+        className={workerRunning ? 'lock-wrapper lock-wrapper-locked' : 'lock-wrapper'}
+        aria-disabled={workerRunning}
+      >
+        <AllowedPrefixesPanel />
+        <HeadlessTogglePanel />
+        <AccountsList profiles={profiles} />
+        {workerRunning && (
+          <div
+            className="lock-overlay"
+            onClick={handleLockedClick}
+            title="Stop the worker to edit settings"
+          />
+        )}
+      </div>
+      {lockedToast && (
+        <div className="lock-toast" role="status">
+          Stop the worker first — settings can't be changed while jobs are polling.
+        </div>
+      )}
     </>
   );
 }

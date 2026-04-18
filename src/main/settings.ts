@@ -4,9 +4,11 @@ import { join } from 'node:path';
 import type { Settings } from '../shared/ipc.js';
 
 const DEFAULTS: Settings = {
-  headless: false,
+  headless: true,
   bgBaseUrl: process.env.BG_BASE_URL ?? 'https://betterbg.vercel.app',
-  buyDryRun: true,
+  // Default to Live mode — fresh installs should buy for real. Flip to true
+  // via Settings if you want the dry-run preview (no Place Order click).
+  buyDryRun: false,
   minCashbackPct: 6,
   // Matches the house-number prefixes AutoG hardcoded for BG's warehouses
   // (e.g. "13132 NE Portland Way" — prefix "13132"). Users can override via

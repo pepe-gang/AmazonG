@@ -35,6 +35,8 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.profilesRename, email, displayName) as Promise<AmazonProfile[]>,
   profilesOpenOrders: (email) =>
     ipcRenderer.invoke(IPC.profilesOpenOrders, email) as Promise<void>,
+  profilesOpenOrder: (email, orderId) =>
+    ipcRenderer.invoke(IPC.profilesOpenOrder, email, orderId) as Promise<void>,
   profilesReorder: (orderedEmails) =>
     ipcRenderer.invoke(IPC.profilesReorder, orderedEmails) as Promise<AmazonProfile[]>,
 
