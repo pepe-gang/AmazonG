@@ -1,7 +1,7 @@
 {
   "name": "amazong",
   "productName": "AmazonG",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Amazon automated checkout worker for BetterBG (rebuild on Playwright)",
   "private": true,
   "main": "out/main/index.js",
@@ -53,14 +53,26 @@
       {
         "from": "build-browsers",
         "to": "playwright-browsers",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {
       "category": "public.app-category.utilities",
       "target": [
-        { "target": "dmg", "arch": ["arm64"] },
-        { "target": "zip", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "artifactName": "${productName}-${arch}.${ext}",
       "hardenedRuntime": false,
@@ -73,8 +85,17 @@
     "dmg": {
       "sign": false,
       "contents": [
-        { "x": 130, "y": 220, "type": "file" },
-        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 220,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "publish": {

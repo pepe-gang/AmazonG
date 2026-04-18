@@ -264,6 +264,17 @@ a,
   font-weight: 600;
   font-size: 13px;
 }
+.brand-pill-version {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  margin-right: 4px;
+}
 
 .primary-action {
   display: inline-flex;
@@ -1154,21 +1165,39 @@ a,
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-muted);
-  padding: 10px 14px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--border);
   background: #f8fafc;
   position: sticky;
   top: 0;
   z-index: 1;
 }
+.jobs-table th.th-right { text-align: right; }
+.jobs-table th.th-center { text-align: center; }
+.jobs-table th.th-right .th-sort,
+.jobs-table th.th-center .th-sort { width: 100%; }
+.jobs-table th.th-right .th-sort { justify-content: flex-end; }
+.jobs-table th.th-center .th-sort { justify-content: center; }
 .jobs-table td {
-  padding: 12px 14px;
+  padding: 12px;
   border-bottom: 1px solid var(--border);
-  vertical-align: top;
+  vertical-align: middle;
 }
 .jobs-table tr:hover td {
   background: #f8fafc;
 }
+/* Right-align numeric columns so digits line up across rows. */
+.jobs-table .cell-qty,
+.jobs-table .cell-retail,
+.jobs-table .cell-payout,
+.jobs-table .cell-cb,
+.jobs-table .cell-profit { text-align: right; }
+.jobs-table .cell-qty { text-align: center; }
+/* Top-align cells that may have multiple lines (item title + chips,
+   account email + name, status + error) so they hang from the top. */
+.jobs-table .cell-item,
+.jobs-table .cell-account,
+.jobs-table .cell-status { vertical-align: top; }
 .cell-date {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -1205,6 +1234,17 @@ a,
   font-size: 12px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.cell-account-name {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
 }
 .cell-cost {
   font-weight: 600;
@@ -1224,6 +1264,14 @@ a,
   white-space: nowrap;
 }
 .cell-payout .muted { color: var(--text-subtle); font-weight: 400; }
+.cell-profit {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cell-profit .muted { color: var(--text-subtle); font-weight: 400; }
+.profit-good { color: var(--success); }
+.profit-bad { color: var(--danger); }
 .cell-qty {
   color: var(--text-subtle);
   font-variant-numeric: tabular-nums;
@@ -1255,6 +1303,41 @@ a,
 .cell-actions {
   white-space: nowrap;
   text-align: right;
+  position: relative;
+}
+.action-menu-wrap { position: relative; display: inline-block; }
+.action-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 160px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+  z-index: 50;
+}
+.action-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.action-menu-item:hover:not(:disabled) { background: #f1f5f9; }
+.action-menu-item:disabled { color: var(--text-subtle); cursor: not-allowed; }
+.action-menu-danger { color: var(--danger); }
+.action-menu-danger:hover:not(:disabled) { background: var(--danger-bg); }
+.action-menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
 }
 .cell-mono {
   font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
@@ -1464,6 +1547,28 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   cursor: pointer;
 }
 .headless-select:hover { border-color: var(--primary); }
+
+/* Self-update banner — appears at the top of every view when a newer
+   AmazonG release exists on GitHub. */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border-radius: 8px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e3a8a;
+  font-size: 13px;
+  box-shadow: var(--shadow-sm);
+}
+.update-banner-icon { font-size: 16px; }
+.update-banner-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
 
 /* Lock banner + overlay (Accounts view when worker is running) */
 .lock-banner {

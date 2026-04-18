@@ -161,6 +161,11 @@ function MainScreen({ status }: { status: RendererStatus }) {
   const [attempts, setAttempts] = useState<JobAttempt[]>([]);
   const [uptimeTick, setUptimeTick] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [appVersion, setAppVersion] = useState<string>('');
+
+  useEffect(() => {
+    void window.autog.appVersion().then(setAppVersion);
+  }, []);
 
   useEffect(() => {
     // Update the dashboard's "Jobs" stat card by listening to the same log
@@ -234,11 +239,12 @@ function MainScreen({ status }: { status: RendererStatus }) {
     <div className="app">
       <div className="toolbar">
         <div className="toolbar-left">
-          <div className="brand-pill">
+          <div className="brand-pill" title={appVersion ? `AmazonG ${appVersion}` : 'AmazonG'}>
             <div className="app-badge">
               <AppIcon />
             </div>
             <span className="brand-pill-label">AmazonG</span>
+            {appVersion && <span className="brand-pill-version">v{appVersion}</span>}
           </div>
 
           {view === 'dashboard' ? (
@@ -291,6 +297,7 @@ function MainScreen({ status }: { status: RendererStatus }) {
 
       <div className="content">
         {status.lastError && <div className="error-banner">{status.lastError}</div>}
+        <UpdateBanner />
 
         {view === 'dashboard' ? (
           <DashboardView
@@ -299,6 +306,7 @@ function MainScreen({ status }: { status: RendererStatus }) {
             uptimeLabel={uptimeLabel}
             lastJobLabel={lastJobLabel}
             attempts={attempts}
+            profiles={profiles}
             onViewLogs={(attempt) => setView({ kind: 'logs', attempt })}
           />
         ) : view === 'accounts' ? (
@@ -320,9 +328,10 @@ function DashboardView(props: {
   uptimeLabel: string;
   lastJobLabel: string;
   attempts: JobAttempt[];
+  profiles: AmazonProfile[];
   onViewLogs: (a: JobAttempt) => void;
 }) {
-  const { status, stats, uptimeLabel, lastJobLabel, attempts, onViewLogs } = props;
+  const { status, stats, uptimeLabel, lastJobLabel, attempts, profiles, onViewLogs } = props;
   return (
     <>
       <DryRunBanner />
@@ -380,7 +389,12 @@ function DashboardView(props: {
         />
       </div>
 
-      <JobsTable attempts={attempts} onViewLogs={onViewLogs} workerRunning={status.running} />
+      <JobsTable
+        attempts={attempts}
+        profiles={profiles}
+        onViewLogs={onViewLogs}
+        workerRunning={status.running}
+      />
     </>
   );
 }
@@ -388,18 +402,52 @@ function DashboardView(props: {
 /* ============================================================
    Jobs table
    ============================================================ */
-type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'payout' | 'cb' | 'status' | 'orderId';
+type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'payout' | 'cb' | 'profit' | 'status' | 'orderId';
+
+/**
+ * Per-row profit: BG pays us `payout` per unit, we pay Amazon `retail`,
+ * and Amazon refunds `cashbackPct` of retail. So per unit:
+ *   profit = payout - retail × (1 - cashback%)
+ * Multiplied by quantity (units we ordered).
+ *
+ * Only computes for verified ("Success") orders — that's the one status
+ * where we know:
+ *   - the buy actually placed (vs queued / in_progress / failed)
+ *   - Amazon didn't auto-cancel (vs awaiting_verification / cancelled)
+ *   - real money moved (vs dry_run_success)
+ * For every other status the cell shows "—" so we don't pretend to know
+ * profit for a row whose outcome isn't final.
+ */
+function computeProfit(a: JobAttempt): number | null {
+  if (a.status !== 'verified') return null;
+  const retail = typeof a.maxPrice === 'number' ? a.maxPrice : null;
+  const payout = typeof a.price === 'number' ? a.price : null;
+  const qty = typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : null;
+  const cb = typeof a.cashbackPct === 'number' ? a.cashbackPct : null;
+  if (retail === null || payout === null || qty === null || cb === null) return null;
+  const perUnit = payout - retail * (1 - cb / 100);
+  return perUnit * qty;
+}
 type SortDir = 'asc' | 'desc';
 
 function JobsTable({
   attempts,
+  profiles,
   onViewLogs,
   workerRunning,
 }: {
   attempts: JobAttempt[];
+  profiles: AmazonProfile[];
   onViewLogs: (a: JobAttempt) => void;
   workerRunning: boolean;
 }) {
+  // email → display name lookup, used to show the human label under the
+  // monospace email pill in the Amazon Account cell.
+  const accountLabelByEmail = useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const p of profiles) m.set(p.email.toLowerCase(), p.displayName);
+    return m;
+  }, [profiles]);
   const [sortKey, setSortKey] = useState<SortKey>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [statusFilter, setStatusFilter] = useState<JobAttemptStatus | 'all'>('all');
@@ -481,6 +529,14 @@ function JobsTable({
         }
         case 'qty':
           return (a.quantity ?? 0) - (b.quantity ?? 0);
+        case 'profit': {
+          const an = computeProfit(a);
+          const bn = computeProfit(b);
+          if (an === null && bn === null) return 0;
+          if (an === null) return 1;
+          if (bn === null) return -1;
+          return an - bn;
+        }
         case 'cb':
           return (a.cashbackPct ?? -1) - (b.cashbackPct ?? -1);
         case 'status':
@@ -616,10 +672,11 @@ function JobsTable({
                 <SortableTh label="Item" k="item" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                 <SortableTh label="Deal ID" k="dealId" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                 <SortableTh label="Amazon Account" k="account" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="Qty" k="qty" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="Retail" k="retail" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="Payout" k="payout" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="CB" k="cb" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Qty" k="qty" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="center" />
+                <SortableTh label="Retail" k="retail" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="right" />
+                <SortableTh label="Payout" k="payout" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="right" />
+                <SortableTh label="CB" k="cb" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="right" />
+                <SortableTh label="Profit" k="profit" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="right" />
                 <SortableTh label="Order ID" k="orderId" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                 <SortableTh label="Status" k="status" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                 <th></th>
@@ -670,6 +727,11 @@ function JobsTable({
                   </td>
                   <td className="cell-account">
                     <span className="account-pill">{a.amazonEmail}</span>
+                    {accountLabelByEmail.get(a.amazonEmail.toLowerCase()) && (
+                      <div className="cell-account-name">
+                        {accountLabelByEmail.get(a.amazonEmail.toLowerCase())}
+                      </div>
+                    )}
                   </td>
                   <td className="cell-qty">
                     {typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : <span className="muted">—</span>}
@@ -688,6 +750,21 @@ function JobsTable({
                     ) : (
                       '—'
                     )}
+                  </td>
+                  <td className="cell-profit">
+                    {(() => {
+                      const p = computeProfit(a);
+                      if (p === null) return <span className="muted">—</span>;
+                      const sign = p >= 0 ? '+' : '−';
+                      return (
+                        <span
+                          className={p >= 0 ? 'profit-good' : 'profit-bad'}
+                          title={`payout ${a.price} − retail ${a.maxPrice} × (1 − ${a.cashbackPct}% cb) × qty ${a.quantity}`}
+                        >
+                          {sign}${Math.abs(p).toFixed(2)}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className="cell-orderid">
                     {a.orderId ? (
@@ -711,9 +788,14 @@ function JobsTable({
                     {a.error && <div className="cell-error" title={a.error}>{a.error}</div>}
                   </td>
                   <td className="cell-actions">
-                    <button className="ghost-btn" onClick={() => onViewLogs(a)}>
-                      View Log →
-                    </button>
+                    <ActionMenu
+                      attempt={a}
+                      onViewLogs={() => onViewLogs(a)}
+                      onToast={(msg) => {
+                        setOrderToast(msg);
+                        setTimeout(() => setOrderToast(null), 5000);
+                      }}
+                    />
                   </td>
                 </tr>
               ))}
@@ -730,22 +812,207 @@ function JobsTable({
   );
 }
 
+function UpdateBanner() {
+  // Polls GitHub Releases on mount + every 6h. Renders nothing when
+  // already up-to-date or when the check failed (silently — failures are
+  // logged in main, no need to nag the user). On "available" we show a
+  // dismissible banner with a one-click Update button that triggers the
+  // self-update flow (download → swap → relaunch).
+  type S =
+    | { kind: 'idle' }
+    | { kind: 'available'; current: string; latest: string; downloadUrl: string }
+    | { kind: 'installing' }
+    | { kind: 'error'; message: string };
+  const [state, setState] = useState<S>({ kind: 'idle' });
+  const [dismissed, setDismissed] = useState(false);
+
+  const check = useCallback(async () => {
+    try {
+      const r = await window.autog.updateCheck();
+      if (r.kind === 'available') {
+        setState({
+          kind: 'available',
+          current: r.current,
+          latest: r.latest,
+          downloadUrl: r.downloadUrl,
+        });
+      } else {
+        setState({ kind: 'idle' });
+      }
+    } catch {
+      // swallow — main logs it
+    }
+  }, []);
+
+  useEffect(() => {
+    void check();
+    const t = setInterval(() => void check(), 6 * 60 * 60 * 1000);
+    return () => clearInterval(t);
+  }, [check]);
+
+  if (dismissed) return null;
+  if (state.kind === 'idle') return null;
+
+  const onUpdate = async () => {
+    if (state.kind !== 'available') return;
+    setState({ kind: 'installing' });
+    try {
+      await window.autog.updateApply(state.downloadUrl);
+      // App is about to quit; stay in installing UI.
+    } catch (err) {
+      setState({
+        kind: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <div className="update-banner" role="status">
+      {state.kind === 'available' && (
+        <>
+          <span className="update-banner-icon">⬆</span>
+          <span>
+            <b>AmazonG {state.latest}</b> is available (you have {state.current}).
+          </span>
+          <div className="update-banner-actions">
+            <button className="primary-action" onClick={() => void onUpdate()}>
+              Update &amp; Restart
+            </button>
+            <button className="ghost-btn" onClick={() => setDismissed(true)}>
+              Later
+            </button>
+          </div>
+        </>
+      )}
+      {state.kind === 'installing' && (
+        <>
+          <span className="update-banner-icon">⬇</span>
+          <span>
+            Downloading update… AmazonG will quit and relaunch automatically when ready (~30 seconds).
+          </span>
+        </>
+      )}
+      {state.kind === 'error' && (
+        <>
+          <span className="update-banner-icon">⚠</span>
+          <span>Update failed: {state.message}</span>
+          <div className="update-banner-actions">
+            <button className="ghost-btn" onClick={() => setDismissed(true)}>
+              Dismiss
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ActionMenu({
+  attempt,
+  onViewLogs,
+  onToast,
+}: {
+  attempt: JobAttempt;
+  onViewLogs: () => void;
+  onToast: (msg: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<'verify' | 'delete' | null>(null);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const doVerify = async () => {
+    setOpen(false);
+    if (!attempt.orderId) {
+      onToast('No order id on this row — nothing to verify.');
+      return;
+    }
+    setBusy('verify');
+    try {
+      const r = await window.autog.jobsVerifyOrder(attempt.attemptId);
+      if (r.kind === 'active') onToast(`✓ Order ${r.orderId} is still active.`);
+      else if (r.kind === 'cancelled') onToast(`✗ Order ${r.orderId} was cancelled by Amazon.`);
+      else if (r.kind === 'timeout') onToast(`Verify timed out for ${r.orderId}. Try again.`);
+      else if (r.kind === 'busy') onToast(r.message);
+      else if (r.kind === 'error') onToast(`Verify failed: ${r.message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doDelete = async () => {
+    setOpen(false);
+    if (!confirm(`Delete this row? Logs for this attempt will also be deleted.`)) return;
+    setBusy('delete');
+    try {
+      await window.autog.jobsDelete(attempt.attemptId);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="action-menu-wrap" ref={ref}>
+      <button
+        className="ghost-btn"
+        onClick={() => setOpen((o) => !o)}
+        disabled={busy !== null}
+        title="Row actions"
+      >
+        {busy === 'verify' ? 'Verifying…' : busy === 'delete' ? 'Deleting…' : 'Action ▾'}
+      </button>
+      {open && (
+        <div className="action-menu">
+          <button className="action-menu-item" onClick={() => { setOpen(false); onViewLogs(); }}>
+            View Log
+          </button>
+          <button
+            className="action-menu-item"
+            onClick={() => void doVerify()}
+            disabled={!attempt.orderId}
+            title={attempt.orderId ? 'Re-check Amazon order status' : 'No order id to verify'}
+          >
+            Verify Order
+          </button>
+          <div className="action-menu-sep" />
+          <button className="action-menu-item action-menu-danger" onClick={() => void doDelete()}>
+            Delete
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SortableTh({
   label,
   k,
   sortKey,
   sortDir,
   onSort,
+  align,
 }: {
   label: string;
   k: SortKey;
   sortKey: SortKey;
   sortDir: SortDir;
   onSort: (k: SortKey) => void;
+  align?: 'right' | 'center';
 }) {
   const active = sortKey === k;
   return (
-    <th>
+    <th className={align ? `th-${align}` : undefined}>
       <button
         type="button"
         className={`th-sort ${active ? 'active' : ''}`}

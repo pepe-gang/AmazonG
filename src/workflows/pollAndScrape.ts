@@ -237,11 +237,14 @@ async function handleJob(
 
   // Determine overall status reported to BG. Dry-run never reports as
   // completed (BG would schedule a verify phase for an order that wasn't
-  // actually placed). Real completions take priority.
-  let overallStatus: 'completed' | 'partial' | 'failed';
+  // actually placed). Real completions report as 'awaiting_verification'
+  // — the verify-phase job (~10 min later) flips them to 'completed'
+  // once Amazon confirms the order is still active. This matches the
+  // AmazonG Jobs-table label "Waiting for Verification".
+  let overallStatus: 'awaiting_verification' | 'partial' | 'failed';
   let parentError: string | null = null;
   if (successes.length > 0) {
-    overallStatus = failures.length === 0 ? 'completed' : 'partial';
+    overallStatus = failures.length === 0 ? 'awaiting_verification' : 'partial';
   } else if (dryRunPasses.length > 0) {
     // All dry-run successes (no live orders) — BG status is 'failed' (no
     // real order to verify), but the message clearly marks it as a
@@ -256,14 +259,16 @@ async function handleJob(
     parentError = failures[0]?.error ?? 'all profiles failed';
   }
 
-  // Per-profile purchase rows for BG. Only LIVE successes count as
-  // 'completed' in the purchases array — dry-runs report as failed there.
+  // Per-profile purchase rows for BG. Live successes report as
+  // 'awaiting_verification' (mirroring the parent + AmazonG's Jobs-table
+  // label); the verify-phase job will flip them to 'completed' or
+  // 'cancelled' later. Dry-runs always report as failed (no real order).
   const purchases = results.map((r) => ({
     amazonEmail: r.email,
     status: r.dryRun
       ? ('failed' as const)
       : r.status === 'completed'
-        ? ('completed' as const)
+        ? ('awaiting_verification' as const)
         : ('failed' as const),
     orderId: r.orderId,
     placedPrice: r.placedPrice,

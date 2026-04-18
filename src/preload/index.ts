@@ -48,6 +48,16 @@ const bridge: AutoGBridge = {
   jobsClearAll: () => ipcRenderer.invoke(IPC.jobsClearAll) as Promise<void>,
   jobsClearFailed: () => ipcRenderer.invoke(IPC.jobsClearFailed) as Promise<number>,
   jobsClearCanceled: () => ipcRenderer.invoke(IPC.jobsClearCanceled) as Promise<number>,
+  jobsDelete: (attemptId) => ipcRenderer.invoke(IPC.jobsDelete, attemptId) as Promise<void>,
+  jobsVerifyOrder: (attemptId) =>
+    ipcRenderer.invoke(IPC.jobsVerifyOrder, attemptId) as ReturnType<
+      AutoGBridge['jobsVerifyOrder']
+    >,
+
+  updateCheck: () => ipcRenderer.invoke(IPC.updateCheck) as ReturnType<AutoGBridge['updateCheck']>,
+  updateApply: (downloadUrl) =>
+    ipcRenderer.invoke(IPC.updateApply, downloadUrl) as Promise<void>,
+  appVersion: () => ipcRenderer.invoke(IPC.appVersion) as Promise<string>,
 
   onLog(cb) {
     const listener = (_: unknown, ev: LogEvent) => cb(ev);

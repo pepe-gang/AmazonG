@@ -6,6 +6,11 @@ import type {
   RendererStatus,
 } from './types.js';
 
+export type UpdateCheckResult =
+  | { kind: 'up_to_date'; current: string }
+  | { kind: 'available'; current: string; latest: string; downloadUrl: string }
+  | { kind: 'error'; message: string };
+
 export const IPC = {
   identityGet: 'identity:get',
   identityConnect: 'identity:connect',
@@ -34,6 +39,12 @@ export const IPC = {
   jobsClearAll: 'jobs:clear-all',
   jobsClearFailed: 'jobs:clear-failed',
   jobsClearCanceled: 'jobs:clear-canceled',
+  jobsDelete: 'jobs:delete',
+  jobsVerifyOrder: 'jobs:verify-order',
+
+  updateCheck: 'update:check',
+  updateApply: 'update:apply',
+  appVersion: 'app:version',
 
   evtLog: 'evt:log',
   evtStatus: 'evt:status',
@@ -82,6 +93,15 @@ export type AutoGBridge = {
   jobsClearAll(): Promise<void>;
   jobsClearFailed(): Promise<number>;
   jobsClearCanceled(): Promise<number>;
+  jobsDelete(attemptId: string): Promise<void>;
+  jobsVerifyOrder(attemptId: string): Promise<
+    | { kind: 'active' | 'cancelled' | 'timeout'; orderId: string }
+    | { kind: 'error' | 'busy'; message: string }
+  >;
+
+  updateCheck(): Promise<UpdateCheckResult>;
+  updateApply(downloadUrl: string): Promise<void>;
+  appVersion(): Promise<string>;
   onLog(cb: (ev: LogEvent) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;

@@ -11,11 +11,14 @@ import {
   clearCanceled as storeClearCanceled,
   clearFailed as storeClearFailed,
   createAttempt as storeCreateAttempt,
+  deleteAttempt as storeDeleteAttempt,
   listAttempts as storeListAttempts,
   pruneOlderThan,
   readLogs as storeReadLogs,
   updateAttempt as storeUpdateAttempt,
 } from './jobStore.js';
+import { verifyOrder } from '../actions/verifyOrder.js';
+import { applyUpdate, checkForUpdates } from './updater.js';
 import { makeAttemptId } from '../shared/sanitize.js';
 import type { JobAttempt, JobAttemptStatus } from '../shared/types.js';
 import { BGApiError } from '../shared/errors.js';
@@ -407,6 +410,81 @@ function registerIpcHandlers(): void {
     if (removed > 0) scheduleBroadcastJobs();
     return removed;
   });
+
+  ipcMain.handle(IPC.jobsDelete, async (_e, attemptId: string) => {
+    await storeDeleteAttempt(attemptId);
+    scheduleBroadcastJobs();
+  });
+
+  ipcMain.handle(
+    IPC.jobsVerifyOrder,
+    async (_e, attemptId: string) => {
+      // Look up the attempt → resolve email + orderId → run verifyOrder in
+      // a fresh headless session. If the worker is running and holding the
+      // profile's userDataDir lock, return 'busy' so the renderer toasts a
+      // clear "stop the worker" message instead of throwing a raw lock
+      // error.
+      const list = await storeListAttempts();
+      const a = list.find((x) => x.attemptId === attemptId);
+      if (!a) return { kind: 'error' as const, message: 'attempt not found' };
+      if (!a.orderId) return { kind: 'error' as const, message: 'no order id on this row' };
+      const email = a.amazonEmail;
+      const orderId = a.orderId;
+
+      let session: DriverSession | null = null;
+      try {
+        session = await openSession(email, {
+          userDataRoot: profileDir(),
+          headless: true,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/ProcessSingleton|profile is already in use|SingletonLock/i.test(msg)) {
+          return {
+            kind: 'busy' as const,
+            message: `${email} is being used by the running worker. Stop the worker and try again.`,
+          };
+        }
+        return { kind: 'error' as const, message: msg };
+      }
+
+      try {
+        const pages = session.context.pages();
+        const page = pages[0] ?? (await session.newPage());
+        const outcome = await verifyOrder(page, orderId);
+
+        if (outcome.kind === 'active') {
+          await storeUpdateAttempt(attemptId, { status: 'verified', error: null });
+          scheduleBroadcastJobs();
+          return { kind: 'active' as const, orderId };
+        }
+        if (outcome.kind === 'cancelled') {
+          await storeUpdateAttempt(attemptId, {
+            status: 'cancelled_by_amazon',
+            error: 'order was cancelled by Amazon',
+          });
+          scheduleBroadcastJobs();
+          return { kind: 'cancelled' as const, orderId };
+        }
+        if (outcome.kind === 'error') {
+          return { kind: 'error' as const, message: outcome.message };
+        }
+        return { kind: 'timeout' as const, orderId };
+      } finally {
+        try {
+          await session.close();
+        } catch {
+          // already closed
+        }
+      }
+    },
+  );
+
+  ipcMain.handle(IPC.updateCheck, () => checkForUpdates());
+  ipcMain.handle(IPC.updateApply, async (_e, downloadUrl: string) => {
+    await applyUpdate(downloadUrl);
+  });
+  ipcMain.handle(IPC.appVersion, () => app.getVersion());
 
   async function openOrderPageInProfile(email: string, url: string): Promise<void> {
     // If the worker is currently running AND has a live session for this

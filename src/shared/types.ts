@@ -76,7 +76,7 @@ export type ProductInfo = {
 
 /** Payload shape accepted by POST /api/autog/jobs/[id]/status */
 export type JobStatusReport = {
-  status: 'in_progress' | 'completed' | 'completed_with_filler_items' | 'partial' | 'failed' | 'cancelled';
+  status: 'in_progress' | 'awaiting_verification' | 'completed' | 'completed_with_filler_items' | 'partial' | 'failed' | 'cancelled';
   error?: string | null;
   placedAt?: string | null;
   placedQuantity?: number | null;
@@ -86,7 +86,7 @@ export type JobStatusReport = {
   placedOrderId?: string | null;
   purchases?: {
     amazonEmail: string;
-    status: 'queued' | 'in_progress' | 'completed' | 'completed_with_filler_items' | 'failed' | 'cancelled';
+    status: 'queued' | 'in_progress' | 'awaiting_verification' | 'completed' | 'completed_with_filler_items' | 'failed' | 'cancelled';
     purchasedCount?: number;
     orderId?: string | null;
     error?: string | null;
