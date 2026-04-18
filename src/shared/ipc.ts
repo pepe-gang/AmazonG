@@ -30,6 +30,8 @@ export const IPC = {
   jobsList: 'jobs:list',
   jobsLogs: 'jobs:logs',
   jobsClearAll: 'jobs:clear-all',
+  jobsClearFailed: 'jobs:clear-failed',
+  jobsClearCanceled: 'jobs:clear-canceled',
 
   evtLog: 'evt:log',
   evtStatus: 'evt:status',
@@ -74,6 +76,8 @@ export type AutoGBridge = {
   jobsList(): Promise<JobAttempt[]>;
   jobsLogs(attemptId: string): Promise<LogEvent[]>;
   jobsClearAll(): Promise<void>;
+  jobsClearFailed(): Promise<number>;
+  jobsClearCanceled(): Promise<number>;
   onLog(cb: (ev: LogEvent) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;

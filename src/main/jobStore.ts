@@ -38,11 +38,36 @@ async function load(): Promise<Stored> {
   try {
     const raw = await readFile(attemptsPath(), 'utf8');
     cache = JSON.parse(raw) as Stored;
+    migrateLegacyStatuses(cache);
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     cache = { attempts: {} };
   }
   return cache;
+}
+
+/**
+ * Older builds wrote verify-phase outcomes as their own attempt rows with
+ * status='failed' and error='order was cancelled by Amazon'. The current
+ * worker no longer creates verify rows (it updates the buy row in place),
+ * but those legacy rows are still on disk. Re-tag them to the proper
+ * 'cancelled_by_amazon' status so the table renders them as "Canceled"
+ * instead of "Failed".
+ */
+function migrateLegacyStatuses(store: Stored): void {
+  let touched = false;
+  for (const a of Object.values(store.attempts)) {
+    if (
+      a.phase === 'verify' &&
+      a.status === 'failed' &&
+      typeof a.error === 'string' &&
+      /cancell?ed by amazon/i.test(a.error)
+    ) {
+      a.status = 'cancelled_by_amazon';
+      touched = true;
+    }
+  }
+  if (touched) scheduleSave();
 }
 
 async function persist(): Promise<void> {
@@ -181,6 +206,32 @@ export async function clearAll(): Promise<void> {
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+}
+
+/** Drop every attempt with status 'failed' and unlink its JSONL log. */
+export async function clearFailed(): Promise<number> {
+  return clearByStatus((s) => s === 'failed');
+}
+
+/** Drop every attempt that Amazon cancelled (post-verify). */
+export async function clearCanceled(): Promise<number> {
+  return clearByStatus((s) => s === 'cancelled_by_amazon');
+}
+
+async function clearByStatus(
+  matcher: (s: JobAttempt['status']) => boolean,
+): Promise<number> {
+  const store = await load();
+  let removed = 0;
+  for (const [id, a] of Object.entries(store.attempts)) {
+    if (matcher(a.status)) {
+      delete store.attempts[id];
+      removed += 1;
+      void unlink(logFile(id)).catch(() => undefined);
+    }
+  }
+  if (removed > 0) scheduleSave();
+  return removed;
 }
 
 export async function listLogFiles(): Promise<string[]> {

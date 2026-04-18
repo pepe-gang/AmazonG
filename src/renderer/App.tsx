@@ -388,7 +388,7 @@ function DashboardView(props: {
 /* ============================================================
    Jobs table
    ============================================================ */
-type SortKey = 'date' | 'item' | 'account' | 'cost' | 'cb' | 'status';
+type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'payout' | 'cb' | 'status' | 'orderId';
 type SortDir = 'asc' | 'desc';
 
 function JobsTable({
@@ -410,13 +410,22 @@ function JobsTable({
     return Array.from(new Set(attempts.map((a) => a.amazonEmail))).sort();
   }, [attempts]);
 
+  const failedCount = useMemo(
+    () => attempts.reduce((n, a) => (a.status === 'failed' ? n + 1 : n), 0),
+    [attempts],
+  );
+  const canceledCount = useMemo(
+    () => attempts.reduce((n, a) => (a.status === 'cancelled_by_amazon' ? n + 1 : n), 0),
+    [attempts],
+  );
+
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = attempts.filter((a) => {
       if (statusFilter !== 'all' && a.status !== statusFilter) return false;
       if (accountFilter !== 'all' && a.amazonEmail !== accountFilter) return false;
       if (q.length > 0) {
-        const hay = `${a.dealTitle ?? ''} ${a.amazonEmail} ${a.dealKey ?? ''} ${a.orderId ?? ''}`.toLowerCase();
+        const hay = `${a.dealTitle ?? ''} ${a.amazonEmail} ${a.dealId ?? ''} ${a.dealKey ?? ''} ${a.orderId ?? ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -427,20 +436,34 @@ function JobsTable({
           return a.createdAt.localeCompare(b.createdAt);
         case 'item':
           return (a.dealTitle ?? '').localeCompare(b.dealTitle ?? '');
+        case 'dealId':
+          return (a.dealId ?? a.dealKey ?? '').localeCompare(b.dealId ?? b.dealKey ?? '');
         case 'account':
           return a.amazonEmail.localeCompare(b.amazonEmail);
-        case 'cost': {
-          const an = parsePrice(a.cost);
-          const bn = parsePrice(b.cost);
+        case 'retail': {
+          const an = typeof a.maxPrice === 'number' ? a.maxPrice : null;
+          const bn = typeof b.maxPrice === 'number' ? b.maxPrice : null;
           if (an === null && bn === null) return 0;
           if (an === null) return 1;
           if (bn === null) return -1;
           return an - bn;
         }
+        case 'payout': {
+          const an = typeof a.price === 'number' ? a.price : null;
+          const bn = typeof b.price === 'number' ? b.price : null;
+          if (an === null && bn === null) return 0;
+          if (an === null) return 1;
+          if (bn === null) return -1;
+          return an - bn;
+        }
+        case 'qty':
+          return (a.quantity ?? 0) - (b.quantity ?? 0);
         case 'cb':
           return (a.cashbackPct ?? -1) - (b.cashbackPct ?? -1);
         case 'status':
           return a.status.localeCompare(b.status);
+        case 'orderId':
+          return (a.orderId ?? '').localeCompare(b.orderId ?? '');
       }
     };
     filtered.sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
@@ -472,6 +495,32 @@ function JobsTable({
           <div className="jobs-count">
             {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
           </div>
+          {failedCount > 0 && (
+            <button
+              className="ghost-btn"
+              title="Delete every row whose status is Failed (keeps successful + in-flight rows)"
+              onClick={() => {
+                if (confirm(`Delete ${failedCount} failed row${failedCount === 1 ? '' : 's'} and their logs?`)) {
+                  void window.autog.jobsClearFailed();
+                }
+              }}
+            >
+              Clear Failed
+            </button>
+          )}
+          {canceledCount > 0 && (
+            <button
+              className="ghost-btn"
+              title="Delete every row whose order was Canceled by Amazon"
+              onClick={() => {
+                if (confirm(`Delete ${canceledCount} canceled row${canceledCount === 1 ? '' : 's'} and their logs?`)) {
+                  void window.autog.jobsClearCanceled();
+                }
+              }}
+            >
+              Clear Canceled
+            </button>
+          )}
           {attempts.length > 0 && (
             <button
               className="ghost-btn danger-text"
@@ -504,7 +553,10 @@ function JobsTable({
             <option value="all">All statuses</option>
             <option value="queued">Queued</option>
             <option value="in_progress">Running</option>
-            <option value="completed">Placed</option>
+            <option value="awaiting_verification">Waiting for Verification</option>
+            <option value="verified">Success</option>
+            <option value="cancelled_by_amazon">Canceled</option>
+            <option value="completed">Done</option>
             <option value="dry_run_success">Dry-run OK</option>
             <option value="failed">Failed</option>
           </select>
@@ -539,9 +591,13 @@ function JobsTable({
               <tr>
                 <SortableTh label="Date" k="date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                 <SortableTh label="Item" k="item" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Deal ID" k="dealId" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                 <SortableTh label="Amazon Account" k="account" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="Cost" k="cost" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Qty" k="qty" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Retail" k="retail" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Payout" k="payout" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                 <SortableTh label="CB" k="cb" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Order ID" k="orderId" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                 <SortableTh label="Status" k="status" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                 <th></th>
               </tr>
@@ -554,7 +610,21 @@ function JobsTable({
                     <div className="cell-date-time">{formatTime(a.createdAt)}</div>
                   </td>
                   <td className="cell-item">
-                    <div className="cell-item-title">{a.dealTitle ?? '(untitled)'}</div>
+                    {a.productUrl ? (
+                      <a
+                        href="#"
+                        className="cell-item-title item-link"
+                        title="Open this product on Amazon"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void window.autog.openExternal(a.productUrl);
+                        }}
+                      >
+                        {a.dealTitle ?? '(untitled)'}
+                      </a>
+                    ) : (
+                      <div className="cell-item-title">{a.dealTitle ?? '(untitled)'}</div>
+                    )}
                     {(a.phase === 'verify' || a.dryRun) && (
                       <div className="cell-item-sub">
                         {a.phase === 'verify' ? <span className="chip chip-purple">VERIFY</span> : null}
@@ -562,10 +632,31 @@ function JobsTable({
                       </div>
                     )}
                   </td>
+                  <td className="cell-dealid">
+                    {a.dealId ? (
+                      <span className="dealid-text" title={a.dealKey ?? a.dealId}>
+                        {a.dealId}
+                      </span>
+                    ) : a.dealKey ? (
+                      <span className="dealid-text" title={a.dealKey}>
+                        {a.dealKey.slice(0, 8)}
+                      </span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
                   <td className="cell-account">
                     <span className="account-pill">{a.amazonEmail}</span>
                   </td>
-                  <td className="cell-cost">{a.cost ?? '—'}</td>
+                  <td className="cell-qty">
+                    {typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : <span className="muted">—</span>}
+                  </td>
+                  <td className="cell-retail">
+                    {typeof a.maxPrice === 'number' ? `$${a.maxPrice.toFixed(2)}` : <span className="muted">—</span>}
+                  </td>
+                  <td className="cell-payout">
+                    {typeof a.price === 'number' ? `$${a.price.toFixed(2)}` : <span className="muted">—</span>}
+                  </td>
                   <td className="cell-cb">
                     {a.cashbackPct !== null ? (
                       <span className={a.cashbackPct >= 6 ? 'cb-good' : 'cb-low'}>
@@ -573,6 +664,25 @@ function JobsTable({
                       </span>
                     ) : (
                       '—'
+                    )}
+                  </td>
+                  <td className="cell-orderid">
+                    {a.orderId ? (
+                      <a
+                        href="#"
+                        className="orderid-link"
+                        title="Open this order on Amazon"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void window.autog.openExternal(
+                            `https://www.amazon.com/gp/your-account/order-details?orderID=${encodeURIComponent(a.orderId!)}`,
+                          );
+                        }}
+                      >
+                        {a.orderId}
+                      </a>
+                    ) : (
+                      <span className="muted">—</span>
                     )}
                   </td>
                   <td className="cell-status">
@@ -626,7 +736,10 @@ function StatusBadge({ status }: { status: JobAttemptStatus }) {
   const map: Record<JobAttemptStatus, { label: string; cls: string }> = {
     queued: { label: 'Queued', cls: 'badge-gray' },
     in_progress: { label: 'Running', cls: 'badge-blue' },
-    completed: { label: 'Placed', cls: 'badge-green' },
+    awaiting_verification: { label: 'Waiting for Verification', cls: 'badge-amber' },
+    verified: { label: 'Success', cls: 'badge-green' },
+    cancelled_by_amazon: { label: 'Canceled', cls: 'badge-red' },
+    completed: { label: 'Done', cls: 'badge-green' },
     failed: { label: 'Failed', cls: 'badge-red' },
     dry_run_success: { label: 'Dry-run OK', cls: 'badge-blue' },
   };
@@ -1354,7 +1467,11 @@ function applyLogsToStats(prev: Stats, batch: LogEvent[]): Stats {
     if (ev.message === 'job.claim') {
       const jobId = typeof ev.data?.jobId === 'string' ? ev.data.jobId : null;
       next = { ...next, claimed: next.claimed + 1, lastJobId: jobId ?? next.lastJobId };
-    } else if (ev.message === 'job.profile.placed' || ev.message === 'job.profile.dryrun.success') {
+    } else if (
+      ev.message === 'job.profile.placed' ||
+      ev.message === 'job.profile.dryrun.success' ||
+      ev.message === 'job.verify.active'
+    ) {
       next = {
         ...next,
         completed: next.completed + 1,

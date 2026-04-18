@@ -8,6 +8,8 @@ import { addLogSink, logger } from '../shared/logger.js';
 import {
   appendLog as storeAppendLog,
   clearAll as storeClearAll,
+  clearCanceled as storeClearCanceled,
+  clearFailed as storeClearFailed,
   createAttempt as storeCreateAttempt,
   listAttempts as storeListAttempts,
   pruneOlderThan,
@@ -224,6 +226,7 @@ function registerIpcHandlers(): void {
     worker = startWorker({
       bg,
       userDataRoot: profileDir(),
+      debugDir: join(app.getPath('userData'), 'debug-screenshots'),
       headless: settings.headless,
       buyDryRun: settings.buyDryRun,
       minCashbackPct: settings.minCashbackPct,
@@ -326,6 +329,16 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC.jobsClearAll, async () => {
     await storeClearAll();
     scheduleBroadcastJobs();
+  });
+  ipcMain.handle(IPC.jobsClearFailed, async () => {
+    const removed = await storeClearFailed();
+    if (removed > 0) scheduleBroadcastJobs();
+    return removed;
+  });
+  ipcMain.handle(IPC.jobsClearCanceled, async () => {
+    const removed = await storeClearCanceled();
+    if (removed > 0) scheduleBroadcastJobs();
+    return removed;
   });
 
   ipcMain.handle(IPC.profilesOpenOrders, async (_e, email: string) => {

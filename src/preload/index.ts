@@ -42,6 +42,8 @@ const bridge: AutoGBridge = {
   jobsLogs: (attemptId) =>
     ipcRenderer.invoke(IPC.jobsLogs, attemptId) as Promise<LogEvent[]>,
   jobsClearAll: () => ipcRenderer.invoke(IPC.jobsClearAll) as Promise<void>,
+  jobsClearFailed: () => ipcRenderer.invoke(IPC.jobsClearFailed) as Promise<number>,
+  jobsClearCanceled: () => ipcRenderer.invoke(IPC.jobsClearCanceled) as Promise<number>,
 
   onLog(cb) {
     const listener = (_: unknown, ev: LogEvent) => cb(ev);

@@ -3,8 +3,12 @@ export type AutoGJob = {
   phase: 'buy' | 'verify';
   dealTitle: string | null;
   dealKey: string | null;
+  /** Human-readable BG deal id (e.g. "DL-04260029"). Joined server-side. */
+  dealId: string | null;
   productUrl: string;
   maxPrice: number | null;
+  /** BG's current deal price (what the user gets paid — "Payout" column). */
+  price: number | null;
   quantity: number;
   commitmentId: string | null;
   attempts: number;
@@ -125,6 +129,17 @@ export type RendererStatus = {
 export type JobAttemptStatus =
   | 'queued'
   | 'in_progress'
+  /** Buy succeeded; waiting for the verify-phase job (~10 min later) to
+   *  confirm Amazon didn't silently auto-cancel the order. */
+  | 'awaiting_verification'
+  /** Verify-phase confirmed the order is still active in Amazon's order
+   *  history — final happy outcome for a buy attempt. */
+  | 'verified'
+  /** Verify-phase found the order was cancelled by Amazon after we placed
+   *  it (auto-cancel, fraud filter, stock change). */
+  | 'cancelled_by_amazon'
+  /** Used by verify-phase rows themselves (the row that ran the check)
+   *  and by legacy buy attempts pre-verify-phase. */
   | 'completed'
   | 'failed'
   | 'dry_run_success';
@@ -135,8 +150,16 @@ export type JobAttempt = {
   amazonEmail: string;
   phase: 'buy' | 'verify';
   dealKey: string | null;
+  /** Human-readable BG deal id (e.g. "DL-04260029"). Displayed in the Jobs table. */
+  dealId: string | null;
   dealTitle: string | null;
   productUrl: string;
+  /** BG-specified retail / max-pay cap for this deal (null when BG didn't set one). */
+  maxPrice: number | null;
+  /** BG's current deal price (what the user gets paid — "Payout" column). */
+  price: number | null;
+  /** Target quantity BG asked us to check out. */
+  quantity: number | null;
   cost: string | null;
   cashbackPct: number | null;
   orderId: string | null;

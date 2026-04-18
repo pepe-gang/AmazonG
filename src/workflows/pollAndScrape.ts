@@ -5,6 +5,7 @@ import type { DriverSession } from '../browser/driver.js';
 import { openSession } from '../browser/driver.js';
 import { scrapeProduct } from '../actions/scrapeProduct.js';
 import { buyNow } from '../actions/buyNow.js';
+import { verifyOrder } from '../actions/verifyOrder.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
 import { logger } from '../shared/logger.js';
 import { makeAttemptId } from '../shared/sanitize.js';
@@ -29,6 +30,8 @@ export type JobAttemptStore = {
 type Deps = {
   bg: BGClient;
   userDataRoot: string;
+  /** Where buyNow drops debug screenshots when checkout silently fails. */
+  debugDir: string;
   headless: boolean;
   buyDryRun: boolean;
   minCashbackPct: number;
@@ -128,6 +131,10 @@ async function handleJob(
   cid: string,
   eligible: AmazonProfile[],
 ): Promise<void> {
+  if (job.phase === 'verify') {
+    await handleVerifyJob(deps, sessions, job, cid, eligible);
+    return;
+  }
   // Caller (worker loop) already enforces the eligibility gate, so we
   // trust `eligible` is non-empty here.
   logger.info(
@@ -150,8 +157,12 @@ async function handleJob(
         amazonEmail: p.email,
         phase: job.phase,
         dealKey: job.dealKey,
+        dealId: job.dealId,
         dealTitle: job.dealTitle,
         productUrl: job.productUrl,
+        maxPrice: job.maxPrice,
+        price: job.price,
+        quantity: job.quantity,
         cost: null,
         cashbackPct: null,
         orderId: null,
@@ -255,6 +266,204 @@ async function handleJob(
   }
 }
 
+/**
+ * Verify-phase job: BG sends these ~10min after a successful buy to check
+ * whether Amazon cancelled the order. We don't fan out — only the profile
+ * that placed the order can see it in their account history.
+ *
+ * The verify run does NOT create its own row in the Jobs table. It updates
+ * the original buy attempt row in place (matched by buyJobId + placedEmail)
+ * so the user sees a single lifecycle: queued → running → awaiting_verification
+ * → verified | cancelled_by_amazon.
+ *
+ * Outcome → BG status:
+ *   active     → 'completed' (verifies the buy stays placed)
+ *   cancelled  → 'cancelled' (BG flips the original buy purchase row)
+ *   timeout    → 'failed'    (BG keeps retrying / leaves as-is)
+ */
+async function handleVerifyJob(
+  deps: Deps,
+  sessions: Map<string, DriverSession>,
+  job: AutoGJob,
+  cid: string,
+  eligible: AmazonProfile[],
+): Promise<void> {
+  const targetEmail = job.placedEmail;
+  const targetOrderId = job.placedOrderId;
+  if (!targetEmail || !targetOrderId) {
+    const error = `verify: missing placedEmail (${targetEmail ?? 'null'}) or placedOrderId (${targetOrderId ?? 'null'}) on the job`;
+    logger.error('job.verify.invalid', { jobId: job.id, error }, cid);
+    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+    return;
+  }
+
+  const profile = eligible.find((p) => p.email.toLowerCase() === targetEmail.toLowerCase());
+  if (!profile) {
+    const error = `verify: profile "${targetEmail}" not enabled or not signed in — cannot read its order history`;
+    logger.error('job.verify.profile_missing', { jobId: job.id, targetEmail }, cid);
+    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+    return;
+  }
+
+  // The buy attempt row we'll be updating in lockstep with the verify
+  // outcome. If buyJobId is missing (legacy/orphan verify), there's no
+  // row to roll forward — we still run verify and report to BG, just
+  // without table-side reflection.
+  const buyAttemptId = job.buyJobId
+    ? makeAttemptId(job.buyJobId, profile.email)
+    : null;
+
+  logger.info(
+    'job.verify.start',
+    { jobId: job.id, profile: profile.email, orderId: targetOrderId, viaFiller: job.viaFiller },
+    cid,
+  );
+
+  try {
+    const session = await getSession(deps, sessions, profile.email);
+    const existing = session.context.pages();
+    const page = existing[0] ?? (await session.newPage());
+    const outcome = await verifyOrder(page, targetOrderId);
+
+    if (outcome.kind === 'active') {
+      logger.info(
+        'job.verify.active',
+        {
+          jobId: job.id,
+          profile: profile.email,
+          orderId: targetOrderId,
+          viaFiller: job.viaFiller,
+          message: `✓ Order ${targetOrderId} is still active on ${profile.email}`,
+        },
+        cid,
+      );
+      if (buyAttemptId) {
+        await deps.jobAttempts
+          .update(buyAttemptId, { status: 'verified', error: null })
+          .catch(() => undefined);
+      }
+      await reportSafe(
+        deps,
+        job.id,
+        {
+          status: 'completed',
+          placedOrderId: targetOrderId,
+          placedEmail: profile.email,
+        },
+        cid,
+      );
+      // NOTE: viaFiller orders should run cancelFillerItems here (remove
+      // the 10 padding items so only the target ASIN ships). Not yet
+      // implemented — for now we report active and leave fillers in the
+      // order. BG flags `viaFiller` so they can manually cancel for now.
+      if (job.viaFiller) {
+        logger.warn(
+          'job.verify.filler.skipped',
+          {
+            jobId: job.id,
+            profile: profile.email,
+            orderId: targetOrderId,
+            note: 'cancelFillerItems not yet implemented in AmazonG — fillers remain in this order',
+          },
+          cid,
+        );
+      }
+      return;
+    }
+
+    if (outcome.kind === 'cancelled') {
+      logger.warn(
+        'job.verify.cancelled',
+        {
+          jobId: job.id,
+          profile: profile.email,
+          orderId: targetOrderId,
+          message: `✗ Order ${targetOrderId} was cancelled by Amazon`,
+        },
+        cid,
+      );
+      if (buyAttemptId) {
+        await deps.jobAttempts
+          .update(buyAttemptId, {
+            status: 'cancelled_by_amazon',
+            error: 'order was cancelled by Amazon',
+          })
+          .catch(() => undefined);
+      }
+      await reportSafe(
+        deps,
+        job.id,
+        {
+          status: 'cancelled',
+          error: 'order was cancelled by Amazon',
+          placedOrderId: targetOrderId,
+          placedEmail: profile.email,
+        },
+        cid,
+      );
+      // NOTE: rebuyOnCancel + buyWithFillerItems flow not yet implemented.
+      // BG will reflect the cancellation; nothing else to do here for now.
+      return;
+    }
+
+    if (outcome.kind === 'error') {
+      const error = `verify: unexpected order-details error — ${outcome.message}`;
+      logger.error(
+        'job.verify.error',
+        { jobId: job.id, profile: profile.email, orderId: targetOrderId, amazonMessage: outcome.message },
+        cid,
+      );
+      await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+      return;
+    }
+
+    // timeout — leave the buy row in 'awaiting_verification' so BG's next
+    // verify retry can resolve it. Don't mark the buy row failed: we don't
+    // know whether the order is alive or dead, only that Amazon's order-
+    // details page didn't render in time.
+    const error = `verify: timed out reading order-details for ${targetOrderId} (page never showed cancellation marker or order id)`;
+    logger.error(
+      'job.verify.timeout',
+      { jobId: job.id, profile: profile.email, orderId: targetOrderId },
+      cid,
+    );
+    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const error = friendlyJobError(raw, profile.email);
+    logger.error(
+      'job.verify.error',
+      { jobId: job.id, profile: profile.email, orderId: targetOrderId, error },
+      cid,
+    );
+    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+  } finally {
+    // Always close the verify-phase browser window. Unlike the buy flow
+    // (where we keep the window open on some failure modes so the user
+    // can inspect), verify runs are fully headless in spirit — the user
+    // never needs to see the order-details page, only the outcome.
+    logger.info(
+      'job.verify.cleanup',
+      { jobId: job.id, profile: profile.email, message: 'Closing verify browser window' },
+      cid,
+    );
+    await closeAndForgetSession(sessions, profile.email);
+  }
+}
+
+async function reportSafe(
+  deps: Deps,
+  jobId: string,
+  body: Parameters<BGClient['reportStatus']>[1],
+  cid: string,
+): Promise<void> {
+  try {
+    await deps.bg.reportStatus(jobId, body);
+  } catch (err) {
+    logger.error('job.report.error', { jobId, error: String(err) }, cid);
+  }
+}
+
 async function runForProfile(
   deps: Deps,
   sessions: Map<string, DriverSession>,
@@ -335,7 +544,10 @@ async function runForProfile(
     }
 
     if (!report.ok) {
-      const error = `${report.reason}: ${report.detail}`;
+      // Trim a trailing "." since most parser details are scraped page text
+      // like "Quantity limit met for this seller." — table reads cleaner
+      // without it. Fall back to reason, then to a generic message.
+      const error = (report.detail ?? report.reason ?? 'verification failed').replace(/\.\s*$/, '');
       logger.error('step.verify.fail', { jobId: job.id, profile, reason: report.reason }, cid);
       await deps.jobAttempts
         .update(attemptId, {
@@ -372,10 +584,11 @@ async function runForProfile(
       maxPrice: job.maxPrice,
       allowedAddressPrefixes: deps.allowedAddressPrefixes,
       correlationId: cid,
+      debugDir: deps.debugDir,
     });
 
     if (!buy.ok) {
-      const error = `buy.${buy.stage}: ${buy.reason}`;
+      const error = buy.reason;
       logger.error(
         'step.buy.fail',
         { jobId: job.id, profile, stage: buy.stage, reason: buy.reason },
@@ -443,9 +656,12 @@ async function runForProfile(
     }
 
     const placedAt = new Date().toISOString();
+    // Buy succeeded — the order isn't fully "done" until the verify-phase
+    // job (queued for ~10 min later by BG) confirms Amazon didn't auto-
+    // cancel it. Show as "Waiting for Verification" in the table.
     const finalStatus: JobAttemptStatus = buy.dryRun
       ? 'dry_run_success'
-      : 'completed';
+      : 'awaiting_verification';
     await deps.jobAttempts
       .update(attemptId, {
         status: finalStatus,

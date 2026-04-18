@@ -1,5 +1,7 @@
 import type { Page } from 'playwright';
 import { JSDOM } from 'jsdom';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { logger } from '../shared/logger.js';
 import { findCashbackPct, parsePrice } from '../parsers/amazonProduct.js';
 import { parseOrderConfirmation } from '../parsers/amazonCheckout.js';
@@ -11,7 +13,32 @@ type BuyOptions = {
   maxPrice: number | null;
   allowedAddressPrefixes: string[];
   correlationId?: string;
+  /** Directory for debug screenshots captured on silent checkout failures. */
+  debugDir?: string;
 };
+
+/**
+ * Drop a full-page screenshot into `debugDir` for ambiguous checkout
+ * failures (e.g. confirmation URL never loads, address picker in an
+ * unrecognized layout). Best-effort: never throws; returns null if the
+ * caller didn't configure a debugDir.
+ */
+async function captureDebugShot(
+  page: Page,
+  debugDir: string | undefined,
+  tag: string,
+): Promise<string | null> {
+  if (!debugDir) return null;
+  try {
+    await mkdir(debugDir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const path = join(debugDir, `${ts}_${tag}.png`);
+    await page.screenshot({ path, fullPage: true });
+    return path;
+  } catch {
+    return null;
+  }
+}
 
 type StepEmitter = (message: string, data?: Record<string, unknown>) => void;
 
@@ -76,8 +103,15 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       return fail('buy_click', 'failed to click Buy Now', String(err));
     }
 
-    // 3. Wait for /spc — may show "Deliver to this address" interstitial first.
-    const checkoutPage = await waitForCheckout(page);
+    // 3. Wait for /spc — may show "Deliver to this address" interstitial
+    //    first. Pass the allowed prefixes so the interstitial path picks
+    //    the right radio (otherwise Amazon may default to a non-allowed
+    //    saved address and we'd ship there).
+    const checkoutPage = await waitForCheckout(
+      page,
+      opts.allowedAddressPrefixes,
+      opts.debugDir,
+    );
     if (!checkoutPage.ok) {
       // Amazon's "This item is currently unavailable" page is a terminal
       // failure — surface as item_unavailable so BG sees the real reason.
@@ -165,9 +199,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       if (cashbackPct === null || cashbackPct < opts.minCashbackPct) {
         return fail(
           'cashback_gate',
-          cashbackPct === null
-            ? 'cashback still absent after name toggle'
-            : `cashback ${cashbackPct}% still below minimum ${opts.minCashbackPct}% after name toggle`,
+          cashbackPct === null ? 'cashback missing' : `cashback ${cashbackPct}%`,
         );
       }
     }
@@ -214,30 +246,38 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     //     "Place your order" once to confirm.
     const confirmWait = await waitForConfirmationOrPending(page, step);
     if (!confirmWait.ok) {
+      // Capture what's on screen — often Amazon stalled the redirect or
+      // showed an unexpected interstitial we don't yet recognize. Path is
+      // logged so the user can find the PNG under userData/debug-screenshots.
+      const shotPath = await captureDebugShot(page, opts.debugDir, 'confirm_parse');
+      if (shotPath) {
+        warn('step.buy.confirm.screenshot', { path: shotPath, currentUrl: page.url() });
+      }
       return fail('confirm_parse', confirmWait.reason);
     }
+    // Optional: parse the confirmation page for the final price (the
+    // orderId pulled from it is unreliable — recommendation sections and
+    // "items you may like" carousels can contain stale order ids that
+    // would false-match our regex). Order id comes from Your Orders below.
     const confirmationHtml = await page.content();
-    let confirmation = parseOrderConfirmation(
+    const confirmation = parseOrderConfirmation(
       new JSDOM(confirmationHtml).window.document,
       page.url(),
     );
 
-    // 12. If the confirmation page didn't expose the orderId, fall back to
-    //     the Your Orders history page (matches old AutoG).
-    if (!confirmation.orderId) {
-      const fromHistory = await fetchOrderIdFromHistory(page).catch(() => null);
-      if (fromHistory) {
-        step('step.buy.orderid.fromhistory', { orderId: fromHistory });
-        confirmation = { ...confirmation, orderId: fromHistory };
-      } else {
-        warn('step.buy.orderid.notfound', {
-          note: 'confirmation page and order history both lacked a parseable orderId',
-        });
-      }
+    // 12. Canonical orderId source: navigate to Your Orders and grep the
+    //     most recent "Order # 123-…" — matches old AutoG. Most-recent
+    //     wins because the just-placed order sits at the top.
+    step('step.buy.orderid.fetch', { url: 'https://www.amazon.com/gp/css/order-history' });
+    const orderId = await fetchOrderIdFromHistory(page).catch(() => null);
+    if (!orderId) {
+      warn('step.buy.orderid.notfound', {
+        note: 'order-history page did not reveal a parseable order id within 10s',
+      });
     }
 
     step('step.buy.placed', {
-      orderId: confirmation.orderId,
+      orderId,
       finalPrice: confirmation.finalPrice,
       finalPriceText: confirmation.finalPriceText,
     });
@@ -245,7 +285,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     return {
       ok: true,
       dryRun: false,
-      orderId: confirmation.orderId,
+      orderId,
       finalPrice: confirmation.finalPrice,
       finalPriceText: confirmation.finalPriceText,
       cashbackPct,
@@ -266,12 +306,19 @@ type CheckoutReadyResult =
   | { ok: true; detected: string }
   | { ok: false; reason: string; detail?: string; kind?: 'unavailable' | 'timeout' };
 
-async function waitForCheckout(page: Page): Promise<CheckoutReadyResult> {
+async function waitForCheckout(
+  page: Page,
+  allowedAddressPrefixes: string[] = [],
+  debugDir?: string,
+): Promise<CheckoutReadyResult> {
   // Poll for either a Place Order button (success — we're on /spc), a
   // "Deliver to this address" button (interstitial — Amazon parked us at the
   // address picker after Buy Now), or Amazon's "This item is currently
-  // unavailable" error page (terminal — bail fast). Click the deliver button
-  // to advance, then keep polling for Place Order. Mirrors old AutoG.
+  // unavailable" error page (terminal — bail fast). When we see the address
+  // picker we first select the radio whose street matches our allowed
+  // prefixes (otherwise Amazon ships to whatever default it preselected),
+  // then click the deliver button. Mirrors old AutoG with the prefix gate
+  // pulled forward into the early Buy Now → /spc transition.
   const deadline = Date.now() + 30_000;
   let deliverClickedTimes = 0;
   const MAX_DELIVER_CLICKS = 3;
@@ -323,6 +370,14 @@ async function waitForCheckout(page: Page): Promise<CheckoutReadyResult> {
             return { kind: 'deliver' as const, label };
           }
         }
+        // 3. "Make updates to your items" confirm page — a Buy-Now/cart
+        //    pre-checkout panel where Amazon asks us to verify quantity +
+        //    address before moving on. Gate the Continue-button click on
+        //    this exact headline so we don't accidentally click a random
+        //    "Continue" elsewhere on the page flow.
+        if (/make updates to your items/i.test(body)) {
+          return { kind: 'updates' as const };
+        }
         return { kind: 'none' as const };
       }, CHECKOUT_PLACE_SELECTORS)
       .catch(() => ({ kind: 'none' as const }));
@@ -347,6 +402,29 @@ async function waitForCheckout(page: Page): Promise<CheckoutReadyResult> {
           reason: `Deliver button persisted after ${MAX_DELIVER_CLICKS} clicks`,
         };
       }
+
+      // Before clicking Deliver, make sure the radio that's currently
+      // selected matches one of our allowed house-number prefixes. If a
+      // matching radio exists but isn't selected, click it first; if none
+      // matches, bail with a clear reason rather than ship to whatever
+      // Amazon defaulted to.
+      if (allowedAddressPrefixes.length > 0) {
+        const pick = await selectAllowedAddressRadio(page, allowedAddressPrefixes);
+        if (!pick.ok) {
+          // Capture the picker we couldn't parse — saved addresses can
+          // render in new layouts Amazon rolls out without warning, and a
+          // screenshot is the fastest way to see what we saw.
+          const shotPath = await captureDebugShot(page, debugDir, 'address_picker');
+          if (shotPath) {
+            logger.warn(
+              'step.checkout.address.picker.screenshot',
+              { path: shotPath, currentUrl: page.url() },
+            );
+          }
+          return { ok: false, reason: `address picker: ${pick.reason}` };
+        }
+      }
+
       // Click via the same DOM walk so we hit the visible "Deliver to this
       // address" element (avoids the id collision with the modal's Use button).
       const clicked = await page
@@ -381,9 +459,132 @@ async function waitForCheckout(page: Page): Promise<CheckoutReadyResult> {
       continue;
     }
 
+    if (state.kind === 'updates') {
+      const clicked = await page
+        .evaluate(() => {
+          // Prefer a submit-input labeled "Continue" (yellow primary
+          // button); fall back to any visible element whose label/value
+          // is exactly "Continue".
+          const submit = Array.from(
+            document.querySelectorAll<HTMLInputElement>(
+              'input[type="submit"], button[type="submit"]',
+            ),
+          ).find((el) => {
+            if (el.offsetParent === null) return false;
+            const label = (el.value || el.getAttribute('aria-label') || el.textContent || '').trim();
+            return /^continue$/i.test(label);
+          });
+          if (submit) {
+            submit.click();
+            return true;
+          }
+          const fallback = Array.from(
+            document.querySelectorAll<HTMLElement>('span, button, input, a'),
+          ).find((el) => {
+            if (el.offsetParent === null) return false;
+            const label = (
+              (el as HTMLInputElement).value ||
+              el.getAttribute('aria-label') ||
+              el.textContent ||
+              ''
+            ).trim();
+            return /^continue$/i.test(label);
+          });
+          if (!fallback) return false;
+          fallback.click();
+          return true;
+        })
+        .catch(() => false);
+      if (!clicked) {
+        await page.waitForTimeout(500);
+        continue;
+      }
+      await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+      await page.waitForTimeout(1_000);
+      continue;
+    }
+
     await page.waitForTimeout(500);
   }
   return { ok: false, reason: 'Place Order button never appeared in 30s' };
+}
+
+/**
+ * On the Buy-Now address picker (`/checkout/.../address`), inspect every
+ * destination radio. If the currently checked one already matches an
+ * allowed prefix, do nothing. Otherwise pick the first radio whose street
+ * starts with an allowed prefix and click it. If none match, fail loudly —
+ * we'd rather abort than ship to an unintended address.
+ */
+async function selectAllowedAddressRadio(
+  page: Page,
+  allowedPrefixes: string[],
+): Promise<{ ok: true; selected: string } | { ok: false; reason: string }> {
+  const result = await page
+    .evaluate((prefixes) => {
+      const norm = (s: string) =>
+        s.replace(/[\s,]+/g, ' ').trim().toLowerCase();
+      const matches = (street: string) =>
+        prefixes.some((p) => norm(street).startsWith(p.toLowerCase()));
+
+      const radios = Array.from(
+        document.querySelectorAll<HTMLInputElement>(
+          'input[type="radio"][name="destinationSubmissionUrl"]',
+        ),
+      );
+      if (radios.length === 0) return { kind: 'no-radios' as const };
+
+      const rows = radios.map((r) => {
+        const li = r.closest('li, [class*="address-row"], [class*="address"]');
+        const text = ((li as HTMLElement | null)?.innerText || '').replace(
+          /\s+/g,
+          ' ',
+        );
+        // Pull the first chunk of digits we see — Amazon's row text starts
+        // with the recipient name then "<housenum> <street>, <city>, ...".
+        const m = text.match(/(\d{2,6}[^,]*),/);
+        const street = ((m && m[1]) || text).trim();
+        return { radio: r, street, checked: r.checked };
+      });
+
+      const checkedMatch = rows.find((r) => r.checked && matches(r.street));
+      if (checkedMatch) {
+        return { kind: 'ok' as const, selected: checkedMatch.street, action: 'kept' as const };
+      }
+
+      const target = rows.find((r) => matches(r.street));
+      if (!target) {
+        return {
+          kind: 'no-match' as const,
+          observed: rows.map((r) => r.street).slice(0, 5),
+        };
+      }
+      target.radio.click();
+      return { kind: 'ok' as const, selected: target.street, action: 'clicked' as const };
+    }, allowedPrefixes)
+    .catch((err: unknown) => ({
+      kind: 'error' as const,
+      message: err instanceof Error ? err.message : String(err),
+    }));
+
+  if (result.kind === 'ok') {
+    if (result.action === 'clicked') {
+      // Amazon needs a beat for the radio click to register before the
+      // submit URL on the form is updated.
+      await page.waitForTimeout(500);
+    }
+    return { ok: true, selected: result.selected };
+  }
+  if (result.kind === 'no-radios') {
+    return { ok: false, reason: 'no destination radios on /address page' };
+  }
+  if (result.kind === 'no-match') {
+    return {
+      ok: false,
+      reason: `no saved address starts with an allowed prefix (saw: ${result.observed.join(' | ') || 'nothing'})`,
+    };
+  }
+  return { ok: false, reason: result.message };
 }
 
 type PriceCheckResult =

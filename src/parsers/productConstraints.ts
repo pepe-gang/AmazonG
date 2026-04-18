@@ -122,7 +122,11 @@ export function verifyProductDetailed(
         observed: 'parse failed',
         expected: `≤ $${cap.toFixed(2)}`,
         reason: 'price_unknown',
-        detail: 'unable to parse current price',
+        // No parseable price element on the PDP almost always means the
+        // listing is OOS — Amazon hides the price block when the buy box
+        // is in its "Currently unavailable" state. Surface this as the
+        // user-friendly "Out of stock" rather than a parser-flavored msg.
+        detail: 'Out of stock',
       };
       steps.push(step);
       return { ok: false, reason: step.reason, detail: step.detail, steps };
@@ -274,17 +278,13 @@ export function checkProductConstraints(
     return {
       ok: false,
       reason: 'oos',
-      detail: info.availabilityText ?? 'product not in stock',
+      detail: info.availabilityText ?? 'Out of stock',
     };
   }
 
   if (c.maxPrice !== null) {
     if (info.price === null) {
-      return {
-        ok: false,
-        reason: 'price_unknown',
-        detail: 'unable to parse current price',
-      };
+      return { ok: false, reason: 'price_unknown', detail: 'Out of stock' };
     }
     if (info.price > c.maxPrice) {
       return {
