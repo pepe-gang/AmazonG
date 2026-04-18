@@ -1,4 +1,4 @@
-import { chromium, type BrowserContext, type Page } from 'playwright';
+import type { BrowserContext, Page } from 'playwright';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { NavigationError } from '../shared/errors.js';
@@ -20,6 +20,11 @@ export type DriverOptions = {
 export async function openSession(profile: string, opts: DriverOptions): Promise<DriverSession> {
   const userDataDir = join(opts.userDataRoot, sanitizeProfile(profile));
   await mkdir(userDataDir, { recursive: true });
+
+  // Dynamic import so playwright reads PLAYWRIGHT_BROWSERS_PATH at launch
+  // time, not at module load time (ESM hoists static imports before the env
+  // var is set in index.ts).
+  const { chromium } = await import('playwright');
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: opts.headless,

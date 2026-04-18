@@ -10,6 +10,7 @@
     "email": "noreply@pepe-gang.local"
   },
   "scripts": {
+    "postinstall": "npx playwright install chromium",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
