@@ -1221,6 +1221,20 @@ a,
 }
 .jobs-table th.th-right { text-align: right; }
 .jobs-table th.th-center { text-align: center; }
+.jobs-table th[draggable="true"] {
+  cursor: grab;
+  user-select: none;
+  transition: background 120ms, box-shadow 120ms;
+}
+.jobs-table th[draggable="true"]:active { cursor: grabbing; }
+.jobs-table th.th-dragging {
+  opacity: 0.4;
+  background: #eef2ff;
+}
+.jobs-table th.th-drop-target {
+  box-shadow: inset -2px 0 0 var(--primary);
+  background: #eff6ff;
+}
 .jobs-table th.th-right .th-sort,
 .jobs-table th.th-center .th-sort { width: 100%; }
 .jobs-table th.th-right .th-sort { justify-content: flex-end; }
@@ -1352,6 +1366,58 @@ a,
   text-align: right;
   position: relative;
 }
+.cell-select {
+  width: 36px;
+  padding-right: 4px !important;
+  text-align: center;
+  vertical-align: middle !important;
+}
+.cell-select input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+.jobs-table tr.row-selected td {
+  background: #eff6ff;
+}
+.jobs-table tr.row-selected:hover td {
+  background: #dbeafe;
+}
+
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin: 0 0 10px;
+  background: #1e293b;
+  border-radius: 10px;
+  color: #f8fafc;
+  font-size: 13px;
+  box-shadow: var(--shadow-md);
+  animation: fadeIn 120ms ease-out;
+}
+.bulk-bar .bulk-count {
+  font-weight: 600;
+  margin-right: auto;
+}
+.bulk-bar .ghost-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: #f8fafc;
+}
+.bulk-bar .ghost-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+.bulk-bar .ghost-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.bulk-bar .ghost-btn.danger-text {
+  color: #fca5a5;
+}
 .action-menu-wrap { position: relative; display: inline-block; }
 .action-menu {
   position: absolute;
@@ -1386,6 +1452,29 @@ a,
   background: var(--border);
   margin: 4px 0;
 }
+.columns-menu {
+  min-width: 200px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.columns-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.columns-menu-item:hover { background: #f1f5f9; }
+.columns-menu-item input[type="checkbox"] {
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.columns-menu-item input:disabled { cursor: not-allowed; }
+.columns-menu-item:has(input:disabled) { opacity: 0.6; cursor: not-allowed; }
 .cell-mono {
   font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
   font-size: 12px;

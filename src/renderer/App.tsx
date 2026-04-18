@@ -466,7 +466,7 @@ function DashboardView(props: {
 /* ============================================================
    Jobs table
    ============================================================ */
-type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'payout' | 'cb' | 'profit' | 'status' | 'orderId';
+type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'totalProfit' | 'status' | 'orderId';
 
 /**
  * Stable identifiers for each draggable column in the Jobs table. The
@@ -478,12 +478,21 @@ type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'payo
  */
 type JobColumnId =
   | 'date' | 'item' | 'dealId' | 'account' | 'qty'
-  | 'retail' | 'payout' | 'cb' | 'profit' | 'orderId' | 'status';
+  | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'totalProfit'
+  | 'orderId' | 'status';
 
 const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
   'date', 'item', 'dealId', 'account', 'qty',
-  'retail', 'payout', 'cb', 'profit', 'orderId', 'status',
+  'retail', 'totalRetail', 'payout', 'cb', 'profit', 'totalProfit',
+  'orderId', 'status',
 ];
+
+/**
+ * Columns hidden the first time a user sees them. Once they explicitly
+ * tick the column on (which writes the new order back to settings),
+ * the "haven't-seen-it-yet" check stops firing.
+ */
+const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail', 'totalProfit']);
 
 function resolveColumnOrder(saved: string[]): JobColumnId[] {
   const valid = new Set<JobColumnId>(DEFAULT_COLUMN_ORDER);
@@ -542,6 +551,32 @@ const STATUS_LABEL: Record<JobAttemptStatus, string> = {
   dry_run_success: 'Dry-run OK',
 };
 
+const ALL_STATUSES: JobAttemptStatus[] = [
+  'queued',
+  'in_progress',
+  'awaiting_verification',
+  'verified',
+  'completed',
+  'dry_run_success',
+  'failed',
+  'cancelled_by_amazon',
+];
+
+/**
+ * Statuses that show in the Jobs table for fresh installs. Failed and
+ * Cancelled are off — once an order has settled into one of those, it
+ * usually doesn't need attention until the user actively wants to
+ * audit it. Filter dropdown still has them so the user can opt in.
+ */
+const DEFAULT_VISIBLE_STATUSES: JobAttemptStatus[] = [
+  'queued',
+  'in_progress',
+  'awaiting_verification',
+  'verified',
+  'completed',
+  'dry_run_success',
+];
+
 /** TSV cell value extractor for one column id. Used by both copy paths. */
 function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
   switch (id) {
@@ -551,9 +586,22 @@ function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
     case 'account': return a.amazonEmail;
     case 'qty':     return typeof a.quantity === 'number' ? a.quantity : '';
     case 'retail':  return typeof a.maxPrice === 'number' ? a.maxPrice.toFixed(2) : '';
+    case 'totalRetail': {
+      if (typeof a.maxPrice !== 'number' || typeof a.quantity !== 'number' || a.quantity <= 0) {
+        return '';
+      }
+      return (a.maxPrice * a.quantity).toFixed(2);
+    }
     case 'payout':  return typeof a.price === 'number' ? a.price.toFixed(2) : '';
     case 'cb':      return typeof a.cashbackPct === 'number' ? a.cashbackPct : '';
     case 'profit': {
+      const p = computeProfit(a);
+      return p === null ? '' : p.toFixed(2);
+    }
+    case 'totalProfit': {
+      // Same value as `profit` — kept as a separate column so users who
+      // want to surface the total in their spreadsheet without changing
+      // the per-row "Profit" header can do so independently.
       const p = computeProfit(a);
       return p === null ? '' : p.toFixed(2);
     }
@@ -588,9 +636,11 @@ const COLUMN_LABEL: Record<JobColumnId, string> = {
   account: 'Amazon Account',
   qty: 'Qty',
   retail: 'Retail',
+  totalRetail: 'Total Retail',
   payout: 'Payout',
   cb: 'CB',
   profit: 'Profit',
+  totalProfit: 'Total Profit',
   orderId: 'Order ID',
   status: 'Status',
 };
@@ -598,9 +648,11 @@ const COLUMN_LABEL: Record<JobColumnId, string> = {
 const COLUMN_ALIGN: Partial<Record<JobColumnId, 'right' | 'center'>> = {
   qty: 'center',
   retail: 'right',
+  totalRetail: 'right',
   payout: 'right',
   cb: 'right',
   profit: 'right',
+  totalProfit: 'right',
 };
 type SortDir = 'asc' | 'desc';
 
@@ -624,7 +676,6 @@ function JobsTable({
   }, [profiles]);
   const [sortKey, setSortKey] = useState<SortKey>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
-  const [statusFilter, setStatusFilter] = useState<JobAttemptStatus | 'all'>('all');
   const [accountFilter, setAccountFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [orderToast, setOrderToast] = useState<string | null>(null);
@@ -635,27 +686,67 @@ function JobsTable({
   // Drag-to-reorder + hide/show columns. Both persist in settings so
   // the layout (and the TSV-copy shape) survives restarts.
   const { settings, update } = useSettings();
-  const fullColumnOrder = useMemo(
-    () => resolveColumnOrder(settings?.jobsColumnOrder ?? []),
-    [settings?.jobsColumnOrder],
-  );
-  const hiddenSet = useMemo(
-    () => new Set<JobColumnId>(
-      (settings?.jobsColumnHidden ?? []).filter(
-        (id): id is JobColumnId => DEFAULT_COLUMN_ORDER.includes(id as JobColumnId),
-      ),
-    ),
-    [settings?.jobsColumnHidden],
-  );
+  const savedOrder = settings?.jobsColumnOrder ?? [];
+  const fullColumnOrder = useMemo(() => resolveColumnOrder(savedOrder), [savedOrder]);
+  const hiddenSet = useMemo(() => {
+    const explicit = (settings?.jobsColumnHidden ?? []).filter(
+      (id): id is JobColumnId => DEFAULT_COLUMN_ORDER.includes(id as JobColumnId),
+    );
+    const set = new Set<JobColumnId>(explicit);
+    // Default-hidden columns (Total Retail, Total Profit, etc.) stay
+    // hidden until the user has acknowledged them at least once.
+    // "Acknowledged" = the id has appeared in their saved order, which
+    // only happens after they explicitly tick the column on.
+    const savedSet = new Set(savedOrder);
+    for (const id of DEFAULT_HIDDEN_COLUMNS) {
+      if (!savedSet.has(id)) set.add(id);
+    }
+    return set;
+  }, [settings?.jobsColumnHidden, savedOrder]);
+  // Persisted multi-select status filter. Empty saved value = use the
+  // defaults (all statuses except Failed and Cancelled). Toggling any
+  // status writes back the explicit visible-set so the user's choice
+  // sticks across launches.
+  const visibleStatuses = useMemo<Set<JobAttemptStatus>>(() => {
+    const saved = settings?.jobsStatusFilter ?? [];
+    const list = saved.length > 0
+      ? saved.filter((s): s is JobAttemptStatus => ALL_STATUSES.includes(s as JobAttemptStatus))
+      : DEFAULT_VISIBLE_STATUSES;
+    return new Set(list);
+  }, [settings?.jobsStatusFilter]);
+  const setStatusVisible = (s: JobAttemptStatus, visible: boolean) => {
+    const next = new Set(visibleStatuses);
+    if (visible) next.add(s);
+    else next.delete(s);
+    void update({ jobsStatusFilter: ALL_STATUSES.filter((x) => next.has(x)) });
+  };
+  const resetStatusFilter = () => {
+    void update({ jobsStatusFilter: [] });
+  };
+
   const columnOrder = useMemo(
     () => fullColumnOrder.filter((id) => !hiddenSet.has(id)),
     [fullColumnOrder, hiddenSet],
   );
   const setColumnHidden = (id: JobColumnId, hidden: boolean) => {
-    const next = new Set(hiddenSet);
-    if (hidden) next.add(id);
-    else next.delete(id);
-    void update({ jobsColumnHidden: Array.from(next) });
+    const explicit = new Set(
+      (settings?.jobsColumnHidden ?? []).filter(
+        (x): x is JobColumnId => DEFAULT_COLUMN_ORDER.includes(x as JobColumnId),
+      ),
+    );
+    if (hidden) explicit.add(id);
+    else explicit.delete(id);
+    // When ticking a default-hidden column ON for the first time, also
+    // append it to the saved order so the "haven't-seen" check stops
+    // firing on next render.
+    let nextOrder: string[] | undefined;
+    if (!hidden && DEFAULT_HIDDEN_COLUMNS.has(id) && !savedOrder.includes(id)) {
+      nextOrder = [...fullColumnOrder]; // includes the appended id
+    }
+    void update({
+      jobsColumnHidden: Array.from(explicit),
+      ...(nextOrder !== undefined ? { jobsColumnOrder: nextOrder } : {}),
+    });
   };
   const [draggingCol, setDraggingCol] = useState<JobColumnId | null>(null);
   const [dropTargetCol, setDropTargetCol] = useState<JobColumnId | null>(null);
@@ -711,7 +802,7 @@ function JobsTable({
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = attempts.filter((a) => {
-      if (statusFilter !== 'all' && a.status !== statusFilter) return false;
+      if (!visibleStatuses.has(a.status)) return false;
       if (accountFilter !== 'all' && a.amazonEmail !== accountFilter) return false;
       if (q.length > 0) {
         const hay = `${a.dealTitle ?? ''} ${a.amazonEmail} ${a.dealId ?? ''} ${a.dealKey ?? ''} ${a.orderId ?? ''}`.toLowerCase();
@@ -737,6 +828,18 @@ function JobsTable({
           if (bn === null) return -1;
           return an - bn;
         }
+        case 'totalRetail': {
+          const totalRetail = (x: JobAttempt) =>
+            typeof x.maxPrice === 'number' && typeof x.quantity === 'number' && x.quantity > 0
+              ? x.maxPrice * x.quantity
+              : null;
+          const an = totalRetail(a);
+          const bn = totalRetail(b);
+          if (an === null && bn === null) return 0;
+          if (an === null) return 1;
+          if (bn === null) return -1;
+          return an - bn;
+        }
         case 'payout': {
           const an = typeof a.price === 'number' ? a.price : null;
           const bn = typeof b.price === 'number' ? b.price : null;
@@ -747,7 +850,8 @@ function JobsTable({
         }
         case 'qty':
           return (a.quantity ?? 0) - (b.quantity ?? 0);
-        case 'profit': {
+        case 'profit':
+        case 'totalProfit': {
           const an = computeProfit(a);
           const bn = computeProfit(b);
           if (an === null && bn === null) return 0;
@@ -765,7 +869,7 @@ function JobsTable({
     };
     filtered.sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
     return filtered;
-  }, [attempts, sortKey, sortDir, statusFilter, accountFilter, search]);
+  }, [attempts, sortKey, sortDir, visibleStatuses, accountFilter, search]);
 
   const onSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -777,12 +881,15 @@ function JobsTable({
   };
 
   const clearFilters = () => {
-    setStatusFilter('all');
+    resetStatusFilter();
     setAccountFilter('all');
     setSearch('');
   };
 
-  const hasFilter = statusFilter !== 'all' || accountFilter !== 'all' || search.length > 0;
+  const statusFilterIsCustom =
+    visibleStatuses.size !== DEFAULT_VISIBLE_STATUSES.length ||
+    !DEFAULT_VISIBLE_STATUSES.every((s) => visibleStatuses.has(s));
+  const hasFilter = statusFilterIsCustom || accountFilter !== 'all' || search.length > 0;
 
   // Drop selections that no longer exist in the visible-or-attempts set
   // (e.g. after a bulk delete) so the bulk bar reflects reality.
@@ -917,20 +1024,11 @@ function JobsTable({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as JobAttemptStatus | 'all')}
-          >
-            <option value="all">All statuses</option>
-            <option value="queued">Queued</option>
-            <option value="in_progress">Running</option>
-            <option value="awaiting_verification">Waiting for Verification</option>
-            <option value="verified">Completed</option>
-            <option value="cancelled_by_amazon">Cancelled</option>
-            <option value="completed">Done</option>
-            <option value="dry_run_success">Dry-run OK</option>
-            <option value="failed">Failed</option>
-          </select>
+          <StatusFilterMenu
+            visible={visibleStatuses}
+            onToggle={setStatusVisible}
+            onReset={resetStatusFilter}
+          />
           <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
             <option value="all">All accounts</option>
             {accountOptions.map((email) => (
@@ -1288,6 +1386,62 @@ function ColumnsMenu({
 }
 
 /**
+ * Multi-select status filter dropdown. Replaces the old single-select
+ * "All statuses / one status" dropdown. Defaults hide Failed and
+ * Cancelled — once an order has settled into one of those, it usually
+ * doesn't need attention. User can tick them on to audit.
+ */
+function StatusFilterMenu({
+  visible,
+  onToggle,
+  onReset,
+}: {
+  visible: Set<JobAttemptStatus>;
+  onToggle: (s: JobAttemptStatus, visible: boolean) => void;
+  onReset: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  return (
+    <div className="action-menu-wrap" ref={ref}>
+      <button
+        className="ghost-btn"
+        onClick={() => setOpen((o) => !o)}
+        title="Show only the statuses you tick"
+      >
+        Statuses ({visible.size}/{ALL_STATUSES.length}) ▾
+      </button>
+      {open && (
+        <div className="action-menu columns-menu">
+          {ALL_STATUSES.map((s) => (
+            <label key={s} className="columns-menu-item">
+              <input
+                type="checkbox"
+                checked={visible.has(s)}
+                onChange={(e) => onToggle(s, e.target.checked)}
+              />
+              {STATUS_LABEL[s]}
+            </label>
+          ))}
+          <div className="action-menu-sep" />
+          <button className="action-menu-item" onClick={() => { onReset(); setOpen(false); }}>
+            Reset to default
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * Sortable + drag-to-reorder header cell for the Jobs table. Reuses the
  * existing SortableTh visuals; layered on top is HTML5 drag so the user
  * can move columns into the order their spreadsheet wants. The
@@ -1436,6 +1590,14 @@ function JobsCell({
           {typeof a.maxPrice === 'number' ? `$${a.maxPrice.toFixed(2)}` : <span className="muted">—</span>}
         </td>
       );
+    case 'totalRetail': {
+      const ok = typeof a.maxPrice === 'number' && typeof a.quantity === 'number' && a.quantity > 0;
+      return (
+        <td className="cell-retail">
+          {ok ? `$${(a.maxPrice! * a.quantity!).toFixed(2)}` : <span className="muted">—</span>}
+        </td>
+      );
+    }
     case 'payout':
       return (
         <td className="cell-payout">
@@ -1463,6 +1625,22 @@ function JobsCell({
               className={p >= 0 ? 'profit-good' : 'profit-bad'}
               title={`payout ${a.price} − retail ${a.maxPrice} × (1 − ${a.cashbackPct}% cb) × qty ${a.quantity}`}
             >
+              {p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(2)}
+            </span>
+          )}
+        </td>
+      );
+    }
+    case 'totalProfit': {
+      // Same value as 'profit' — exposed as a separate column so users
+      // can show one without the other in their spreadsheet copy.
+      const p = computeProfit(a);
+      return (
+        <td className="cell-profit">
+          {p === null ? (
+            <span className="muted">—</span>
+          ) : (
+            <span className={p >= 0 ? 'profit-good' : 'profit-bad'}>
               {p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(2)}
             </span>
           )}

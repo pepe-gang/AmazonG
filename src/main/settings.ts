@@ -16,6 +16,9 @@ const DEFAULTS: Settings = {
   allowedAddressPrefixes: ['13132', '13130', '1146'],
   lastSeenVersion: '',
   autoStartWorker: false,
+  jobsColumnOrder: [],
+  jobsColumnHidden: [],
+  jobsStatusFilter: [],
 };
 
 function filePath(): string {

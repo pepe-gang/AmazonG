@@ -81,6 +81,29 @@ export type Settings = {
    * had a chance to review settings.
    */
   autoStartWorker: boolean;
+  /**
+   * User-chosen ordering of the Jobs-table columns. The TSV copy uses
+   * this same ordering so users can shape the paste to match their
+   * spreadsheet layout. Empty array = use the default order. Unknown
+   * ids are ignored; missing ids fall back to the end of the table.
+   */
+  jobsColumnOrder: string[];
+  /**
+   * Set of column ids the user has hidden via the Columns dropdown.
+   * Hidden columns are dropped from both the table render and the TSV
+   * copy. Empty = show all columns.
+   */
+  jobsColumnHidden: string[];
+  /**
+   * Status ids the user wants to see in the Jobs table. Defaults are
+   * applied via DEFAULT_VISIBLE_STATUSES on the renderer side — fresh
+   * installs see everything EXCEPT Failed and Cancelled (which are
+   * mostly noise once an order is finalized).
+   *
+   * Empty array == use defaults. The dropdown writes the explicit
+   * full set whenever the user toggles, so any change survives.
+   */
+  jobsStatusFilter: string[];
 };
 
 export type AutoGBridge = {
