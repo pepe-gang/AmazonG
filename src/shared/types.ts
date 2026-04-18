@@ -121,3 +121,28 @@ export type RendererStatus = {
   identity: IdentityInfo | null;
   lastError: string | null;
 };
+
+export type JobAttemptStatus =
+  | 'queued'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  | 'dry_run_success';
+
+export type JobAttempt = {
+  attemptId: string;
+  jobId: string;
+  amazonEmail: string;
+  phase: 'buy' | 'verify';
+  dealKey: string | null;
+  dealTitle: string | null;
+  productUrl: string;
+  cost: string | null;
+  cashbackPct: number | null;
+  orderId: string | null;
+  status: JobAttemptStatus;
+  error: string | null;
+  dryRun: boolean;
+  createdAt: string;
+  updatedAt: string;
+};

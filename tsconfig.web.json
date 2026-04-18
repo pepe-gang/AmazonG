@@ -14,7 +14,8 @@
     "isolatedModules": true,
     "baseUrl": ".",
     "paths": {
-      "@shared/*": ["src/shared/*"]
+      "@shared/*": ["src/shared/*"],
+      "@parsers/*": ["src/parsers/*"]
     }
   },
   "include": ["src/renderer/**/*", "src/shared/**/*"]

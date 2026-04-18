@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { IPC, type AutoGBridge, type Settings } from '../shared/ipc.js';
-import type { AmazonProfile, IdentityInfo, LogEvent, RendererStatus } from '../shared/types.js';
+import type {
+  AmazonProfile,
+  IdentityInfo,
+  JobAttempt,
+  LogEvent,
+  RendererStatus,
+} from '../shared/types.js';
 
 const bridge: AutoGBridge = {
   identityGet: () => ipcRenderer.invoke(IPC.identityGet) as Promise<IdentityInfo | null>,
@@ -29,6 +35,13 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.profilesRename, email, displayName) as Promise<AmazonProfile[]>,
   profilesOpenOrders: (email) =>
     ipcRenderer.invoke(IPC.profilesOpenOrders, email) as Promise<void>,
+  profilesReorder: (orderedEmails) =>
+    ipcRenderer.invoke(IPC.profilesReorder, orderedEmails) as Promise<AmazonProfile[]>,
+
+  jobsList: () => ipcRenderer.invoke(IPC.jobsList) as Promise<JobAttempt[]>,
+  jobsLogs: (attemptId) =>
+    ipcRenderer.invoke(IPC.jobsLogs, attemptId) as Promise<LogEvent[]>,
+  jobsClearAll: () => ipcRenderer.invoke(IPC.jobsClearAll) as Promise<void>,
 
   onLog(cb) {
     const listener = (_: unknown, ev: LogEvent) => cb(ev);
@@ -44,6 +57,11 @@ const bridge: AutoGBridge = {
     const listener = (_: unknown, p: AmazonProfile[]) => cb(p);
     ipcRenderer.on(IPC.evtProfiles, listener);
     return () => ipcRenderer.off(IPC.evtProfiles, listener);
+  },
+  onJobs(cb) {
+    const listener = (_: unknown, attempts: JobAttempt[]) => cb(attempts);
+    ipcRenderer.on(IPC.evtJobs, listener);
+    return () => ipcRenderer.off(IPC.evtJobs, listener);
   },
 };
 

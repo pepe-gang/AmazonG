@@ -5,6 +5,17 @@ import { IPC, type Settings } from '../shared/ipc.js';
 import { createBGClient } from '../bg/client.js';
 import { startWorker, type WorkerHandle } from '../workflows/pollAndScrape.js';
 import { addLogSink, logger } from '../shared/logger.js';
+import {
+  appendLog as storeAppendLog,
+  clearAll as storeClearAll,
+  createAttempt as storeCreateAttempt,
+  listAttempts as storeListAttempts,
+  pruneOlderThan,
+  readLogs as storeReadLogs,
+  updateAttempt as storeUpdateAttempt,
+} from './jobStore.js';
+import { makeAttemptId } from '../shared/sanitize.js';
+import type { JobAttempt, JobAttemptStatus } from '../shared/types.js';
 import { BGApiError } from '../shared/errors.js';
 import { loadIdentity, saveIdentity, clearIdentity } from './identity.js';
 import { loadSettings, saveSettings } from './settings.js';
@@ -12,6 +23,7 @@ import {
   loadProfiles,
   newProfile,
   removeProfile as removeProfileFn,
+  reorderProfiles,
   updateProfile,
   upsertProfile,
 } from './profiles.js';
@@ -49,9 +61,23 @@ function broadcastStatus(): void {
   mainWindow?.webContents.send(IPC.evtStatus, status());
 }
 
-async function broadcastProfiles(): Promise<void> {
-  const list = await loadProfiles();
-  mainWindow?.webContents.send(IPC.evtProfiles, list);
+async function broadcastProfiles(list?: AmazonProfile[]): Promise<void> {
+  const payload = list ?? (await loadProfiles());
+  mainWindow?.webContents.send(IPC.evtProfiles, payload);
+}
+
+// Coalesce job-list broadcasts so a fan-out across N profiles doesn't
+// fire 2N+ full-list IPC sends. Trailing 100ms timer is enough for the
+// renderer to look smooth while collapsing burst updates.
+let jobsBroadcastTimer: NodeJS.Timeout | null = null;
+function scheduleBroadcastJobs(): void {
+  if (jobsBroadcastTimer) return;
+  jobsBroadcastTimer = setTimeout(() => {
+    jobsBroadcastTimer = null;
+    void storeListAttempts()
+      .then((list) => mainWindow?.webContents.send(IPC.evtJobs, list))
+      .catch(() => undefined);
+  }, 100);
 }
 
 function profileDir(): string {
@@ -59,7 +85,7 @@ function profileDir(): string {
 }
 
 const ONBOARDING_SIZE = { width: 500, height: 580 } as const;
-const APP_SIZE = { width: 1200, height: 800 } as const;
+const APP_SIZE = { width: 1600, height: 1000 } as const;
 
 function createWindow(): void {
   const connected = identity !== null;
@@ -67,8 +93,8 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: size.width,
     height: size.height,
-    minWidth: connected ? 900 : size.width,
-    minHeight: connected ? 600 : size.height,
+    minWidth: connected ? 1100 : size.width,
+    minHeight: connected ? 700 : size.height,
     resizable: connected,
     maximizable: connected,
     fullscreenable: connected,
@@ -96,7 +122,7 @@ function resizeToConnected(): void {
   mainWindow.setResizable(true);
   mainWindow.setMaximizable(true);
   mainWindow.setFullScreenable(true);
-  mainWindow.setMinimumSize(900, 600);
+  mainWindow.setMinimumSize(1100, 700);
   mainWindow.setSize(APP_SIZE.width, APP_SIZE.height, true);
   mainWindow.center();
 }
@@ -115,6 +141,20 @@ app.whenReady().then(async () => {
   addLogSink((ev) => {
     mainWindow?.webContents.send(IPC.evtLog, ev);
   });
+  // Per-attempt log routing: any log carrying both `jobId` and `profile`
+  // gets appended to that attempt's JSONL log file. The renderer fetches
+  // these per-row via IPC.
+  addLogSink((ev) => {
+    const data = ev.data as Record<string, unknown> | undefined;
+    const jobId = typeof data?.jobId === 'string' ? data.jobId : null;
+    const profile = typeof data?.profile === 'string' ? data.profile : null;
+    if (!jobId || !profile) return;
+    const attemptId = makeAttemptId(jobId, profile);
+    void storeAppendLog(attemptId, ev).catch(() => undefined);
+  });
+
+  // Drop attempts older than 30 days at startup so the table stays manageable.
+  await pruneOlderThan(Date.now() - 30 * 24 * 60 * 60 * 1000).catch(() => 0);
 
   const stored = await loadIdentity();
   if (stored) {
@@ -192,6 +232,18 @@ function registerIpcHandlers(): void {
         const list = await loadProfiles();
         return list.filter((p) => p.enabled && p.loggedIn);
       },
+      jobAttempts: {
+        async create(partial) {
+          const a = await storeCreateAttempt(partial);
+          scheduleBroadcastJobs();
+          return a;
+        },
+        async update(attemptId, patch) {
+          const a = await storeUpdateAttempt(attemptId, patch);
+          scheduleBroadcastJobs();
+          return a;
+        },
+      },
     });
     lastError = null;
     broadcastStatus();
@@ -233,20 +285,20 @@ function registerIpcHandlers(): void {
       if (!clean) throw new Error('email required');
       const name = displayName?.trim() || undefined;
       const list = await upsertProfile(newProfile(clean, name));
-      await broadcastProfiles();
+      await broadcastProfiles(list);
       return list;
     },
   );
 
   ipcMain.handle(IPC.profilesRemove, async (_e, email: string) => {
     const list = await removeProfileFn(email);
-    await broadcastProfiles();
+    await broadcastProfiles(list);
     return list;
   });
 
   ipcMain.handle(IPC.profilesSetEnabled, async (_e, email: string, enabled: boolean) => {
     const list = await updateProfile(email, { enabled });
-    await broadcastProfiles();
+    await broadcastProfiles(list);
     return list;
   });
 
@@ -255,10 +307,26 @@ function registerIpcHandlers(): void {
     async (_e, email: string, displayName: string | null) => {
       const clean = displayName?.trim() || null;
       const list = await updateProfile(email, { displayName: clean });
-      await broadcastProfiles();
+      await broadcastProfiles(list);
       return list;
     },
   );
+
+  ipcMain.handle(
+    IPC.profilesReorder,
+    async (_e, orderedEmails: string[]) => {
+      const list = await reorderProfiles(orderedEmails);
+      await broadcastProfiles(list);
+      return list;
+    },
+  );
+
+  ipcMain.handle(IPC.jobsList, () => storeListAttempts());
+  ipcMain.handle(IPC.jobsLogs, (_e, attemptId: string) => storeReadLogs(attemptId));
+  ipcMain.handle(IPC.jobsClearAll, async () => {
+    await storeClearAll();
+    scheduleBroadcastJobs();
+  });
 
   ipcMain.handle(IPC.profilesOpenOrders, async (_e, email: string) => {
     // Open Amazon's order history in this profile's persistent session so

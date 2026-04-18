@@ -35,6 +35,7 @@ export default defineConfig({
     resolve: {
       alias: {
         '@shared': resolve('src/shared'),
+        '@parsers': resolve('src/parsers'),
       },
     },
     plugins: [react()],

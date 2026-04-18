@@ -82,3 +82,25 @@ export function newProfile(email: string, displayName?: string): AmazonProfile {
     loggedIn: false,
   };
 }
+
+/**
+ * Reorder profiles to match `orderedEmails`. Profiles not in the list keep
+ * their relative order at the end (defensive against stale UI calls).
+ */
+export async function reorderProfiles(
+  orderedEmails: string[],
+): Promise<AmazonProfile[]> {
+  const list = await loadProfiles();
+  const lower = (s: string) => s.toLowerCase();
+  const indexOf = new Map(orderedEmails.map((e, i) => [lower(e), i]));
+  const sorted = [...list].sort((a, b) => {
+    const ai = indexOf.get(lower(a.email));
+    const bi = indexOf.get(lower(b.email));
+    if (ai === undefined && bi === undefined) return 0;
+    if (ai === undefined) return 1;
+    if (bi === undefined) return -1;
+    return ai - bi;
+  });
+  await saveProfiles(sorted);
+  return sorted;
+}

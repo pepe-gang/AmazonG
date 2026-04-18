@@ -1,4 +1,10 @@
-import type { AmazonProfile, IdentityInfo, LogEvent, RendererStatus } from './types.js';
+import type {
+  AmazonProfile,
+  IdentityInfo,
+  JobAttempt,
+  LogEvent,
+  RendererStatus,
+} from './types.js';
 
 export const IPC = {
   identityGet: 'identity:get',
@@ -19,10 +25,16 @@ export const IPC = {
   profilesSetEnabled: 'profiles:set-enabled',
   profilesRename: 'profiles:rename',
   profilesOpenOrders: 'profiles:open-orders',
+  profilesReorder: 'profiles:reorder',
+
+  jobsList: 'jobs:list',
+  jobsLogs: 'jobs:logs',
+  jobsClearAll: 'jobs:clear-all',
 
   evtLog: 'evt:log',
   evtStatus: 'evt:status',
   evtProfiles: 'evt:profiles',
+  evtJobs: 'evt:jobs',
 } as const;
 
 export type Settings = {
@@ -58,9 +70,14 @@ export type AutoGBridge = {
   profilesSetEnabled(email: string, enabled: boolean): Promise<AmazonProfile[]>;
   profilesRename(email: string, displayName: string | null): Promise<AmazonProfile[]>;
   profilesOpenOrders(email: string): Promise<void>;
+  profilesReorder(orderedEmails: string[]): Promise<AmazonProfile[]>;
+  jobsList(): Promise<JobAttempt[]>;
+  jobsLogs(attemptId: string): Promise<LogEvent[]>;
+  jobsClearAll(): Promise<void>;
   onLog(cb: (ev: LogEvent) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;
+  onJobs(cb: (attempts: JobAttempt[]) => void): () => void;
 };
 
 declare global {

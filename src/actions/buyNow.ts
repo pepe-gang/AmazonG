@@ -391,60 +391,94 @@ type PriceCheckResult =
   | { ok: false; priceText: string | null; price: number | null; reason: string; detail?: string };
 
 async function verifyCheckoutPrice(page: Page, cap: number): Promise<PriceCheckResult> {
-  // Per-item price lives in `.lineitem-container`. Amazon has two layouts:
-  // `.lineitem-price-text` (older) and `.a-price .a-offscreen` (newer).
-  // Read the max unit price across line items so the cap check is
-  // conservative — matches old AutoG.
-  const raw = await page
-    .evaluate(() => {
-      const containers = Array.from(document.querySelectorAll('.lineitem-container'));
-      if (containers.length === 0) return null;
-      const texts = containers
-        .map((c) => {
-          const el =
-            c.querySelector('.lineitem-price-text') ??
-            c.querySelector('.a-price .a-offscreen');
-          return el ? (el.textContent ?? '').trim() : null;
-        })
-        .filter((t): t is string => !!t);
-      if (texts.length === 0) return null;
-      const parsed = texts
-        .map((t) => {
-          const m = t.replace(/[,\s]/g, '').match(/-?\d+(\.\d+)?/);
-          return m ? { raw: t, n: parseFloat(m[0]) } : null;
-        })
-        .filter((p): p is { raw: string; n: number } => !!p && Number.isFinite(p.n) && p.n > 0);
-      parsed.sort((a, b) => b.n - a.n);
-      return parsed[0]?.raw ?? null;
-    })
-    .catch(() => null);
+  // Per-item price lives in `.lineitem-container` on the standard /spc
+  // layout; Amazon also uses a legacy "subtotals" panel and a newer
+  // `[data-feature-id*="line-item"]` template on some A/B branches. Wait
+  // briefly for ANY of these to render, then probe each.
+  await page
+    .waitForSelector(
+      '.lineitem-container, [data-feature-id*="line-item"], #subtotals, .order-summary-line-item, #order-summary',
+      { timeout: 10_000 },
+    )
+    .catch(() => undefined);
 
-  if (!raw) {
+  const result = await page
+    .evaluate(() => {
+      // Collect candidate price strings from each known layout.
+      const candidates: { source: string; text: string }[] = [];
+
+      const pushFromContainers = (containerSel: string, source: string) => {
+        const containers = Array.from(document.querySelectorAll(containerSel));
+        for (const c of containers) {
+          const inner = (c.querySelector('.lineitem-price-text') ??
+            c.querySelector('.a-price .a-offscreen') ??
+            c.querySelector('.a-color-price') ??
+            c.querySelector('.a-price')) as HTMLElement | null;
+          const t = inner ? (inner.textContent ?? '').trim() : '';
+          if (t) candidates.push({ source, text: t });
+        }
+      };
+
+      pushFromContainers('.lineitem-container', 'lineitem-container');
+      pushFromContainers('[data-feature-id*="line-item"]', 'line-item-feature');
+      pushFromContainers('.order-summary-line-item', 'order-summary-line-item');
+
+      // Fallback: scan all visible .a-price .a-offscreen anywhere in the
+      // checkout main column (#order-summary / .a-section). This catches
+      // layouts where line items render without our exact container class.
+      if (candidates.length === 0) {
+        const main = document.querySelector('#subtotals, #order-summary, main, .a-section');
+        if (main) {
+          const offs = Array.from(main.querySelectorAll<HTMLElement>('.a-price .a-offscreen'));
+          for (const o of offs) {
+            const t = (o.textContent ?? '').trim();
+            if (t) candidates.push({ source: 'fallback-a-offscreen', text: t });
+          }
+        }
+      }
+
+      const parsed = candidates
+        .map((c) => {
+          const m = c.text.replace(/[,\s]/g, '').match(/-?\d+(\.\d+)?/);
+          return m ? { raw: c.text, source: c.source, n: parseFloat(m[0]) } : null;
+        })
+        .filter(
+          (p): p is { raw: string; source: string; n: number } =>
+            !!p && Number.isFinite(p.n) && p.n > 0,
+        );
+      // Pick the max — same as AutoG (conservative cap check).
+      parsed.sort((a, b) => b.n - a.n);
+      return {
+        candidatesSeen: candidates.length,
+        sources: Array.from(new Set(parsed.map((p) => p.source))),
+        chosen: parsed[0] ?? null,
+      };
+    })
+    .catch(() => ({
+      candidatesSeen: 0,
+      sources: [] as string[],
+      chosen: null as null,
+    }));
+
+  if (!result.chosen) {
     return {
       ok: false,
       priceText: null,
       price: null,
-      reason: 'could not read item price on /spc',
+      reason: `could not read item price on /spc (no price candidates found across known layouts)`,
+      detail: `candidates seen: ${result.candidatesSeen}`,
     };
   }
-  const price = parsePrice(raw);
-  if (price === null) {
-    return {
-      ok: false,
-      priceText: raw,
-      price: null,
-      reason: 'could not parse /spc item price',
-    };
-  }
+  const price = result.chosen.n;
   if (price > cap) {
     return {
       ok: false,
-      priceText: raw,
+      priceText: result.chosen.raw,
       price,
       reason: `checkout price $${price.toFixed(2)} exceeds retail cap $${cap.toFixed(2)}`,
     };
   }
-  return { ok: true, priceText: raw, price };
+  return { ok: true, priceText: result.chosen.raw, price };
 }
 
 type AddrResult =
@@ -830,7 +864,7 @@ async function toggleBGNameAndRetry(
 /**
  * After clicking Place Order, wait for either the confirmation page OR
  * Amazon's "This is a pending order" duplicate-order interstitial. On the
- * pending page, click "Place your order" once to confirm and keep waiting.
+ * pending page, click "Place your order" again (up to 3 times) to confirm.
  *
  * Returns ok when we land on a confirmation URL, fail otherwise.
  */
@@ -838,9 +872,9 @@ async function waitForConfirmationOrPending(
   page: Page,
   step: StepEmitter,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
-  const deadline = Date.now() + 45_000;
+  const deadline = Date.now() + 60_000;
   let pendingClicks = 0;
-  const MAX_PENDING_CLICKS = 1;
+  const MAX_PENDING_CLICKS = 3;
 
   while (Date.now() < deadline) {
     const state = await page
@@ -851,13 +885,32 @@ async function waitForConfirmationOrPending(
             url,
           )
         ) {
-          return { kind: 'confirmation' as const };
+          return { kind: 'confirmation' as const, url };
         }
         const body = (
           (document.body && document.body.innerText) ||
           ''
         ).replace(/\s+/g, ' ');
-        if (/this is a pending order/i.test(body)) {
+        const isPending = /this is a pending order/i.test(body);
+        if (isPending) {
+          // Try multiple ways to find the "Place your order" button on the
+          // pending page. Order matters: id-based selectors first, text
+          // match last (since "Cancel this pending order" must NOT match).
+          const idCandidates = [
+            'input[name="placeYourOrder1"]',
+            '#placeYourOrder1 input[type="submit"]',
+            '#submitOrderButtonId input',
+            '#submitOrderButtonId button',
+            'input[data-testid="place-order-button"]',
+          ];
+          for (const sel of idCandidates) {
+            const el = document.querySelector<HTMLElement>(sel);
+            if (el && el.offsetParent !== null) {
+              return { kind: 'pending' as const, viaSelector: sel, found: true };
+            }
+          }
+          // Text fallback: find a visible element labeled exactly "Place
+          // your order" (NOT "Cancel this pending order").
           const all = Array.from(
             document.querySelectorAll<HTMLElement>('span, button, input, a'),
           );
@@ -870,29 +923,49 @@ async function waitForConfirmationOrPending(
             ).trim();
             return /^place your order$/i.test(label);
           });
-          return { kind: 'pending' as const, hasPlaceBtn: !!placeBtn };
+          return { kind: 'pending' as const, viaText: !!placeBtn, found: !!placeBtn };
         }
-        return { kind: 'none' as const };
+        return { kind: 'none' as const, url };
       })
-      .catch(() => ({ kind: 'none' as const }));
+      .catch(() => ({ kind: 'none' as const, url: '' }));
 
     if (state.kind === 'confirmation') {
       return { ok: true };
     }
 
     if (state.kind === 'pending') {
-      if (!state.hasPlaceBtn) {
-        return { ok: false, reason: 'pending order page shown but no Place your order button found' };
+      if (!state.found) {
+        return {
+          ok: false,
+          reason: 'pending order page shown but no Place your order button found',
+        };
       }
       if (pendingClicks >= MAX_PENDING_CLICKS) {
         return {
           ok: false,
-          reason: 'pending order page persisted after re-clicking Place your order',
+          reason: `pending order page persisted after ${MAX_PENDING_CLICKS} re-click attempts`,
         };
       }
-      step('step.buy.pending.confirm', { attempt: pendingClicks + 1 });
+      step('step.buy.pending.confirm', {
+        attempt: pendingClicks + 1,
+        via: 'viaSelector' in state ? state.viaSelector : 'text-match',
+      });
       const clicked = await page
         .evaluate(() => {
+          const idCandidates = [
+            'input[name="placeYourOrder1"]',
+            '#placeYourOrder1 input[type="submit"]',
+            '#submitOrderButtonId input',
+            '#submitOrderButtonId button',
+            'input[data-testid="place-order-button"]',
+          ];
+          for (const sel of idCandidates) {
+            const el = document.querySelector<HTMLElement>(sel);
+            if (el && el.offsetParent !== null) {
+              el.click();
+              return true;
+            }
+          }
           const all = Array.from(
             document.querySelectorAll<HTMLElement>('span, button, input, a'),
           );
@@ -914,8 +987,10 @@ async function waitForConfirmationOrPending(
         return { ok: false, reason: 'pending order page: failed to click Place your order' };
       }
       pendingClicks += 1;
+      // Generous wait — Amazon sometimes takes a few seconds before the
+      // page navigates to the confirmation URL after the second click.
       await page.waitForLoadState('domcontentloaded').catch(() => undefined);
-      await page.waitForTimeout(1_500);
+      await page.waitForTimeout(2_500);
       continue;
     }
 

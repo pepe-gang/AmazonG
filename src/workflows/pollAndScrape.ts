@@ -7,7 +7,24 @@ import { scrapeProduct } from '../actions/scrapeProduct.js';
 import { buyNow } from '../actions/buyNow.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
 import { logger } from '../shared/logger.js';
-import type { AmazonProfile, AutoGJob, BuyResult } from '../shared/types.js';
+import { makeAttemptId } from '../shared/sanitize.js';
+import type {
+  AmazonProfile,
+  AutoGJob,
+  BuyResult,
+  JobAttempt,
+  JobAttemptStatus,
+} from '../shared/types.js';
+
+export type JobAttemptStore = {
+  create(
+    partial: Omit<JobAttempt, 'createdAt' | 'updatedAt'>,
+  ): Promise<JobAttempt>;
+  update(
+    attemptId: string,
+    patch: Partial<Omit<JobAttempt, 'attemptId' | 'jobId' | 'amazonEmail' | 'createdAt'>>,
+  ): Promise<JobAttempt | null>;
+};
 
 type Deps = {
   bg: BGClient;
@@ -18,6 +35,8 @@ type Deps = {
   allowedAddressPrefixes: string[];
   /** Returns every enabled+loggedIn profile we should fan out the job to. */
   listEligibleProfiles: () => Promise<AmazonProfile[]>;
+  /** Persistence for the jobs table — created on fan-out, updated as profiles run. */
+  jobAttempts: JobAttemptStore;
 };
 
 export type WorkerHandle = {
@@ -73,7 +92,9 @@ export function startWorker(deps: Deps): WorkerHandle {
         }
         const cid = randomUUID();
         logger.info('job.claim', { jobId: job.id, phase: job.phase, url: job.productUrl }, cid);
-        await handleJob(deps, sessions, job, cid);
+        // Pass the eligibility check result through so handleJob doesn't
+        // hit profiles.json a second time per claim.
+        await handleJob(deps, sessions, job, cid, eligible);
         backoffMs = 5_000;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -105,19 +126,10 @@ async function handleJob(
   sessions: Map<string, DriverSession>,
   job: AutoGJob,
   cid: string,
+  eligible: AmazonProfile[],
 ): Promise<void> {
-  const eligible = await deps.listEligibleProfiles();
-  if (eligible.length === 0) {
-    const error = 'No enabled, signed-in Amazon accounts. Add and sign in at least one account in the Amazon Accounts view.';
-    logger.error('job.no_profiles', { jobId: job.id }, cid);
-    try {
-      await deps.bg.reportStatus(job.id, { status: 'failed', error });
-    } catch (err) {
-      logger.error('job.report.error', { jobId: job.id, error: String(err) }, cid);
-    }
-    return;
-  }
-
+  // Caller (worker loop) already enforces the eligibility gate, so we
+  // trust `eligible` is non-empty here.
   logger.info(
     'job.fanout.start',
     {
@@ -126,6 +138,28 @@ async function handleJob(
       concurrency: Math.min(FANOUT_CONCURRENCY, eligible.length),
     },
     cid,
+  );
+
+  // Create one attempt row per (job, profile) so the table reflects work
+  // about to start (status: queued → in_progress as each runs).
+  await Promise.all(
+    eligible.map((p) =>
+      deps.jobAttempts.create({
+        attemptId: makeAttemptId(job.id, p.email),
+        jobId: job.id,
+        amazonEmail: p.email,
+        phase: job.phase,
+        dealKey: job.dealKey,
+        dealTitle: job.dealTitle,
+        productUrl: job.productUrl,
+        cost: null,
+        cashbackPct: null,
+        orderId: null,
+        status: 'queued',
+        error: null,
+        dryRun: deps.buyDryRun,
+      }),
+    ),
   );
 
   const results = await pMap(eligible, FANOUT_CONCURRENCY, (profile) =>
@@ -231,6 +265,11 @@ async function runForProfile(
   // Per-profile correlation id so logs across the parallel runs are
   // distinguishable (parent cid is shared by all profiles in a fan-out).
   const cid = `${parentCid}/${profile}`;
+  const attemptId = makeAttemptId(job.id, profile);
+
+  await deps.jobAttempts
+    .update(attemptId, { status: 'in_progress' })
+    .catch(() => undefined);
 
   let page: Page | null = null;
   try {
@@ -298,6 +337,30 @@ async function runForProfile(
     if (!report.ok) {
       const error = `${report.reason}: ${report.detail}`;
       logger.error('step.verify.fail', { jobId: job.id, profile, reason: report.reason }, cid);
+      await deps.jobAttempts
+        .update(attemptId, {
+          status: 'failed',
+          error,
+          cost: info.priceText,
+          cashbackPct: info.cashbackPct,
+        })
+        .catch(() => undefined);
+      // Close the window for terminal/conclusive failure reasons — nothing
+      // for the user to debug visually. Other reasons (e.g. price_too_high,
+      // not_prime) leave the window open in case the user wants to inspect.
+      if (report.reason === 'quantity_limit') {
+        logger.info(
+          'job.profile.fail.cleanup',
+          {
+            jobId: job.id,
+            profile,
+            reason: report.reason,
+            message: 'Closing browser window — quantity limit is terminal for this account/seller',
+          },
+          cid,
+        );
+        await closeAndForgetSession(sessions, profile);
+      }
       return failed(profile, error);
     }
     logger.info('step.verify.ok', { jobId: job.id, profile }, cid);
@@ -312,12 +375,21 @@ async function runForProfile(
     });
 
     if (!buy.ok) {
+      const error = `buy.${buy.stage}: ${buy.reason}`;
       logger.error(
         'step.buy.fail',
         { jobId: job.id, profile, stage: buy.stage, reason: buy.reason },
         cid,
       );
-      return failed(profile, `buy.${buy.stage}: ${buy.reason}`);
+      await deps.jobAttempts
+        .update(attemptId, {
+          status: 'failed',
+          error,
+          cost: info.priceText,
+          cashbackPct: info.cashbackPct,
+        })
+        .catch(() => undefined);
+      return failed(profile, error);
     }
 
     if (buy.dryRun) {
@@ -356,9 +428,33 @@ async function runForProfile(
         },
         cid,
       );
+      // Close the session so the visible browser window goes away on
+      // successful live placements (mirrors dry-run cleanup).
+      logger.info(
+        'job.profile.placed.cleanup',
+        {
+          jobId: job.id,
+          profile,
+          message: 'Closing browser window after successful order placement',
+        },
+        cid,
+      );
+      await closeAndForgetSession(sessions, profile);
     }
 
     const placedAt = new Date().toISOString();
+    const finalStatus: JobAttemptStatus = buy.dryRun
+      ? 'dry_run_success'
+      : 'completed';
+    await deps.jobAttempts
+      .update(attemptId, {
+        status: finalStatus,
+        cost: buy.finalPriceText ?? info.priceText,
+        cashbackPct: buy.cashbackPct,
+        orderId: buy.orderId,
+        error: null,
+      })
+      .catch(() => undefined);
     return {
       email: profile,
       status: 'completed',
@@ -373,6 +469,9 @@ async function runForProfile(
     const raw = err instanceof Error ? err.message : String(err);
     const message = friendlyJobError(raw, profile);
     logger.error('job.profile.fail', { jobId: job.id, profile, error: message }, cid);
+    await deps.jobAttempts
+      .update(attemptId, { status: 'failed', error: message })
+      .catch(() => undefined);
     return failed(profile, message);
   } finally {
     // Do NOT close the page — it's the session's only tab and closing it

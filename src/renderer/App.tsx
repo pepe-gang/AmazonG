@@ -1,12 +1,43 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AmazonProfile, LogEvent, RendererStatus } from '@shared/types';
+import type {
+  AmazonProfile,
+  JobAttempt,
+  JobAttemptStatus,
+  LogEvent,
+  RendererStatus,
+} from '@shared/types';
 import type { Settings } from '@shared/ipc';
+import { parsePrice } from '@parsers/amazonProduct';
 
-const MAX_LOGS = 2000;
 const SETUP_GUIDE_URL = 'https://betterbg.vercel.app/dashboard/auto-buy';
 
 function stripIpcPrefix(msg: string): string {
   return msg.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/, '').trim();
+}
+
+/** Fetch settings once on mount + provide an updater. Used by the
+ *  three setting panels (DryRunBanner / HeadlessTogglePanel /
+ *  AllowedPrefixesPanel) instead of each panel doing its own IPC dance. */
+function useSettings(): {
+  settings: Settings | null;
+  busy: boolean;
+  update: (patch: Partial<Settings>) => Promise<void>;
+} {
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    void window.autog.settingsGet().then(setSettings);
+  }, []);
+  const update = useCallback(async (patch: Partial<Settings>) => {
+    setBusy(true);
+    try {
+      const next = await window.autog.settingsSet(patch);
+      setSettings(next);
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+  return { settings, busy, update };
 }
 
 export function App() {
@@ -101,7 +132,7 @@ function OnboardingScreen() {
 /* ============================================================
    Main screen
    ============================================================ */
-type View = 'dashboard' | 'accounts';
+type View = 'dashboard' | 'accounts' | { kind: 'logs'; attempt: JobAttempt };
 
 type Stats = {
   claimed: number;
@@ -125,35 +156,28 @@ const EMPTY_STATS: Stats = {
 
 function MainScreen({ status }: { status: RendererStatus }) {
   const [view, setView] = useState<View>('dashboard');
-  const [logs, setLogs] = useState<LogEvent[]>([]);
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [profiles, setProfiles] = useState<AmazonProfile[]>([]);
+  const [attempts, setAttempts] = useState<JobAttempt[]>([]);
   const [uptimeTick, setUptimeTick] = useState(0);
   const [busy, setBusy] = useState(false);
-  const logBuffer = useRef<LogEvent[]>([]);
-  const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    // Update the dashboard's "Jobs" stat card by listening to the same log
+    // stream the worker emits. Cheaper than maintaining a separate counter
+    // pipeline through IPC.
     const off = window.autog.onLog((ev) => {
-      logBuffer.current.push(ev);
+      setStats((prev) => applyLogsToStats(prev, [ev]));
     });
     const offProfiles = window.autog.onProfiles(setProfiles);
     void window.autog.profilesList().then(setProfiles);
-    const flush = setInterval(() => {
-      if (logBuffer.current.length === 0) return;
-      const batch = logBuffer.current;
-      logBuffer.current = [];
-      setLogs((prev) => {
-        const merged = prev.concat(batch);
-        return merged.length > MAX_LOGS ? merged.slice(-MAX_LOGS) : merged;
-      });
-      setStats((prev) => applyLogsToStats(prev, batch));
-    }, 120);
+    const offJobs = window.autog.onJobs(setAttempts);
+    void window.autog.jobsList().then(setAttempts);
     const tick = setInterval(() => setUptimeTick((n) => n + 1), 1000);
     return () => {
       off();
       offProfiles();
-      clearInterval(flush);
+      offJobs();
       clearInterval(tick);
     };
   }, []);
@@ -167,10 +191,6 @@ function MainScreen({ status }: { status: RendererStatus }) {
     if (status.running) return;
     setStats((prev) => ({ ...prev, startedAt: null }));
   }, [status.running]);
-
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'auto' });
-  }, [logs]);
 
   const toggleWorker = async () => {
     setBusy(true);
@@ -245,7 +265,7 @@ function MainScreen({ status }: { status: RendererStatus }) {
             </>
           ) : (
             <button className="ghost-btn" onClick={() => setView('dashboard')}>
-              <BackIcon /> Dashboard
+              <BackIcon /> {typeof view === 'object' && view.kind === 'logs' ? 'Back' : 'Dashboard'}
             </button>
           )}
         </div>
@@ -278,11 +298,13 @@ function MainScreen({ status }: { status: RendererStatus }) {
             stats={stats}
             uptimeLabel={uptimeLabel}
             lastJobLabel={lastJobLabel}
-            logs={logs}
-            logEndRef={logEndRef}
+            attempts={attempts}
+            onViewLogs={(attempt) => setView({ kind: 'logs', attempt })}
           />
-        ) : (
+        ) : view === 'accounts' ? (
           <AccountsView profiles={profiles} />
+        ) : (
+          <LogsView attempt={view.attempt} />
         )}
       </div>
     </div>
@@ -297,10 +319,10 @@ function DashboardView(props: {
   stats: Stats;
   uptimeLabel: string;
   lastJobLabel: string;
-  logs: LogEvent[];
-  logEndRef: React.RefObject<HTMLDivElement | null>;
+  attempts: JobAttempt[];
+  onViewLogs: (a: JobAttempt) => void;
 }) {
-  const { status, stats, uptimeLabel, lastJobLabel, logs, logEndRef } = props;
+  const { status, stats, uptimeLabel, lastJobLabel, attempts, onViewLogs } = props;
   return (
     <>
       <DryRunBanner />
@@ -358,63 +380,276 @@ function DashboardView(props: {
         />
       </div>
 
-      <div className="log-card">
-        <div className="log-head">
-          <h2>Activity</h2>
-          <div className="log-count">{logs.length} events</div>
-        </div>
-        <div className="log">
-          {logs.length === 0 ? (
-            <div className="log-empty">
-              {status.running
-                ? 'Waiting for events…'
-                : 'Click Start to begin polling BetterBG for jobs.'}
-            </div>
-          ) : (
-            <>
-              {logs.map((ev, i) => (
-                <div key={i} className="log-line">
-                  <span className="log-time">{ev.ts.slice(11, 19)}</span>
-                  <span className={`log-level ${ev.level}`}>{ev.level}</span>
-                  <span className="log-message">
-                    {ev.message}
-                    {ev.data ? <span className="log-data"> {JSON.stringify(ev.data)}</span> : null}
-                  </span>
-                </div>
-              ))}
-              <div ref={logEndRef} />
-            </>
+      <JobsTable attempts={attempts} onViewLogs={onViewLogs} workerRunning={status.running} />
+    </>
+  );
+}
+
+/* ============================================================
+   Jobs table
+   ============================================================ */
+type SortKey = 'date' | 'item' | 'account' | 'cost' | 'cb' | 'status';
+type SortDir = 'asc' | 'desc';
+
+function JobsTable({
+  attempts,
+  onViewLogs,
+  workerRunning,
+}: {
+  attempts: JobAttempt[];
+  onViewLogs: (a: JobAttempt) => void;
+  workerRunning: boolean;
+}) {
+  const [sortKey, setSortKey] = useState<SortKey>('date');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  const [statusFilter, setStatusFilter] = useState<JobAttemptStatus | 'all'>('all');
+  const [accountFilter, setAccountFilter] = useState<string>('all');
+  const [search, setSearch] = useState('');
+
+  const accountOptions = useMemo(() => {
+    return Array.from(new Set(attempts.map((a) => a.amazonEmail))).sort();
+  }, [attempts]);
+
+  const visible = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered = attempts.filter((a) => {
+      if (statusFilter !== 'all' && a.status !== statusFilter) return false;
+      if (accountFilter !== 'all' && a.amazonEmail !== accountFilter) return false;
+      if (q.length > 0) {
+        const hay = `${a.dealTitle ?? ''} ${a.amazonEmail} ${a.dealKey ?? ''} ${a.orderId ?? ''}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    const cmp = (a: JobAttempt, b: JobAttempt): number => {
+      switch (sortKey) {
+        case 'date':
+          return a.createdAt.localeCompare(b.createdAt);
+        case 'item':
+          return (a.dealTitle ?? '').localeCompare(b.dealTitle ?? '');
+        case 'account':
+          return a.amazonEmail.localeCompare(b.amazonEmail);
+        case 'cost': {
+          const an = parsePrice(a.cost);
+          const bn = parsePrice(b.cost);
+          if (an === null && bn === null) return 0;
+          if (an === null) return 1;
+          if (bn === null) return -1;
+          return an - bn;
+        }
+        case 'cb':
+          return (a.cashbackPct ?? -1) - (b.cashbackPct ?? -1);
+        case 'status':
+          return a.status.localeCompare(b.status);
+      }
+    };
+    filtered.sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
+    return filtered;
+  }, [attempts, sortKey, sortDir, statusFilter, accountFilter, search]);
+
+  const onSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir(key === 'date' ? 'desc' : 'asc');
+    }
+  };
+
+  const clearFilters = () => {
+    setStatusFilter('all');
+    setAccountFilter('all');
+    setSearch('');
+  };
+
+  const hasFilter = statusFilter !== 'all' || accountFilter !== 'all' || search.length > 0;
+
+  return (
+    <div className="jobs-card">
+      <div className="jobs-head">
+        <h2>Jobs</h2>
+        <div className="jobs-head-right">
+          <div className="jobs-count">
+            {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
+          </div>
+          {attempts.length > 0 && (
+            <button
+              className="ghost-btn danger-text"
+              title="Delete every job + its logs (testing only)"
+              onClick={() => {
+                if (confirm(`Delete all ${attempts.length} job rows and their logs? This can't be undone.`)) {
+                  void window.autog.jobsClearAll();
+                }
+              }}
+            >
+              Clear All
+            </button>
           )}
         </div>
       </div>
-    </>
+
+      {attempts.length > 0 && (
+        <div className="jobs-filters">
+          <input
+            className="jobs-search"
+            type="search"
+            placeholder="Search title, account, deal key, order id…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as JobAttemptStatus | 'all')}
+          >
+            <option value="all">All statuses</option>
+            <option value="queued">Queued</option>
+            <option value="in_progress">Running</option>
+            <option value="completed">Placed</option>
+            <option value="dry_run_success">Dry-run OK</option>
+            <option value="failed">Failed</option>
+          </select>
+          <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
+            <option value="all">All accounts</option>
+            {accountOptions.map((email) => (
+              <option key={email} value={email}>
+                {email}
+              </option>
+            ))}
+          </select>
+          {hasFilter && (
+            <button className="ghost-btn" onClick={clearFilters}>
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="jobs-table-wrap">
+        {attempts.length === 0 ? (
+          <div className="jobs-empty">
+            {workerRunning
+              ? 'Worker is polling. Rows will appear once a job is claimed.'
+              : 'Click Start to begin polling BetterBG for jobs. Each claimed job will create one row per Amazon account.'}
+          </div>
+        ) : visible.length === 0 ? (
+          <div className="jobs-empty">No rows match current filters.</div>
+        ) : (
+          <table className="jobs-table">
+            <thead>
+              <tr>
+                <SortableTh label="Date" k="date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Item" k="item" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Amazon Account" k="account" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Cost" k="cost" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="CB" k="cb" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <SortableTh label="Status" k="status" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((a) => (
+                <tr key={a.attemptId}>
+                  <td className="cell-date">
+                    <div>{formatDate(a.createdAt)}</div>
+                    <div className="cell-date-time">{formatTime(a.createdAt)}</div>
+                  </td>
+                  <td className="cell-item">
+                    <div className="cell-item-title">{a.dealTitle ?? '(untitled)'}</div>
+                    {(a.phase === 'verify' || a.dryRun) && (
+                      <div className="cell-item-sub">
+                        {a.phase === 'verify' ? <span className="chip chip-purple">VERIFY</span> : null}
+                        {a.dryRun ? <span className="chip chip-blue">DRY-RUN</span> : null}
+                      </div>
+                    )}
+                  </td>
+                  <td className="cell-account">
+                    <span className="account-pill">{a.amazonEmail}</span>
+                  </td>
+                  <td className="cell-cost">{a.cost ?? '—'}</td>
+                  <td className="cell-cb">
+                    {a.cashbackPct !== null ? (
+                      <span className={a.cashbackPct >= 6 ? 'cb-good' : 'cb-low'}>
+                        {a.cashbackPct}%
+                      </span>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                  <td className="cell-status">
+                    <StatusBadge status={a.status} />
+                    {a.error && <div className="cell-error" title={a.error}>{a.error}</div>}
+                  </td>
+                  <td className="cell-actions">
+                    <button className="ghost-btn" onClick={() => onViewLogs(a)}>
+                      View Log →
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
   );
+}
+
+function SortableTh({
+  label,
+  k,
+  sortKey,
+  sortDir,
+  onSort,
+}: {
+  label: string;
+  k: SortKey;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  onSort: (k: SortKey) => void;
+}) {
+  const active = sortKey === k;
+  return (
+    <th>
+      <button
+        type="button"
+        className={`th-sort ${active ? 'active' : ''}`}
+        onClick={() => onSort(k)}
+      >
+        {label}
+        <span className="th-arrow">{active ? (sortDir === 'asc' ? '▲' : '▼') : ''}</span>
+      </button>
+    </th>
+  );
+}
+
+function StatusBadge({ status }: { status: JobAttemptStatus }) {
+  const map: Record<JobAttemptStatus, { label: string; cls: string }> = {
+    queued: { label: 'Queued', cls: 'badge-gray' },
+    in_progress: { label: 'Running', cls: 'badge-blue' },
+    completed: { label: 'Placed', cls: 'badge-green' },
+    failed: { label: 'Failed', cls: 'badge-red' },
+    dry_run_success: { label: 'Dry-run OK', cls: 'badge-blue' },
+  };
+  const m = map[status];
+  return <span className={`status-badge ${m.cls}`}>{m.label}</span>;
+}
+
+function formatDate(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { month: '2-digit', day: '2-digit', year: '2-digit' });
+}
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
 /* ============================================================
    Dry-run banner (toggle)
    ============================================================ */
 function DryRunBanner() {
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    void window.autog.settingsGet().then(setSettings);
-  }, []);
-
-  const toggle = async () => {
-    if (!settings) return;
-    setBusy(true);
-    try {
-      const next = await window.autog.settingsSet({ buyDryRun: !settings.buyDryRun });
-      setSettings(next);
-    } finally {
-      setBusy(false);
-    }
-  };
-
+  const { settings, busy, update } = useSettings();
   if (!settings) return null;
   const on = settings.buyDryRun;
+  const toggle = () => void update({ buyDryRun: !on });
   return (
     <div className={`dry-run-banner ${on ? 'dry' : 'live'}`}>
       <div className="dry-run-text">
@@ -439,44 +674,158 @@ function DryRunBanner() {
 }
 
 /* ============================================================
+   Logs view (full page, per-attempt)
+   ============================================================ */
+function LogsView({ attempt }: { attempt: JobAttempt }) {
+  const [logs, setLogs] = useState<LogEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const list = await window.autog.jobsLogs(attempt.attemptId);
+      setLogs(list);
+    } finally {
+      setLoading(false);
+    }
+  }, [attempt.attemptId]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  // Live tail: append any new log events that match this attempt.
+  useEffect(() => {
+    const off = window.autog.onLog((ev) => {
+      const data = ev.data as Record<string, unknown> | undefined;
+      const jobId = typeof data?.jobId === 'string' ? data.jobId : null;
+      const profile = typeof data?.profile === 'string' ? data.profile : null;
+      if (jobId === attempt.jobId && profile === attempt.amazonEmail) {
+        setLogs((prev) => prev.concat(ev));
+      }
+    });
+    return off;
+  }, [attempt.jobId, attempt.amazonEmail]);
+
+  return (
+    <div className="logs-view">
+      <div className="logs-head">
+        <div>
+          <div className="logs-title">{attempt.dealTitle ?? '(untitled deal)'}</div>
+          <div className="logs-meta">
+            <span className="account-pill">{attempt.amazonEmail}</span>
+            <span className="meta-sep">·</span>
+            <StatusBadge status={attempt.status} />
+            <span className="meta-sep">·</span>
+            <span>{formatDate(attempt.createdAt)} {formatTime(attempt.createdAt)}</span>
+            {attempt.cost && (
+              <>
+                <span className="meta-sep">·</span>
+                <span>{attempt.cost}</span>
+              </>
+            )}
+            {attempt.cashbackPct !== null && (
+              <>
+                <span className="meta-sep">·</span>
+                <span>{attempt.cashbackPct}% cashback</span>
+              </>
+            )}
+            {attempt.orderId && (
+              <>
+                <span className="meta-sep">·</span>
+                <span className="cell-mono">order {attempt.orderId}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <button className="ghost-btn" onClick={() => void reload()} disabled={loading}>
+          {loading ? 'Loading…' : 'Refresh'}
+        </button>
+      </div>
+
+      {attempt.error && <div className="error-banner">{attempt.error}</div>}
+
+      <div className="logs-stream">
+        {logs.length === 0 ? (
+          <div className="log-empty">{loading ? 'Loading logs…' : 'No logs recorded for this attempt.'}</div>
+        ) : (
+          logs.map((ev, i) => (
+            <div key={i} className="log-line">
+              <span className="log-time">{ev.ts.slice(11, 19)}</span>
+              <span className={`log-level ${ev.level}`}>{ev.level}</span>
+              <span className="log-message">
+                {ev.message}
+                {ev.data ? <span className="log-data"> {JSON.stringify(ev.data)}</span> : null}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    Accounts view (full page)
    ============================================================ */
 function AccountsView({ profiles }: { profiles: AmazonProfile[] }) {
   return (
     <>
       <AllowedPrefixesPanel />
+      <HeadlessTogglePanel />
       <AccountsList profiles={profiles} />
     </>
   );
 }
 
+function HeadlessTogglePanel() {
+  const { settings, busy, update } = useSettings();
+  if (!settings) return null;
+  const on = settings.headless;
+  const toggle = () => void update({ headless: !on });
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Headless mode</div>
+          <div className="prefix-sub">
+            When enabled, the worker runs Amazon checkouts in hidden Chromium windows. Disable to
+            watch every step in a visible browser. Takes effect on the next worker Start.
+          </div>
+        </div>
+        <label
+          className={`toggle ${on ? 'on' : 'off'}`}
+          title={on ? 'Headless: jobs run hidden' : 'Visible: jobs show a browser window'}
+        >
+          <input
+            type="checkbox"
+            checked={on}
+            onChange={toggle}
+            disabled={busy}
+          />
+          <span className="toggle-slider" />
+          <span className="toggle-label">{on ? 'Headless' : 'Visible'}</span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function AllowedPrefixesPanel() {
-  const [settings, setSettings] = useState<Settings | null>(null);
+  const { settings, busy, update } = useSettings();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
-  const [busy, setBusy] = useState(false);
-
   useEffect(() => {
-    void window.autog.settingsGet().then((s) => {
-      setSettings(s);
-      setDraft(s.allowedAddressPrefixes.join(', '));
-    });
-  }, []);
+    if (settings) setDraft(settings.allowedAddressPrefixes.join(', '));
+  }, [settings]);
 
   const save = async () => {
     const list = draft
       .split(',')
       .map((p) => p.trim())
       .filter((p) => p.length > 0);
-    setBusy(true);
-    try {
-      const next = await window.autog.settingsSet({ allowedAddressPrefixes: list });
-      setSettings(next);
-      setDraft(next.allowedAddressPrefixes.join(', '));
-      setEditing(false);
-    } finally {
-      setBusy(false);
-    }
+    await update({ allowedAddressPrefixes: list });
+    setEditing(false);
   };
 
   if (!settings) return null;
@@ -548,6 +897,8 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   const [toast, setToast] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [refreshingEmail, setRefreshingEmail] = useState<string | null>(null);
+  const [draggingEmail, setDraggingEmail] = useState<string | null>(null);
+  const [dropTargetEmail, setDropTargetEmail] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -638,6 +989,31 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
     } finally {
       setRefreshingEmail(null);
       setRefreshingAll(false);
+    }
+  };
+
+  const handleDrop = async (targetEmail: string) => {
+    if (!draggingEmail || draggingEmail === targetEmail) {
+      setDraggingEmail(null);
+      setDropTargetEmail(null);
+      return;
+    }
+    const fromIdx = profiles.findIndex((p) => p.email === draggingEmail);
+    const toIdx = profiles.findIndex((p) => p.email === targetEmail);
+    if (fromIdx === -1 || toIdx === -1) {
+      setDraggingEmail(null);
+      setDropTargetEmail(null);
+      return;
+    }
+    const reordered = [...profiles];
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx, 0, moved!);
+    setDraggingEmail(null);
+    setDropTargetEmail(null);
+    try {
+      await window.autog.profilesReorder(reordered.map((p) => p.email));
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -745,8 +1121,40 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
         <div className="accounts-list">
           {profiles.map((p) => {
             const isRenaming = renaming === p.email;
+            const isDragging = draggingEmail === p.email;
+            const isDropTarget = dropTargetEmail === p.email && draggingEmail !== p.email;
             return (
-              <div key={p.email} className="account-card">
+              <div
+                key={p.email}
+                className={`account-card ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+                draggable={!isRenaming}
+                onDragStart={(e) => {
+                  setDraggingEmail(p.email);
+                  e.dataTransfer.effectAllowed = 'move';
+                  e.dataTransfer.setData('text/plain', p.email);
+                }}
+                onDragOver={(e) => {
+                  if (draggingEmail && draggingEmail !== p.email) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    setDropTargetEmail(p.email);
+                  }
+                }}
+                onDragLeave={() => {
+                  if (dropTargetEmail === p.email) setDropTargetEmail(null);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  void handleDrop(p.email);
+                }}
+                onDragEnd={() => {
+                  setDraggingEmail(null);
+                  setDropTargetEmail(null);
+                }}
+              >
+                <div className="account-drag-handle" title="Drag to reorder">
+                  ⋮⋮
+                </div>
                 <div className="account-left">
                   <div className="account-avatar">
                     {(p.displayName || p.email).charAt(0).toUpperCase()}
@@ -946,18 +1354,14 @@ function applyLogsToStats(prev: Stats, batch: LogEvent[]): Stats {
     if (ev.message === 'job.claim') {
       const jobId = typeof ev.data?.jobId === 'string' ? ev.data.jobId : null;
       next = { ...next, claimed: next.claimed + 1, lastJobId: jobId ?? next.lastJobId };
-    } else if (ev.message === 'job.scrape.ok' || ev.message === 'step.verify.ok') {
-      // Count a job as "completed" when verification succeeds (that's the
-      // terminal success for slice 2.5 — scrape-only).
-      if (ev.message === 'step.verify.ok') {
-        next = {
-          ...next,
-          completed: next.completed + 1,
-          lastJobResult: 'completed',
-          lastJobAt: ev.ts,
-        };
-      }
-    } else if (ev.message === 'job.fail' || ev.message === 'step.verify.fail') {
+    } else if (ev.message === 'job.profile.placed' || ev.message === 'job.profile.dryrun.success') {
+      next = {
+        ...next,
+        completed: next.completed + 1,
+        lastJobResult: 'completed',
+        lastJobAt: ev.ts,
+      };
+    } else if (ev.message === 'job.profile.fail' || ev.message === 'step.verify.fail' || ev.message === 'step.buy.fail') {
       next = { ...next, failed: next.failed + 1, lastJobResult: 'failed', lastJobAt: ev.ts };
     }
   }
