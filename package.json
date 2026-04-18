@@ -5,6 +5,10 @@
   "description": "Amazon automated checkout worker for BetterBG (rebuild on Playwright)",
   "private": true,
   "main": "out/main/index.js",
+  "author": {
+    "name": "pepe-gang",
+    "email": "noreply@pepe-gang.local"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
@@ -15,7 +19,74 @@
     "save-fixture": "tsx src/scripts/saveFixture.ts",
     "inspect-prime": "tsx src/scripts/inspectPrime.ts",
     "verify-urls": "tsx src/scripts/verifyUrls.ts",
-    "show": "tsx src/scripts/showWhatWeSee.ts"
+    "show": "tsx src/scripts/showWhatWeSee.ts",
+    "install-browsers": "tsx scripts/installPlaywrightBrowsers.ts",
+    "prepackage": "npm run build && npm run install-browsers",
+    "package": "npm run prepackage && electron-builder --mac --arm64 -c.mac.identity=null",
+    "package:signed": "npm run prepackage && electron-builder --mac --arm64",
+    "release": "npm run prepackage && electron-builder --mac --arm64 --publish=always"
+  },
+  "build": {
+    "appId": "com.pepegang.amazong",
+    "productName": "AmazonG",
+    "copyright": "Copyright © 2026 pepe-gang",
+    "directories": {
+      "output": "release",
+      "buildResources": "resources"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/node_modules/*.d.ts",
+      "!**/node_modules/.bin",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!.editorconfig",
+      "!**/._*",
+      "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}",
+      "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}",
+      "!**/{appveyor.yml,.travis.yml,circle.yml}",
+      "!**/{npm-debug.log,yarn.lock,.yarn-integrity,.yarn-metadata.json}"
+    ],
+    "extraResources": [
+      {
+        "from": "build-browsers",
+        "to": "playwright-browsers",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] },
+        { "target": "zip", "arch": ["arm64"] }
+      ],
+      "artifactName": "${productName}-${arch}.${ext}",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "extendInfo": {
+        "LSUIElement": false,
+        "NSHighResolutionCapable": true
+      }
+    },
+    "dmg": {
+      "sign": false,
+      "contents": [
+        { "x": 130, "y": 220, "type": "file" },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "pepe-gang",
+      "repo": "AmazonG"
+    },
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/playwright/**/*",
+      "node_modules/playwright-core/**/*"
+    ]
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",
@@ -24,6 +95,7 @@
     "@types/react-dom": "^19.0.1",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.1",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

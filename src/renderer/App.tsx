@@ -933,17 +933,19 @@ function AccountsView({
       <div
         className={workerRunning ? 'lock-wrapper lock-wrapper-locked' : 'lock-wrapper'}
         aria-disabled={workerRunning}
+        onClickCapture={(e) => {
+          if (!workerRunning) return;
+          // Intercept clicks on any descendant — don't let them reach the
+          // now-disabled buttons. Scroll / wheel events still pass through
+          // because this is click-only.
+          e.preventDefault();
+          e.stopPropagation();
+          handleLockedClick();
+        }}
       >
         <AllowedPrefixesPanel />
-        <HeadlessTogglePanel />
+        <HeadlessTogglePanel profiles={profiles} />
         <AccountsList profiles={profiles} />
-        {workerRunning && (
-          <div
-            className="lock-overlay"
-            onClick={handleLockedClick}
-            title="Stop the worker to edit settings"
-          />
-        )}
       </div>
       {lockedToast && (
         <div className="lock-toast" role="status">
@@ -954,30 +956,62 @@ function AccountsView({
   );
 }
 
-function HeadlessTogglePanel() {
+function HeadlessTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
   const { settings, busy, update } = useSettings();
+  const [applying, setApplying] = useState(false);
   if (!settings) return null;
-  const on = settings.headless;
-  const toggle = () => void update({ headless: !on });
+  // Master toggle state is derived from the per-profile switches. When
+  // there are no profiles yet, fall back to the global default so the user
+  // sees a non-empty state.
+  const on =
+    profiles.length > 0
+      ? profiles.every((p) => p.headless !== false)
+      : settings.headless;
+  const toggle = async () => {
+    const next = !on;
+    setApplying(true);
+    try {
+      // Serialize the per-profile writes — the main-side updateProfile
+      // reads + writes profiles.json, so running them in parallel
+      // clobbers state (last writer wins). Sequential keeps every update.
+      for (const p of profiles) {
+        await window.autog.profilesSetHeadless(p.email, next);
+      }
+      await update({ headless: next });
+    } finally {
+      setApplying(false);
+    }
+  };
+  const anyOff = profiles.some((p) => p.headless === false);
   return (
     <div className="prefix-panel">
       <div className="prefix-head">
         <div>
           <div className="prefix-title">Headless mode</div>
           <div className="prefix-sub">
-            When enabled, the worker runs Amazon checkouts in hidden Chromium windows. Disable to
-            watch every step in a visible browser. Takes effect on the next worker Start.
+            When enabled, every account runs Amazon checkouts in hidden Chromium windows. Flip
+            any individual account below to Visible and this master switch turns off automatically.
+            Takes effect on the next worker Start.
+            {anyOff && profiles.length > 0 && (
+              <>
+                {' '}
+                <span className="muted">
+                  ({profiles.filter((p) => p.headless === false).length} of {profiles.length}{' '}
+                  currently visible)
+                </span>
+              </>
+            )}
           </div>
         </div>
         <label
           className={`toggle ${on ? 'on' : 'off'}`}
-          title={on ? 'Headless: jobs run hidden' : 'Visible: jobs show a browser window'}
+          title={on ? 'Headless: all accounts run hidden' : 'At least one account is set to Visible'}
         >
           <input
             type="checkbox"
             checked={on}
-            onChange={toggle}
-            disabled={busy}
+            onChange={() => void toggle()}
+            disabled={busy || applying}
           />
           <span className="toggle-slider" />
           <span className="toggle-label">{on ? 'Headless' : 'Visible'}</span>
@@ -1335,6 +1369,31 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                   <div className="account-avatar">
                     {(p.displayName || p.email).charAt(0).toUpperCase()}
                   </div>
+                  {!isRenaming && (
+                    <label
+                      className={`toggle ${p.loggedIn && p.enabled ? 'on' : 'off'} ${
+                        !p.loggedIn ? 'toggle-locked' : ''
+                      }`}
+                      title={
+                        !p.loggedIn
+                          ? 'Sign in first to enable this account'
+                          : p.enabled
+                            ? 'Enabled — included when the worker fans out a job'
+                            : 'Disabled — worker skips this account'
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={p.loggedIn && p.enabled}
+                        disabled={!p.loggedIn}
+                        onChange={(e) => void toggleEnabled(p.email, e.target.checked)}
+                      />
+                      <span className="toggle-slider" />
+                      <span className="toggle-label">
+                        {p.enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </label>
+                  )}
                 </div>
                 <div className="account-main">
                   {isRenaming ? (
@@ -1393,20 +1452,22 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                 {!isRenaming && (
                   <div className="account-actions">
                     <label
-                      className={`toggle ${p.enabled ? 'on' : 'off'}`}
+                      className={`toggle ${p.headless !== false ? 'on' : 'off'}`}
                       title={
-                        p.enabled
-                          ? 'Enabled — included when the worker fans out a job'
-                          : 'Disabled — worker skips this account'
+                        p.headless !== false
+                          ? 'Headless ON — worker runs this account without showing a browser window'
+                          : 'Headless OFF — worker shows the Chromium window for this account (useful for debugging)'
                       }
                     >
                       <input
                         type="checkbox"
-                        checked={p.enabled}
-                        onChange={(e) => void toggleEnabled(p.email, e.target.checked)}
+                        checked={p.headless !== false}
+                        onChange={(e) =>
+                          void window.autog.profilesSetHeadless(p.email, e.target.checked)
+                        }
                       />
                       <span className="toggle-slider" />
-                      <span className="toggle-label">{p.enabled ? 'Enabled' : 'Disabled'}</span>
+                      <span className="toggle-label">Headless</span>
                     </label>
                     {!p.loggedIn && (
                       <button

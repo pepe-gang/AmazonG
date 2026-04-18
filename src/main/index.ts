@@ -37,6 +37,18 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 app.setName('AmazonG');
 
+// When packaged, Playwright needs to find the Chromium binary that
+// electron-builder bundled under `Resources/playwright-browsers`. The
+// `installPlaywrightBrowsers.ts` prepackage script downloads into
+// `build-browsers/` and extraResources ships it into the .app. This env
+// var has to be set BEFORE any `require('playwright')` that triggers
+// browser discovery (driver.ts imports it lazily at session time, so
+// setting here is safe).
+if (app.isPackaged) {
+  const bundled = join(process.resourcesPath, 'playwright-browsers');
+  process.env.PLAYWRIGHT_BROWSERS_PATH = bundled;
+}
+
 let mainWindow: BrowserWindow | null = null;
 let worker: WorkerHandle | null = null;
 let identity: IdentityInfo | null = null;
@@ -174,6 +186,25 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', async () => {
+  // Close the worker's Chromium processes AND any "Your Orders" / Order-ID
+  // click windows when the app's UI goes away — otherwise those Chromiums
+  // stay visible as orphan windows (especially on macOS, where the app
+  // stays alive after the main window closes).
+  try {
+    await closeAllChromiumSessions();
+  } catch (err) {
+    logger.warn('app.windows.cleanup.error', { error: String(err) });
+  }
+  if (process.platform !== 'darwin') app.quit();
+});
+
+/**
+ * Close every Playwright-launched Chromium context we own so they don't
+ * linger as zombie windows after the app quits. Covers the worker's
+ * per-profile sessions plus the "Your Orders" / Order-ID click sessions
+ * (openOrderSessions), and any other long-lived sessions we spawn.
+ */
+async function closeAllChromiumSessions(): Promise<void> {
   if (worker) {
     try {
       await worker.stop();
@@ -182,7 +213,34 @@ app.on('window-all-closed', async () => {
     }
     worker = null;
   }
-  if (process.platform !== 'darwin') app.quit();
+  const orderSessions = Array.from(openOrderSessions.values());
+  openOrderSessions.clear();
+  await Promise.all(
+    orderSessions.map(async ({ session }) => {
+      try {
+        await session.close();
+      } catch (err) {
+        logger.warn('amazon.orders.close.error', { error: String(err) });
+      }
+    }),
+  );
+}
+
+// Intercept the first quit, run cleanup, then quit for real. Without this
+// hook the Playwright Chromium processes (each profile's persistent
+// context) outlive the Electron app and stay visible as orphan windows.
+let quittingCleanly = false;
+app.on('before-quit', async (e) => {
+  if (quittingCleanly) return;
+  e.preventDefault();
+  try {
+    await closeAllChromiumSessions();
+  } catch (err) {
+    logger.warn('app.quit.cleanup.error', { error: String(err) });
+  } finally {
+    quittingCleanly = true;
+    app.quit();
+  }
 });
 
 function registerIpcHandlers(): void {
@@ -306,6 +364,15 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(
+    IPC.profilesSetHeadless,
+    async (_e, email: string, headless: boolean) => {
+      const list = await updateProfile(email, { headless });
+      await broadcastProfiles(list);
+      return list;
+    },
+  );
+
+  ipcMain.handle(
     IPC.profilesRename,
     async (_e, email: string, displayName: string | null) => {
       const clean = displayName?.trim() || null;
@@ -342,6 +409,19 @@ function registerIpcHandlers(): void {
   });
 
   async function openOrderPageInProfile(email: string, url: string): Promise<void> {
+    // If the worker is currently running AND has a live session for this
+    // profile, ask it to open the URL in a new tab inside its own Chromium.
+    // Otherwise a second Chromium with the same userDataDir would fail on
+    // the ProcessSingleton lock, and the renderer would have to fall back
+    // to the system browser.
+    if (worker) {
+      const opened = await worker.openProfileTab(email, url).catch(() => false);
+      if (opened) {
+        logger.info('amazon.orders.worker.tab', { email, url });
+        return;
+      }
+    }
+
     // Open an Amazon page in this profile's persistent session so the user
     // lands already-signed-in. The window stays open until the user closes
     // it. We track one open session per email so:

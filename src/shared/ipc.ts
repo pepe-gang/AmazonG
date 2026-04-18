@@ -23,6 +23,7 @@ export const IPC = {
   profilesLogin: 'profiles:login',
   profilesRefresh: 'profiles:refresh',
   profilesSetEnabled: 'profiles:set-enabled',
+  profilesSetHeadless: 'profiles:set-headless',
   profilesRename: 'profiles:rename',
   profilesOpenOrders: 'profiles:open-orders',
   profilesOpenOrder: 'profiles:open-order',
@@ -71,6 +72,7 @@ export type AutoGBridge = {
   profilesLogin(email: string): Promise<{ loggedIn: boolean; reason?: string }>;
   profilesRefresh(email: string): Promise<AmazonProfile | null>;
   profilesSetEnabled(email: string, enabled: boolean): Promise<AmazonProfile[]>;
+  profilesSetHeadless(email: string, headless: boolean): Promise<AmazonProfile[]>;
   profilesRename(email: string, displayName: string | null): Promise<AmazonProfile[]>;
   profilesOpenOrders(email: string): Promise<void>;
   profilesOpenOrder(email: string, orderId: string): Promise<void>;

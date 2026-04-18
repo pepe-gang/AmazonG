@@ -44,6 +44,13 @@ type Deps = {
 
 export type WorkerHandle = {
   stop(): Promise<void>;
+  /**
+   * If the worker currently holds a live session for `email`, navigate one
+   * of its tabs to `url` and return true. Lets the renderer open a profile
+   * URL inside the worker's already-launched Chromium instead of racing
+   * the userDataDir lock with a second browser process.
+   */
+  openProfileTab(email: string, url: string): Promise<boolean>;
 };
 
 const FANOUT_CONCURRENCY = 3;
@@ -121,6 +128,21 @@ export function startWorker(deps: Deps): WorkerHandle {
       running = false;
       await loop;
     },
+    async openProfileTab(email, url) {
+      const session = sessions.get(email);
+      if (!session) return false;
+      try {
+        // Open a new tab so we don't interrupt whatever job is currently
+        // running in the main tab for this profile. Bring it to front.
+        const page = await session.context.newPage();
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        await page.bringToFront();
+        return true;
+      } catch (err) {
+        logger.warn('worker.openProfileTab.error', { email, url, error: String(err) });
+        return false;
+      }
+    },
   };
 }
 
@@ -174,7 +196,7 @@ async function handleJob(
   );
 
   const results = await pMap(eligible, FANOUT_CONCURRENCY, (profile) =>
-    runForProfile(deps, sessions, job, profile.email, cid),
+    runForProfile(deps, sessions, job, profile, cid),
   );
 
   // Aggregate.
@@ -305,13 +327,11 @@ async function handleVerifyJob(
     return;
   }
 
-  // The buy attempt row we'll be updating in lockstep with the verify
-  // outcome. If buyJobId is missing (legacy/orphan verify), there's no
-  // row to roll forward — we still run verify and report to BG, just
-  // without table-side reflection.
-  const buyAttemptId = job.buyJobId
-    ? makeAttemptId(job.buyJobId, profile.email)
-    : null;
+  // Resolve the attempt row we'll track this verify against. Preferred:
+  // roll the original buy row forward (single lifecycle). Fallback: if the
+  // buy row was cleared/pruned or buyJobId is missing, create a fresh
+  // phase='verify' row so the user can see the job running immediately.
+  const activeAttemptId = await resolveVerifyAttemptRow(deps, job, profile.email);
 
   logger.info(
     'job.verify.start',
@@ -320,7 +340,7 @@ async function handleVerifyJob(
   );
 
   try {
-    const session = await getSession(deps, sessions, profile.email);
+    const session = await getSession(deps, sessions, profile.email, profile.headless);
     const existing = session.context.pages();
     const page = existing[0] ?? (await session.newPage());
     const outcome = await verifyOrder(page, targetOrderId);
@@ -337,10 +357,13 @@ async function handleVerifyJob(
         },
         cid,
       );
-      await recordVerifyOutcome(deps, buyAttemptId, job, profile.email, {
-        status: 'verified',
-        error: null,
-      });
+      await deps.jobAttempts
+        .update(activeAttemptId, {
+          status: 'verified',
+          error: null,
+          orderId: targetOrderId,
+        })
+        .catch(() => undefined);
       await reportSafe(
         deps,
         job.id,
@@ -381,10 +404,13 @@ async function handleVerifyJob(
         },
         cid,
       );
-      await recordVerifyOutcome(deps, buyAttemptId, job, profile.email, {
-        status: 'cancelled_by_amazon',
-        error: 'order was cancelled by Amazon',
-      });
+      await deps.jobAttempts
+        .update(activeAttemptId, {
+          status: 'cancelled_by_amazon',
+          error: 'order was cancelled by Amazon',
+          orderId: targetOrderId,
+        })
+        .catch(() => undefined);
       await reportSafe(
         deps,
         job.id,
@@ -408,20 +434,25 @@ async function handleVerifyJob(
         { jobId: job.id, profile: profile.email, orderId: targetOrderId, amazonMessage: outcome.message },
         cid,
       );
+      await deps.jobAttempts
+        .update(activeAttemptId, { status: 'failed', error })
+        .catch(() => undefined);
       await reportSafe(deps, job.id, { status: 'failed', error }, cid);
       return;
     }
 
-    // timeout — leave the buy row in 'awaiting_verification' so BG's next
-    // verify retry can resolve it. Don't mark the buy row failed: we don't
-    // know whether the order is alive or dead, only that Amazon's order-
-    // details page didn't render in time.
+    // timeout — we don't know whether the order is alive or dead. Leave
+    // the row in 'awaiting_verification' so BG's next verify retry can
+    // resolve it; don't mark it failed.
     const error = `verify: timed out reading order-details for ${targetOrderId} (page never showed cancellation marker or order id)`;
     logger.error(
       'job.verify.timeout',
       { jobId: job.id, profile: profile.email, orderId: targetOrderId },
       cid,
     );
+    await deps.jobAttempts
+      .update(activeAttemptId, { status: 'awaiting_verification', error: null })
+      .catch(() => undefined);
     await reportSafe(deps, job.id, { status: 'failed', error }, cid);
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
@@ -431,6 +462,9 @@ async function handleVerifyJob(
       { jobId: job.id, profile: profile.email, orderId: targetOrderId, error },
       cid,
     );
+    await deps.jobAttempts
+      .update(activeAttemptId, { status: 'failed', error })
+      .catch(() => undefined);
     await reportSafe(deps, job.id, { status: 'failed', error }, cid);
   } finally {
     // Always close the verify-phase browser window. Unlike the buy flow
@@ -447,30 +481,38 @@ async function handleVerifyJob(
 }
 
 /**
- * Write the verify outcome into the Jobs table. Preferred path: update the
- * original buy-attempt row so the user sees a single lifecycle. If that row
- * no longer exists (user hit "Clear All" or the row was pruned), create a
- * brand-new phase='verify' row so the outcome isn't silently lost.
+ * Pick (and persist up-front) the attempt row this verify run will track.
+ *
+ * Preferred path: bump the original buy attempt row from
+ * 'awaiting_verification' → 'in_progress' so the single lifecycle stays
+ * intact. If that row was cleared (user hit "Clear All", pruned, etc.) or
+ * the verify job has no buyJobId linkage, create a fresh phase='verify'
+ * row in 'in_progress' immediately so the user sees the verify actually
+ * running in the Jobs table instead of a silent no-op.
+ *
+ * Returns the attempt id that the caller should update with the final
+ * verify outcome.
  */
-async function recordVerifyOutcome(
+async function resolveVerifyAttemptRow(
   deps: Deps,
-  buyAttemptId: string | null,
   job: AutoGJob,
   profileEmail: string,
-  patch: { status: JobAttemptStatus; error: string | null },
-): Promise<void> {
+): Promise<string> {
+  const buyAttemptId = job.buyJobId
+    ? makeAttemptId(job.buyJobId, profileEmail)
+    : null;
+
   if (buyAttemptId) {
-    const updated = await deps.jobAttempts
-      .update(buyAttemptId, patch)
+    const bumped = await deps.jobAttempts
+      .update(buyAttemptId, { status: 'in_progress', error: null })
       .catch(() => null);
-    if (updated) return;
+    if (bumped) return buyAttemptId;
   }
 
-  // Fall-through: no buy row to update (missing buyJobId, or the row was
-  // cleared). Create a standalone verify row so the outcome is recorded.
+  const verifyAttemptId = makeAttemptId(job.id, profileEmail);
   await deps.jobAttempts
     .create({
-      attemptId: makeAttemptId(job.id, profileEmail),
+      attemptId: verifyAttemptId,
       jobId: job.id,
       amazonEmail: profileEmail,
       phase: 'verify',
@@ -484,11 +526,12 @@ async function recordVerifyOutcome(
       cost: null,
       cashbackPct: null,
       orderId: job.placedOrderId,
-      status: patch.status,
-      error: patch.error,
+      status: 'in_progress',
+      error: null,
       dryRun: false,
     })
     .catch(() => undefined);
+  return verifyAttemptId;
 }
 
 async function reportSafe(
@@ -508,9 +551,10 @@ async function runForProfile(
   deps: Deps,
   sessions: Map<string, DriverSession>,
   job: AutoGJob,
-  profile: string,
+  profileData: AmazonProfile,
   parentCid: string,
 ): Promise<ProfileResult> {
+  const profile = profileData.email;
   // Per-profile correlation id so logs across the parallel runs are
   // distinguishable (parent cid is shared by all profiles in a fan-out).
   const cid = `${parentCid}/${profile}`;
@@ -523,7 +567,7 @@ async function runForProfile(
   let page: Page | null = null;
   try {
     logger.info('job.profile.start', { jobId: job.id, profile }, cid);
-    const session = await getSession(deps, sessions, profile);
+    const session = await getSession(deps, sessions, profile, profileData.headless);
     // Reuse the persistent context's existing tab (Chromium starts with an
     // about:blank). Don't create a new tab for each job — that leaves the
     // initial blank tab orphaned next to ours.
@@ -708,6 +752,9 @@ async function runForProfile(
         cost: buy.finalPriceText ?? info.priceText,
         cashbackPct: buy.cashbackPct,
         orderId: buy.orderId,
+        // Actual quantity picked at /spc — replaces the BG-requested
+        // quantity that was stored at fan-out time (always 1 for now).
+        quantity: buy.quantity,
         error: null,
       })
       .catch(() => undefined);
@@ -763,12 +810,16 @@ async function getSession(
   deps: Deps,
   sessions: Map<string, DriverSession>,
   profile: string,
+  headlessOverride?: boolean,
 ): Promise<DriverSession> {
   const existing = sessions.get(profile);
   if (existing) return existing;
+  // Per-profile value wins over the global fallback. Undefined (caller
+  // didn't pass) means no per-profile preference known → use global.
+  const headless = headlessOverride ?? deps.headless;
   const s = await openSession(profile, {
     userDataRoot: deps.userDataRoot,
-    headless: deps.headless,
+    headless,
   });
   sessions.set(profile, s);
   return s;

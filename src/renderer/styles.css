@@ -567,14 +567,12 @@ a,
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
-/* Accounts page */
+/* Accounts page — scroll is handled by the ancestor .lock-wrapper so the
+   whole page (settings panels + list) scrolls as one surface. */
 .accounts-view {
-  flex: 1;
-  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  overflow-y: auto;
 }
 .page-head {
   display: flex;
@@ -737,6 +735,10 @@ a,
 }
 .account-left {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
 }
 .account-avatar {
   width: 44px;
@@ -804,9 +806,17 @@ a,
 }
 .account-actions {
   display: flex;
-  gap: 8px;
+  gap: 12px;
   flex-shrink: 0;
+  align-items: center;
 }
+/* Each action slot takes a fixed min-width so columns line up across
+   rows — Sign-in and Your-Orders sit in the same horizontal position
+   regardless of which one is rendered, and the Headless toggle + Remove
+   button stay flush with the other rows. */
+.account-actions .toggle { min-width: 104px; justify-content: flex-start; }
+.account-actions > button { min-width: 110px; text-align: center; }
+.account-actions > button.danger-text { min-width: 84px; }
 .rename-form {
   display: flex;
   gap: 6px;
@@ -885,12 +895,37 @@ a,
 .toggle.on .toggle-label {
   color: var(--success);
 }
+.toggle-locked {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.toggle-locked .toggle-slider { background: var(--border-strong); }
 
 /* When the toggle lives inside .prefix-head (right column), match the
    panel's edit-button alignment instead of the inline row layout used in
    the account row. */
 .prefix-head .toggle {
   align-self: flex-start;
+}
+
+/* Avatar-adjacent Enabled toggle: compact (tiny slider, no label) so it
+   reads as a status indicator below the avatar instead of a heavy button. */
+.account-left .toggle {
+  gap: 0;
+}
+.account-left .toggle .toggle-label {
+  display: none;
+}
+.account-left .toggle .toggle-slider {
+  width: 28px;
+  height: 16px;
+}
+.account-left .toggle .toggle-slider::after {
+  width: 12px;
+  height: 12px;
+}
+.account-left .toggle.on .toggle-slider::after {
+  transform: translateX(12px);
 }
 
 /* ===== Modal ===== */
@@ -1418,6 +1453,18 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   color: var(--text-muted);
 }
 
+.headless-select {
+  height: 30px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 0 8px;
+  font-size: 12px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.headless-select:hover { border-color: var(--primary); }
+
 /* Lock banner + overlay (Accounts view when worker is running) */
 .lock-banner {
   display: flex;
@@ -1434,18 +1481,23 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
 }
 .lock-banner-icon { font-size: 16px; }
 
-.lock-wrapper { position: relative; }
-.lock-wrapper-locked > *:not(.lock-overlay) {
+.lock-wrapper {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+.lock-wrapper-locked {
+  cursor: not-allowed;
+}
+.lock-wrapper-locked > * {
   opacity: 0.55;
   filter: grayscale(0.25);
   user-select: none;
-}
-.lock-overlay {
-  position: absolute;
-  inset: 0;
-  background: transparent;
-  cursor: not-allowed;
-  z-index: 10;
+  pointer-events: none;
 }
 
 .lock-toast {

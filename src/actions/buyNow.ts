@@ -86,7 +86,13 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     //      AutoG — BG always wants the max units per order. Best-effort:
     //      products with no dropdown (qty fixed at 1) just skip cleanly.
     const qty = await setMaxQuantity(page);
+    // Track the quantity Amazon will actually check out with so the worker
+    // can persist it on the JobAttempt row (the "Qty" column). When the
+    // PDP has no dropdown — most items ship qty=1 — setMaxQuantity skips
+    // and we fall through to the default of 1.
+    let placedQuantity = 1;
     if (qty.ok) {
+      placedQuantity = qty.selected;
       step('step.buy.quantity.set', {
         selected: qty.selected,
         options: qty.allOptions,
@@ -219,6 +225,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         finalPrice: null,
         finalPriceText: null,
         cashbackPct,
+        quantity: placedQuantity,
       };
     }
 
@@ -289,6 +296,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       finalPrice: confirmation.finalPrice,
       finalPriceText: confirmation.finalPriceText,
       cashbackPct,
+      quantity: placedQuantity,
     };
   } catch (err) {
     return fail('confirm_parse', 'unexpected error in buyNow flow', String(err));
@@ -535,11 +543,25 @@ async function selectAllowedAddressRadio(
       if (radios.length === 0) return { kind: 'no-radios' as const };
 
       const rows = radios.map((r) => {
-        const li = r.closest('li, [class*="address-row"], [class*="address"]');
-        const text = ((li as HTMLElement | null)?.innerText || '').replace(
-          /\s+/g,
-          ' ',
-        );
+        // Amazon ships several layouts for the Chewbacca address picker:
+        //   (a) <li> containing recipient + address (older),
+        //   (b) <label> directly wrapping the radio + address (2026 new
+        //       redesign — no <li>, no address-row class),
+        //   (c) generic "address" class wrappers on intermediate divs.
+        // Try each in order until we find one with real text. Use
+        // `textContent` (not `innerText`) — innerText requires live layout
+        // and returns "" under headless Chromium, which was the root cause
+        // of the "no saved address starts with an allowed prefix (saw: |
+        // | )" failures.
+        const candidates: (Element | null)[] = [
+          r.closest('label'),
+          r.closest('[class*="a-radio-fancy"]'),
+          r.closest('li, [class*="address-row"], [class*="address"]'),
+        ];
+        const host = candidates.find(
+          (el) => el && (el.textContent || '').trim().length > 0,
+        ) as HTMLElement | null;
+        const text = (host?.textContent || '').replace(/\s+/g, ' ');
         // Pull the first chunk of digits we see — Amazon's row text starts
         // with the recipient name then "<housenum> <street>, <city>, ...".
         const m = text.match(/(\d{2,6}[^,]*),/);

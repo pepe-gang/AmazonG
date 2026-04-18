@@ -23,7 +23,10 @@ export async function loadProfiles(): Promise<AmazonProfile[]> {
   try {
     const raw = await readFile(filePath(), 'utf8');
     const parsed = JSON.parse(raw) as Stored;
-    return parsed.profiles ?? [];
+    const list = parsed.profiles ?? [];
+    // Backfill `headless` for profiles persisted before the field shipped.
+    // Default to true — matches the app-wide default (headless ON).
+    return list.map((p) => ({ ...p, headless: p.headless ?? true }));
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
@@ -80,6 +83,7 @@ export function newProfile(email: string, displayName?: string): AmazonProfile {
     addedAt: new Date().toISOString(),
     lastLoginAt: null,
     loggedIn: false,
+    headless: true,
   };
 }
 

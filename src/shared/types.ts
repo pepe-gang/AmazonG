@@ -41,6 +41,8 @@ export type BuyResult =
       finalPrice: number | null;
       finalPriceText: string | null;
       cashbackPct: number | null;
+      /** Actual qty selected at /spc (max numeric option from the dropdown, 1 if no dropdown). */
+      quantity: number;
     }
   | {
       ok: false;
@@ -107,6 +109,13 @@ export type AmazonProfile = {
   addedAt: string;
   lastLoginAt: string | null;
   loggedIn: boolean;
+  /**
+   * Whether Chromium runs headless for this account. true = invisible
+   * (default, faster); false = show the Chromium window (useful for
+   * debugging a specific account). Settable per-account via the toggle
+   * on the account card.
+   */
+  headless: boolean;
 };
 
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug';
