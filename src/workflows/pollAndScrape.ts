@@ -62,6 +62,8 @@ type ProfileResult = {
   placedPrice: string | null;
   placedCashbackPct: number | null;
   placedAt: string | null;
+  /** Quantity actually checked out (max numeric option from /spc dropdown). */
+  placedQuantity: number;
   error: string | null;
   dryRun: boolean;
 };
@@ -270,6 +272,7 @@ async function handleJob(
       : r.status === 'completed'
         ? ('awaiting_verification' as const)
         : ('failed' as const),
+    purchasedCount: r.placedQuantity,
     orderId: r.orderId,
     placedPrice: r.placedPrice,
     placedCashbackPct: r.placedCashbackPct,
@@ -282,6 +285,7 @@ async function handleJob(
       status: overallStatus,
       ...(parentError ? { error: parentError } : {}),
       placedAt: winner?.placedAt ?? null,
+      placedQuantity: winner?.placedQuantity ?? null,
       placedPrice: winner?.placedPrice ?? null,
       placedCashbackPct: winner?.placedCashbackPct ?? null,
       placedOrderId: winner?.orderId ?? null,
@@ -770,6 +774,7 @@ async function runForProfile(
       placedPrice: buy.finalPriceText,
       placedCashbackPct: buy.cashbackPct,
       placedAt,
+      placedQuantity: buy.quantity,
       error: null,
       dryRun: buy.dryRun,
     };
@@ -796,6 +801,7 @@ function failed(email: string, error: string): ProfileResult {
     placedPrice: null,
     placedCashbackPct: null,
     placedAt: null,
+    placedQuantity: 0,
     error,
     dryRun: false,
   };

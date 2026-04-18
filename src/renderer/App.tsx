@@ -469,6 +469,41 @@ function DashboardView(props: {
 type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'payout' | 'cb' | 'profit' | 'status' | 'orderId';
 
 /**
+ * Stable identifiers for each draggable column in the Jobs table. The
+ * user-chosen ordering lives in settings.jobsColumnOrder; unknown ids
+ * are dropped, missing ids fall back to DEFAULT_COLUMN_ORDER's tail.
+ *
+ * The Action menu column is intentionally excluded — it's not part of
+ * the data, it stays pinned to the right.
+ */
+type JobColumnId =
+  | 'date' | 'item' | 'dealId' | 'account' | 'qty'
+  | 'retail' | 'payout' | 'cb' | 'profit' | 'orderId' | 'status';
+
+const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
+  'date', 'item', 'dealId', 'account', 'qty',
+  'retail', 'payout', 'cb', 'profit', 'orderId', 'status',
+];
+
+function resolveColumnOrder(saved: string[]): JobColumnId[] {
+  const valid = new Set<JobColumnId>(DEFAULT_COLUMN_ORDER);
+  const seen = new Set<JobColumnId>();
+  const out: JobColumnId[] = [];
+  for (const id of saved) {
+    if (valid.has(id as JobColumnId) && !seen.has(id as JobColumnId)) {
+      out.push(id as JobColumnId);
+      seen.add(id as JobColumnId);
+    }
+  }
+  // Append any defaults the saved order didn't mention (e.g. brand-new
+  // columns added in a later release).
+  for (const id of DEFAULT_COLUMN_ORDER) {
+    if (!seen.has(id)) out.push(id);
+  }
+  return out;
+}
+
+/**
  * Per-row profit: BG pays us `payout` per unit, we pay Amazon `retail`,
  * and Amazon refunds `cashbackPct` of retail. So per unit:
  *   profit = payout - retail × (1 - cashback%)
@@ -492,6 +527,81 @@ function computeProfit(a: JobAttempt): number | null {
   const perUnit = payout - retail * (1 - cb / 100);
   return perUnit * qty;
 }
+
+// Labels are kept in sync with BetterBG's Auto Buy dashboard so the same
+// order shows the same status word in both places. BG uses British "ll"
+// spelling for cancelled, hence the matching here.
+const STATUS_LABEL: Record<JobAttemptStatus, string> = {
+  queued: 'Queued',
+  in_progress: 'Running',
+  awaiting_verification: 'Waiting for Verification',
+  verified: 'Completed',
+  cancelled_by_amazon: 'Cancelled',
+  completed: 'Done',
+  failed: 'Failed',
+  dry_run_success: 'Dry-run OK',
+};
+
+/** TSV cell value extractor for one column id. Used by both copy paths. */
+function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
+  switch (id) {
+    case 'date':    return new Date(a.createdAt).toISOString();
+    case 'item':    return a.dealTitle ?? '';
+    case 'dealId':  return a.dealId ?? a.dealKey ?? '';
+    case 'account': return a.amazonEmail;
+    case 'qty':     return typeof a.quantity === 'number' ? a.quantity : '';
+    case 'retail':  return typeof a.maxPrice === 'number' ? a.maxPrice.toFixed(2) : '';
+    case 'payout':  return typeof a.price === 'number' ? a.price.toFixed(2) : '';
+    case 'cb':      return typeof a.cashbackPct === 'number' ? a.cashbackPct : '';
+    case 'profit': {
+      const p = computeProfit(a);
+      return p === null ? '' : p.toFixed(2);
+    }
+    case 'orderId': return a.orderId ?? '';
+    case 'status':  return STATUS_LABEL[a.status] ?? a.status;
+  }
+}
+
+/**
+ * Format attempt rows as TSV for paste-to-spreadsheet flows. Column
+ * order matches the visible Jobs table (whatever the user dragged it
+ * to). NO HEADER row — paste-append into an existing tracker is the
+ * primary use case, and the user explicitly doesn't want column names.
+ * Cells get the standard TSV escape (wrap in quotes + double internal
+ * quotes) when they contain tab/newline/quote so Google Sheets / Excel
+ * parse them correctly.
+ */
+function attemptsToTSV(rows: JobAttempt[], order: JobColumnId[]): string {
+  const escape = (v: string | number): string => {
+    const s = String(v);
+    return /[\t\n"]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return rows
+    .map((a) => order.map((id) => escape(tsvCell(id, a))).join('\t'))
+    .join('\n');
+}
+
+const COLUMN_LABEL: Record<JobColumnId, string> = {
+  date: 'Date',
+  item: 'Item',
+  dealId: 'Deal ID',
+  account: 'Amazon Account',
+  qty: 'Qty',
+  retail: 'Retail',
+  payout: 'Payout',
+  cb: 'CB',
+  profit: 'Profit',
+  orderId: 'Order ID',
+  status: 'Status',
+};
+
+const COLUMN_ALIGN: Partial<Record<JobColumnId, 'right' | 'center'>> = {
+  qty: 'center',
+  retail: 'right',
+  payout: 'right',
+  cb: 'right',
+  profit: 'right',
+};
 type SortDir = 'asc' | 'desc';
 
 function JobsTable({
@@ -518,6 +628,50 @@ function JobsTable({
   const [accountFilter, setAccountFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [orderToast, setOrderToast] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState<null | 'verify' | 'delete'>(null);
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
+
+  // Drag-to-reorder + hide/show columns. Both persist in settings so
+  // the layout (and the TSV-copy shape) survives restarts.
+  const { settings, update } = useSettings();
+  const fullColumnOrder = useMemo(
+    () => resolveColumnOrder(settings?.jobsColumnOrder ?? []),
+    [settings?.jobsColumnOrder],
+  );
+  const hiddenSet = useMemo(
+    () => new Set<JobColumnId>(
+      (settings?.jobsColumnHidden ?? []).filter(
+        (id): id is JobColumnId => DEFAULT_COLUMN_ORDER.includes(id as JobColumnId),
+      ),
+    ),
+    [settings?.jobsColumnHidden],
+  );
+  const columnOrder = useMemo(
+    () => fullColumnOrder.filter((id) => !hiddenSet.has(id)),
+    [fullColumnOrder, hiddenSet],
+  );
+  const setColumnHidden = (id: JobColumnId, hidden: boolean) => {
+    const next = new Set(hiddenSet);
+    if (hidden) next.add(id);
+    else next.delete(id);
+    void update({ jobsColumnHidden: Array.from(next) });
+  };
+  const [draggingCol, setDraggingCol] = useState<JobColumnId | null>(null);
+  const [dropTargetCol, setDropTargetCol] = useState<JobColumnId | null>(null);
+  const handleColDrop = (target: JobColumnId) => {
+    if (!draggingCol || draggingCol === target) {
+      setDraggingCol(null);
+      setDropTargetCol(null);
+      return;
+    }
+    const next = columnOrder.filter((c) => c !== draggingCol);
+    const idx = next.indexOf(target);
+    next.splice(idx + 1, 0, draggingCol);
+    setDraggingCol(null);
+    setDropTargetCol(null);
+    void update({ jobsColumnOrder: next });
+  };
 
   const openOrderInProfile = async (email: string, orderId: string) => {
     try {
@@ -630,6 +784,74 @@ function JobsTable({
 
   const hasFilter = statusFilter !== 'all' || accountFilter !== 'all' || search.length > 0;
 
+  // Drop selections that no longer exist in the visible-or-attempts set
+  // (e.g. after a bulk delete) so the bulk bar reflects reality.
+  useEffect(() => {
+    const ids = new Set(attempts.map((a) => a.attemptId));
+    let dirty = false;
+    const next = new Set<string>();
+    for (const id of selected) {
+      if (ids.has(id)) next.add(id);
+      else dirty = true;
+    }
+    if (dirty) setSelected(next);
+  }, [attempts, selected]);
+
+  const selectedAttempts = useMemo(
+    () => attempts.filter((a) => selected.has(a.attemptId)),
+    [attempts, selected],
+  );
+  const selectedVerifiable = selectedAttempts.filter((a) => !!a.orderId);
+
+  const runBulkVerify = async () => {
+    if (selectedVerifiable.length === 0) return;
+    setBulkBusy('verify');
+    setBulkProgress({ done: 0, total: selectedVerifiable.length });
+    let active = 0, cancelled = 0, failed = 0;
+    // Serialize — each verify opens a Chromium session for that profile;
+    // running them in parallel would hit ProcessSingleton locks when
+    // multiple selected rows share an Amazon account.
+    for (let i = 0; i < selectedVerifiable.length; i++) {
+      const a = selectedVerifiable[i]!;
+      try {
+        const r = await window.autog.jobsVerifyOrder(a.attemptId);
+        if (r.kind === 'active') active++;
+        else if (r.kind === 'cancelled') cancelled++;
+        else failed++;
+      } catch {
+        failed++;
+      }
+      setBulkProgress({ done: i + 1, total: selectedVerifiable.length });
+    }
+    setBulkBusy(null);
+    setBulkProgress(null);
+    setOrderToast(
+      `Bulk verify complete · ${active} active, ${cancelled} cancelled${failed ? `, ${failed} failed/timeout` : ''}.`,
+    );
+    setTimeout(() => setOrderToast(null), 6000);
+  };
+
+  const runBulkDelete = async () => {
+    if (selectedAttempts.length === 0) return;
+    if (!confirm(`Delete ${selectedAttempts.length} selected row${selectedAttempts.length === 1 ? '' : 's'} and their logs?`)) {
+      return;
+    }
+    setBulkBusy('delete');
+    setBulkProgress({ done: 0, total: selectedAttempts.length });
+    for (let i = 0; i < selectedAttempts.length; i++) {
+      const a = selectedAttempts[i]!;
+      try {
+        await window.autog.jobsDelete(a.attemptId);
+      } catch {
+        // skip — broadcast will sync state
+      }
+      setBulkProgress({ done: i + 1, total: selectedAttempts.length });
+    }
+    setSelected(new Set());
+    setBulkBusy(null);
+    setBulkProgress(null);
+  };
+
   return (
     <div className="jobs-card">
       <div className="jobs-head">
@@ -638,6 +860,12 @@ function JobsTable({
           <div className="jobs-count">
             {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
           </div>
+          <ColumnsMenu
+            order={fullColumnOrder}
+            hidden={hiddenSet}
+            onToggle={setColumnHidden}
+            onReset={() => void update({ jobsColumnOrder: [], jobsColumnHidden: [] })}
+          />
           {failedCount > 0 && (
             <button
               className="ghost-btn"
@@ -697,8 +925,8 @@ function JobsTable({
             <option value="queued">Queued</option>
             <option value="in_progress">Running</option>
             <option value="awaiting_verification">Waiting for Verification</option>
-            <option value="verified">Success</option>
-            <option value="cancelled_by_amazon">Canceled</option>
+            <option value="verified">Completed</option>
+            <option value="cancelled_by_amazon">Cancelled</option>
             <option value="completed">Done</option>
             <option value="dry_run_success">Dry-run OK</option>
             <option value="failed">Failed</option>
@@ -719,6 +947,63 @@ function JobsTable({
         </div>
       )}
 
+      {selected.size > 0 && (
+        <div className="bulk-bar" role="toolbar">
+          <span className="bulk-count">
+            {bulkBusy && bulkProgress
+              ? `${bulkBusy === 'verify' ? 'Verifying' : 'Deleting'} ${bulkProgress.done}/${bulkProgress.total}…`
+              : `${selected.size} selected`}
+          </span>
+          <button
+            className="ghost-btn"
+            disabled={bulkBusy !== null}
+            title={`Copy ${selected.size} row${selected.size === 1 ? '' : 's'} as TSV (paste into Google Sheets / Excel)`}
+            onClick={async () => {
+              const tsv = attemptsToTSV(selectedAttempts, columnOrder);
+              try {
+                await navigator.clipboard.writeText(tsv);
+                setOrderToast(
+                  `Copied ${selectedAttempts.length} row${selectedAttempts.length === 1 ? '' : 's'} — paste into a spreadsheet.`,
+                );
+              } catch (err) {
+                setOrderToast(
+                  `Copy failed: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              }
+              setTimeout(() => setOrderToast(null), 4000);
+            }}
+          >
+            Copy ({selected.size})
+          </button>
+          <button
+            className="ghost-btn"
+            disabled={bulkBusy !== null || selectedVerifiable.length === 0}
+            title={
+              selectedVerifiable.length === 0
+                ? 'None of the selected rows have an order id to verify'
+                : `Re-check Amazon for ${selectedVerifiable.length} order${selectedVerifiable.length === 1 ? '' : 's'}`
+            }
+            onClick={() => void runBulkVerify()}
+          >
+            Verify ({selectedVerifiable.length})
+          </button>
+          <button
+            className="ghost-btn danger-text"
+            disabled={bulkBusy !== null}
+            onClick={() => void runBulkDelete()}
+          >
+            Delete ({selected.size})
+          </button>
+          <button
+            className="ghost-btn"
+            disabled={bulkBusy !== null}
+            onClick={() => setSelected(new Set())}
+          >
+            Clear selection
+          </button>
+        </div>
+      )}
+
       <div className="jobs-table-wrap">
         {attempts.length === 0 ? (
           <div className="jobs-empty">
@@ -732,128 +1017,90 @@ function JobsTable({
           <table className="jobs-table">
             <thead>
               <tr>
-                <SortableTh label="Date" k="date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="Item" k="item" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="Deal ID" k="dealId" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="Amazon Account" k="account" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="Qty" k="qty" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="center" />
-                <SortableTh label="Retail" k="retail" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="right" />
-                <SortableTh label="Payout" k="payout" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="right" />
-                <SortableTh label="CB" k="cb" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="right" />
-                <SortableTh label="Profit" k="profit" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="right" />
-                <SortableTh label="Order ID" k="orderId" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                <SortableTh label="Status" k="status" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                <th className="cell-select">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all visible rows"
+                    checked={visible.length > 0 && visible.every((a) => selected.has(a.attemptId))}
+                    ref={(el) => {
+                      // Indeterminate when some-but-not-all visible rows are selected.
+                      if (el) {
+                        const sel = visible.filter((a) => selected.has(a.attemptId)).length;
+                        el.indeterminate = sel > 0 && sel < visible.length;
+                      }
+                    }}
+                    onChange={(e) => {
+                      const next = new Set(selected);
+                      if (e.target.checked) {
+                        for (const a of visible) next.add(a.attemptId);
+                      } else {
+                        for (const a of visible) next.delete(a.attemptId);
+                      }
+                      setSelected(next);
+                    }}
+                  />
+                </th>
+                {columnOrder.map((id) => (
+                  <DraggableTh
+                    key={id}
+                    id={id}
+                    label={COLUMN_LABEL[id]}
+                    sortKey={sortKey}
+                    sortDir={sortDir}
+                    onSort={onSort}
+                    align={COLUMN_ALIGN[id]}
+                    isDragging={draggingCol === id}
+                    isDropTarget={dropTargetCol === id && draggingCol !== id}
+                    onDragStart={() => setDraggingCol(id)}
+                    onDragOver={(e) => {
+                      if (draggingCol && draggingCol !== id) {
+                        e.preventDefault();
+                        setDropTargetCol(id);
+                      }
+                    }}
+                    onDragLeave={() => {
+                      if (dropTargetCol === id) setDropTargetCol(null);
+                    }}
+                    onDrop={() => handleColDrop(id)}
+                    onDragEnd={() => {
+                      setDraggingCol(null);
+                      setDropTargetCol(null);
+                    }}
+                  />
+                ))}
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {visible.map((a) => (
-                <tr key={a.attemptId}>
-                  <td className="cell-date">
-                    <div>{formatDate(a.createdAt)}</div>
-                    <div className="cell-date-time">{formatTime(a.createdAt)}</div>
+                <tr key={a.attemptId} className={selected.has(a.attemptId) ? 'row-selected' : undefined}>
+                  <td className="cell-select">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select row ${a.dealTitle ?? a.attemptId}`}
+                      checked={selected.has(a.attemptId)}
+                      onChange={(e) => {
+                        const next = new Set(selected);
+                        if (e.target.checked) next.add(a.attemptId);
+                        else next.delete(a.attemptId);
+                        setSelected(next);
+                      }}
+                    />
                   </td>
-                  <td className="cell-item">
-                    {a.productUrl ? (
-                      <a
-                        href="#"
-                        className="cell-item-title item-link"
-                        title="Open this product on Amazon"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          void window.autog.openExternal(a.productUrl);
-                        }}
-                      >
-                        {a.dealTitle ?? '(untitled)'}
-                      </a>
-                    ) : (
-                      <div className="cell-item-title">{a.dealTitle ?? '(untitled)'}</div>
-                    )}
-                    {(a.phase === 'verify' || a.dryRun) && (
-                      <div className="cell-item-sub">
-                        {a.phase === 'verify' ? <span className="chip chip-purple">VERIFY</span> : null}
-                        {a.dryRun ? <span className="chip chip-blue">DRY-RUN</span> : null}
-                      </div>
-                    )}
-                  </td>
-                  <td className="cell-dealid">
-                    {a.dealId ? (
-                      <span className="dealid-text" title={a.dealKey ?? a.dealId}>
-                        {a.dealId}
-                      </span>
-                    ) : a.dealKey ? (
-                      <span className="dealid-text" title={a.dealKey}>
-                        {a.dealKey.slice(0, 8)}
-                      </span>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td className="cell-account">
-                    <span className="account-pill">{a.amazonEmail}</span>
-                    {accountLabelByEmail.get(a.amazonEmail.toLowerCase()) && (
-                      <div className="cell-account-name">
-                        {accountLabelByEmail.get(a.amazonEmail.toLowerCase())}
-                      </div>
-                    )}
-                  </td>
-                  <td className="cell-qty">
-                    {typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : <span className="muted">—</span>}
-                  </td>
-                  <td className="cell-retail">
-                    {typeof a.maxPrice === 'number' ? `$${a.maxPrice.toFixed(2)}` : <span className="muted">—</span>}
-                  </td>
-                  <td className="cell-payout">
-                    {typeof a.price === 'number' ? `$${a.price.toFixed(2)}` : <span className="muted">—</span>}
-                  </td>
-                  <td className="cell-cb">
-                    {a.cashbackPct !== null ? (
-                      <span className={a.cashbackPct >= 6 ? 'cb-good' : 'cb-low'}>
-                        {a.cashbackPct}%
-                      </span>
-                    ) : (
-                      '—'
-                    )}
-                  </td>
-                  <td className="cell-profit">
-                    {(() => {
-                      const p = computeProfit(a);
-                      if (p === null) return <span className="muted">—</span>;
-                      const sign = p >= 0 ? '+' : '−';
-                      return (
-                        <span
-                          className={p >= 0 ? 'profit-good' : 'profit-bad'}
-                          title={`payout ${a.price} − retail ${a.maxPrice} × (1 − ${a.cashbackPct}% cb) × qty ${a.quantity}`}
-                        >
-                          {sign}${Math.abs(p).toFixed(2)}
-                        </span>
-                      );
-                    })()}
-                  </td>
-                  <td className="cell-orderid">
-                    {a.orderId ? (
-                      <a
-                        href="#"
-                        className="orderid-link"
-                        title={`Open in ${a.amazonEmail}'s signed-in session`}
-                        onClick={(e) => {
-                          e.preventDefault();
-                          void openOrderInProfile(a.amazonEmail, a.orderId!);
-                        }}
-                      >
-                        {a.orderId}
-                      </a>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td className="cell-status">
-                    <StatusBadge status={a.status} />
-                    {a.error && <div className="cell-error" title={a.error}>{a.error}</div>}
-                  </td>
+                  {columnOrder.map((id) => (
+                    <JobsCell
+                      key={id}
+                      id={id}
+                      a={a}
+                      accountLabel={accountLabelByEmail.get(a.amazonEmail.toLowerCase()) ?? null}
+                      onOpenProductUrl={(url) => void window.autog.openExternal(url)}
+                      onOpenOrder={() => void openOrderInProfile(a.amazonEmail, a.orderId!)}
+                    />
+                  ))}
                   <td className="cell-actions">
                     <ActionMenu
                       attempt={a}
+                      columnOrder={columnOrder}
                       onViewLogs={() => onViewLogs(a)}
                       onToast={(msg) => {
                         setOrderToast(msg);
@@ -972,6 +1219,286 @@ function UpdateBanner() {
   );
 }
 
+/**
+ * Dropdown to show/hide individual Jobs-table columns. Lives next to
+ * the row count in the table header. Hidden columns drop from the
+ * table render AND the TSV copy. Reset clears both order + hidden so
+ * the user can recover the default layout in one click.
+ */
+function ColumnsMenu({
+  order,
+  hidden,
+  onToggle,
+  onReset,
+}: {
+  order: JobColumnId[];
+  hidden: Set<JobColumnId>;
+  onToggle: (id: JobColumnId, hidden: boolean) => void;
+  onReset: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const visibleCount = order.length - hidden.size;
+  return (
+    <div className="action-menu-wrap" ref={ref}>
+      <button
+        className="ghost-btn"
+        onClick={() => setOpen((o) => !o)}
+        title="Show/hide columns. Drag column headers to reorder."
+      >
+        Columns ({visibleCount}/{order.length}) ▾
+      </button>
+      {open && (
+        <div className="action-menu columns-menu">
+          {order.map((id) => {
+            const isHidden = hidden.has(id);
+            const isLastVisible = !isHidden && order.length - hidden.size === 1;
+            return (
+              <label
+                key={id}
+                className="columns-menu-item"
+                title={isLastVisible ? 'At least one column must stay visible' : ''}
+              >
+                <input
+                  type="checkbox"
+                  checked={!isHidden}
+                  disabled={isLastVisible}
+                  onChange={(e) => onToggle(id, !e.target.checked)}
+                />
+                {COLUMN_LABEL[id]}
+              </label>
+            );
+          })}
+          <div className="action-menu-sep" />
+          <button className="action-menu-item" onClick={() => { onReset(); setOpen(false); }}>
+            Reset to default
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Sortable + drag-to-reorder header cell for the Jobs table. Reuses the
+ * existing SortableTh visuals; layered on top is HTML5 drag so the user
+ * can move columns into the order their spreadsheet wants. The
+ * resulting order is the same one used for TSV copy.
+ */
+function DraggableTh(props: {
+  id: JobColumnId;
+  label: string;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  onSort: (k: SortKey) => void;
+  align?: 'right' | 'center';
+  isDragging: boolean;
+  isDropTarget: boolean;
+  onDragStart: () => void;
+  onDragOver: (e: React.DragEvent) => void;
+  onDragLeave: () => void;
+  onDrop: () => void;
+  onDragEnd: () => void;
+}) {
+  const active = props.sortKey === props.id;
+  const cls = [
+    props.align ? `th-${props.align}` : '',
+    props.isDragging ? 'th-dragging' : '',
+    props.isDropTarget ? 'th-drop-target' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return (
+    <th
+      className={cls || undefined}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', props.id);
+        props.onDragStart();
+      }}
+      onDragOver={props.onDragOver}
+      onDragLeave={props.onDragLeave}
+      onDrop={(e) => {
+        e.preventDefault();
+        props.onDrop();
+      }}
+      onDragEnd={props.onDragEnd}
+      title="Drag to reorder column"
+    >
+      <button
+        type="button"
+        className={`th-sort ${active ? 'active' : ''}`}
+        onClick={() => props.onSort(props.id as SortKey)}
+      >
+        {props.label}
+        <span className="th-arrow">
+          {active ? (props.sortDir === 'asc' ? '▲' : '▼') : ''}
+        </span>
+      </button>
+    </th>
+  );
+}
+
+/**
+ * Render one Jobs-table cell for a given column id. All the per-column
+ * JSX lives here so the column-order iteration in the parent stays
+ * tidy. Keep this in lockstep with tsvCell so the on-screen value and
+ * the copied value match.
+ */
+function JobsCell({
+  id,
+  a,
+  accountLabel,
+  onOpenProductUrl,
+  onOpenOrder,
+}: {
+  id: JobColumnId;
+  a: JobAttempt;
+  accountLabel: string | null;
+  onOpenProductUrl: (url: string) => void;
+  onOpenOrder: () => void;
+}) {
+  switch (id) {
+    case 'date':
+      return (
+        <td className="cell-date">
+          <div>{formatDate(a.createdAt)}</div>
+          <div className="cell-date-time">{formatTime(a.createdAt)}</div>
+        </td>
+      );
+    case 'item':
+      return (
+        <td className="cell-item">
+          {a.productUrl ? (
+            <a
+              href="#"
+              className="cell-item-title item-link"
+              title="Open this product on Amazon"
+              onClick={(e) => {
+                e.preventDefault();
+                onOpenProductUrl(a.productUrl);
+              }}
+            >
+              {a.dealTitle ?? '(untitled)'}
+            </a>
+          ) : (
+            <div className="cell-item-title">{a.dealTitle ?? '(untitled)'}</div>
+          )}
+          {(a.phase === 'verify' || a.dryRun) && (
+            <div className="cell-item-sub">
+              {a.phase === 'verify' ? <span className="chip chip-purple">VERIFY</span> : null}
+              {a.dryRun ? <span className="chip chip-blue">DRY-RUN</span> : null}
+            </div>
+          )}
+        </td>
+      );
+    case 'dealId':
+      return (
+        <td className="cell-dealid">
+          {a.dealId ? (
+            <span className="dealid-text" title={a.dealKey ?? a.dealId}>
+              {a.dealId}
+            </span>
+          ) : a.dealKey ? (
+            <span className="dealid-text" title={a.dealKey}>
+              {a.dealKey.slice(0, 8)}
+            </span>
+          ) : (
+            <span className="muted">—</span>
+          )}
+        </td>
+      );
+    case 'account':
+      return (
+        <td className="cell-account">
+          <span className="account-pill">{a.amazonEmail}</span>
+          {accountLabel && <div className="cell-account-name">{accountLabel}</div>}
+        </td>
+      );
+    case 'qty':
+      return (
+        <td className="cell-qty">
+          {typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : <span className="muted">—</span>}
+        </td>
+      );
+    case 'retail':
+      return (
+        <td className="cell-retail">
+          {typeof a.maxPrice === 'number' ? `$${a.maxPrice.toFixed(2)}` : <span className="muted">—</span>}
+        </td>
+      );
+    case 'payout':
+      return (
+        <td className="cell-payout">
+          {typeof a.price === 'number' ? `$${a.price.toFixed(2)}` : <span className="muted">—</span>}
+        </td>
+      );
+    case 'cb':
+      return (
+        <td className="cell-cb">
+          {a.cashbackPct !== null ? (
+            <span className={a.cashbackPct >= 6 ? 'cb-good' : 'cb-low'}>{a.cashbackPct}%</span>
+          ) : (
+            '—'
+          )}
+        </td>
+      );
+    case 'profit': {
+      const p = computeProfit(a);
+      return (
+        <td className="cell-profit">
+          {p === null ? (
+            <span className="muted">—</span>
+          ) : (
+            <span
+              className={p >= 0 ? 'profit-good' : 'profit-bad'}
+              title={`payout ${a.price} − retail ${a.maxPrice} × (1 − ${a.cashbackPct}% cb) × qty ${a.quantity}`}
+            >
+              {p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(2)}
+            </span>
+          )}
+        </td>
+      );
+    }
+    case 'orderId':
+      return (
+        <td className="cell-orderid">
+          {a.orderId ? (
+            <a
+              href="#"
+              className="orderid-link"
+              title={`Open in ${a.amazonEmail}'s signed-in session`}
+              onClick={(e) => {
+                e.preventDefault();
+                onOpenOrder();
+              }}
+            >
+              {a.orderId}
+            </a>
+          ) : (
+            <span className="muted">—</span>
+          )}
+        </td>
+      );
+    case 'status':
+      return (
+        <td className="cell-status">
+          <StatusBadge status={a.status} />
+          {a.error && <div className="cell-error" title={a.error}>{a.error}</div>}
+        </td>
+      );
+  }
+}
+
 function ChangelogModal({ currentVersion }: { currentVersion: string }) {
   // First-launch-after-update "What's new" modal. Compare current version
   // to the version we last showed the changelog for (persisted in
@@ -1044,10 +1571,12 @@ function ChangelogModal({ currentVersion }: { currentVersion: string }) {
 
 function ActionMenu({
   attempt,
+  columnOrder,
   onViewLogs,
   onToast,
 }: {
   attempt: JobAttempt;
+  columnOrder: JobColumnId[];
   onViewLogs: () => void;
   onToast: (msg: string) => void;
 }) {
@@ -1113,6 +1642,22 @@ function ActionMenu({
           </button>
           <button
             className="action-menu-item"
+            onClick={async () => {
+              setOpen(false);
+              const tsv = attemptsToTSV([attempt], columnOrder);
+              try {
+                await navigator.clipboard.writeText(tsv);
+                onToast('Row copied — paste into a spreadsheet.');
+              } catch (err) {
+                onToast(`Copy failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }}
+            title="Copy row as tab-separated values (paste into Google Sheets / Excel)"
+          >
+            Copy row
+          </button>
+          <button
+            className="action-menu-item"
             onClick={() => void doVerify()}
             disabled={!attempt.orderId}
             title={attempt.orderId ? 'Re-check Amazon order status' : 'No order id to verify'}
@@ -1164,8 +1709,8 @@ function StatusBadge({ status }: { status: JobAttemptStatus }) {
     queued: { label: 'Queued', cls: 'badge-gray' },
     in_progress: { label: 'Running', cls: 'badge-blue' },
     awaiting_verification: { label: 'Waiting for Verification', cls: 'badge-amber' },
-    verified: { label: 'Success', cls: 'badge-green' },
-    cancelled_by_amazon: { label: 'Canceled', cls: 'badge-red' },
+    verified: { label: 'Completed', cls: 'badge-green' },
+    cancelled_by_amazon: { label: 'Cancelled', cls: 'badge-red' },
     completed: { label: 'Done', cls: 'badge-green' },
     failed: { label: 'Failed', cls: 'badge-red' },
     dry_run_success: { label: 'Dry-run OK', cls: 'badge-blue' },
