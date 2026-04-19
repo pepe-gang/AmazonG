@@ -8,6 +8,7 @@ import { buyNow } from '../actions/buyNow.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
 import { logger } from '../shared/logger.js';
+import { captureFailureSnapshot, shouldCapture } from '../browser/snapshot.js';
 import { makeAttemptId } from '../shared/sanitize.js';
 import type {
   AmazonProfile,
@@ -32,6 +33,9 @@ type Deps = {
   userDataRoot: string;
   /** Where buyNow drops debug screenshots when checkout silently fails. */
   debugDir: string;
+  /** Snapshot capture settings — read from Settings at worker start. */
+  snapshotOnFailure: boolean;
+  snapshotGroups: string[];
   headless: boolean;
   buyDryRun: boolean;
   minCashbackPct: number;
@@ -443,6 +447,10 @@ async function handleVerifyJob(
         { jobId: job.id, profile: profile.email, orderId: targetOrderId, amazonMessage: outcome.message },
         cid,
       );
+      if (shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
+        const snap = await captureFailureSnapshot(page, activeAttemptId).catch(() => null);
+        if (snap) logger.info('snapshot.captured', { jobId: job.id, profile: profile.email, ...snap }, cid);
+      }
       await deps.jobAttempts
         .update(activeAttemptId, { status: 'failed', error })
         .catch(() => undefined);
@@ -642,6 +650,10 @@ async function runForProfile(
       // without it. Fall back to reason, then to a generic message.
       const error = (report.detail ?? report.reason ?? 'verification failed').replace(/\.\s*$/, '');
       logger.error('step.verify.fail', { jobId: job.id, profile, reason: report.reason }, cid);
+      if (page && shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
+        const snap = await captureFailureSnapshot(page, attemptId);
+        if (snap) logger.info('snapshot.captured', { jobId: job.id, profile, ...snap }, cid);
+      }
       await deps.jobAttempts
         .update(attemptId, {
           status: 'failed',
@@ -687,6 +699,10 @@ async function runForProfile(
         { jobId: job.id, profile, stage: buy.stage, reason: buy.reason },
         cid,
       );
+      if (page && shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
+        const snap = await captureFailureSnapshot(page, attemptId);
+        if (snap) logger.info('snapshot.captured', { jobId: job.id, profile, ...snap }, cid);
+      }
       await deps.jobAttempts
         .update(attemptId, {
           status: 'failed',
@@ -782,6 +798,10 @@ async function runForProfile(
     const raw = err instanceof Error ? err.message : String(err);
     const message = friendlyJobError(raw, profile);
     logger.error('job.profile.fail', { jobId: job.id, profile, error: message }, cid);
+    if (page && shouldCapture(message, deps.snapshotOnFailure, deps.snapshotGroups)) {
+      const snap = await captureFailureSnapshot(page, attemptId).catch(() => null);
+      if (snap) logger.info('snapshot.captured', { jobId: job.id, profile, ...snap }, cid);
+    }
     await deps.jobAttempts
       .update(attemptId, { status: 'failed', error: message })
       .catch(() => undefined);

@@ -263,6 +263,8 @@ async function startWorkerNow(): Promise<void> {
     bg,
     userDataRoot: profileDir(),
     debugDir: join(app.getPath('userData'), 'debug-screenshots'),
+    snapshotOnFailure: settings.snapshotOnFailure,
+    snapshotGroups: settings.snapshotGroups,
     headless: settings.headless,
     buyDryRun: settings.buyDryRun,
     minCashbackPct: settings.minCashbackPct,
@@ -516,6 +518,21 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.jobsList, () => listMergedAttempts());
   ipcMain.handle(IPC.jobsLogs, (_e, attemptId: string) => storeReadLogs(attemptId));
+  ipcMain.handle(IPC.jobsSnapshot, async (_e, attemptId: string) => {
+    const { snapshotDir } = await import('../browser/snapshot.js');
+    const dir = snapshotDir(attemptId);
+    const { readFile } = await import('node:fs/promises');
+    let screenshot: string | null = null;
+    let html: string | null = null;
+    try {
+      const buf = await readFile(join(dir, 'screenshot.png'));
+      screenshot = buf.toString('base64');
+    } catch { /* no screenshot */ }
+    try {
+      html = await readFile(join(dir, 'page.html'), 'utf8');
+    } catch { /* no html */ }
+    return { screenshot, html };
+  });
   ipcMain.handle(IPC.jobsClearAll, async () => {
     await storeClearAll();
     scheduleBroadcastJobs();

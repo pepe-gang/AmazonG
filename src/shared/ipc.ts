@@ -37,6 +37,7 @@ export const IPC = {
   jobsClearCanceled: 'jobs:clear-canceled',
   jobsDelete: 'jobs:delete',
   jobsVerifyOrder: 'jobs:verify-order',
+  jobsSnapshot: 'jobs:snapshot',
 
   evtLog: 'evt:log',
   evtStatus: 'evt:status',
@@ -87,6 +88,10 @@ export type Settings = {
    * full set whenever the user toggles, so any change survives.
    */
   jobsStatusFilter: string[];
+  /** Capture screenshot + HTML snapshot on checkout failure. */
+  snapshotOnFailure: boolean;
+  /** Which error groups to capture. Empty = capture all groups. */
+  snapshotGroups: string[];
 };
 
 export type AutoGBridge = {
@@ -122,6 +127,7 @@ export type AutoGBridge = {
     | { kind: 'error' | 'busy'; message: string }
   >;
 
+  jobsSnapshot(attemptId: string): Promise<{ screenshot: string | null; html: string | null }>;
   onLog(cb: (ev: LogEvent) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;

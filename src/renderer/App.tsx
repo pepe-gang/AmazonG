@@ -1666,6 +1666,8 @@ function LiveModePanel() {
 function LogsView({ attempt }: { attempt: JobAttempt }) {
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [snapshotPreview, setSnapshotPreview] = useState<'screenshot' | 'html' | null>(null);
+  const [snapshotData, setSnapshotData] = useState<{ screenshot: string | null; html: string | null } | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -1693,6 +1695,18 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
     });
     return off;
   }, [attempt.jobId, attempt.amazonEmail]);
+
+  const hasSnapshot = logs.some((ev) => ev.message === 'snapshot.captured');
+
+  const openSnapshot = async (kind: 'screenshot' | 'html') => {
+    if (!snapshotData) {
+      const data = await window.autog.jobsSnapshot(attempt.attemptId);
+      setSnapshotData(data);
+      setSnapshotPreview(kind);
+    } else {
+      setSnapshotPreview(kind);
+    }
+  };
 
   return (
     <div className="logs-view">
@@ -1725,12 +1739,60 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
             )}
           </div>
         </div>
-        <button className="ghost-btn" onClick={() => void reload()} disabled={loading}>
-          {loading ? 'Loading…' : 'Refresh'}
-        </button>
+        <div className="logs-head-actions">
+          {hasSnapshot && (
+            <>
+              <button className="ghost-btn" onClick={() => void openSnapshot('screenshot')}>Screenshot</button>
+              <button className="ghost-btn" onClick={() => void openSnapshot('html')}>HTML</button>
+            </>
+          )}
+          <button className="ghost-btn" onClick={() => void reload()} disabled={loading}>
+            {loading ? 'Loading…' : 'Refresh'}
+          </button>
+        </div>
       </div>
 
       {attempt.error && <div className="error-banner">{attempt.error}</div>}
+
+      {snapshotPreview && snapshotData && (
+        <div className="snapshot-preview">
+          <div className="snapshot-preview-head">
+            <div className="snapshot-preview-tabs">
+              <button
+                className={`ghost-btn ${snapshotPreview === 'screenshot' ? 'active' : ''}`}
+                onClick={() => setSnapshotPreview('screenshot')}
+              >
+                Screenshot
+              </button>
+              <button
+                className={`ghost-btn ${snapshotPreview === 'html' ? 'active' : ''}`}
+                onClick={() => setSnapshotPreview('html')}
+              >
+                HTML Source
+              </button>
+            </div>
+            <button className="ghost-btn" onClick={() => setSnapshotPreview(null)}>Close</button>
+          </div>
+          <div className="snapshot-preview-body">
+            {snapshotPreview === 'screenshot' && snapshotData.screenshot && (
+              <img
+                src={`data:image/png;base64,${snapshotData.screenshot}`}
+                alt="Failure screenshot"
+                className="snapshot-img"
+              />
+            )}
+            {snapshotPreview === 'screenshot' && !snapshotData.screenshot && (
+              <div className="log-empty">No screenshot available.</div>
+            )}
+            {snapshotPreview === 'html' && snapshotData.html && (
+              <pre className="snapshot-html">{snapshotData.html}</pre>
+            )}
+            {snapshotPreview === 'html' && !snapshotData.html && (
+              <div className="log-empty">No HTML snapshot available.</div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="logs-stream">
         {logs.length === 0 ? (
@@ -1795,6 +1857,7 @@ function AccountsView({
         <AllowedPrefixesPanel />
         <HeadlessTogglePanel profiles={profiles} />
         <AutoStartWorkerPanel />
+        <SnapshotSettingsPanel />
         <AccountsList profiles={profiles} />
       </div>
       {lockedToast && (
@@ -1835,6 +1898,107 @@ function AutoStartWorkerPanel() {
           <span className="toggle-label">{on ? 'On' : 'Off'}</span>
         </label>
       </div>
+    </div>
+  );
+}
+
+const SNAPSHOT_ERROR_GROUPS = [
+  { id: 'price_exceeded', label: 'Price exceeds max' },
+  { id: 'out_of_stock', label: 'Out of stock' },
+  { id: 'address_mismatch', label: 'Address not found' },
+  { id: 'address_stuck', label: 'Address picker failed' },
+  { id: 'cashback_low', label: 'Cashback below minimum' },
+  { id: 'cashback_toggle', label: 'BG name toggle failed' },
+  { id: 'buy_button', label: 'Buy Now button issue' },
+  { id: 'place_order', label: 'Place Order failed' },
+  { id: 'confirm_stuck', label: 'Confirmation page stuck' },
+  { id: 'checkout_price', label: 'Checkout price unreadable' },
+  { id: 'condition_blocked', label: 'Item condition rejected' },
+  { id: 'shipping_blocked', label: 'Shipping / Prime issue' },
+  { id: 'verify_failed', label: 'Order verification error' },
+] as const;
+
+function SnapshotSettingsPanel() {
+  const { settings, busy, update } = useSettings();
+  if (!settings) return null;
+  const on = settings.snapshotOnFailure;
+  const groups = settings.snapshotGroups ?? [];
+  const allSelected = groups.length === 0;
+
+  const toggleGroup = (id: string) => {
+    if (allSelected) {
+      // Switching from "all" to specific: select everything except the one we're toggling off
+      const next = SNAPSHOT_ERROR_GROUPS.map((g) => g.id).filter((g) => g !== id);
+      void update({ snapshotGroups: next });
+    } else if (groups.includes(id)) {
+      const next = groups.filter((g) => g !== id);
+      void update({ snapshotGroups: next });
+    } else {
+      // If adding this would select all, go back to empty (= all)
+      const next = [...groups, id];
+      if (next.length >= SNAPSHOT_ERROR_GROUPS.length) {
+        void update({ snapshotGroups: [] });
+      } else {
+        void update({ snapshotGroups: next });
+      }
+    }
+  };
+
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Capture snapshots on failure</div>
+          <div className="prefix-sub">
+            When on, AmazonG saves a screenshot and HTML snapshot of the page whenever a checkout
+            error occurs. Snapshots appear in the log viewer for debugging. Stored locally, cleaned
+            up automatically after 30 days.
+          </div>
+        </div>
+        <label
+          className={`toggle ${on ? 'on' : 'off'}`}
+          title={on ? 'Snapshots enabled' : 'Snapshots disabled'}
+        >
+          <input
+            type="checkbox"
+            checked={on}
+            onChange={(e) => void update({ snapshotOnFailure: e.target.checked })}
+            disabled={busy}
+          />
+          <span className="toggle-slider" />
+          <span className="toggle-label">{on ? 'On' : 'Off'}</span>
+        </label>
+      </div>
+      {on && (
+        <div className="snapshot-groups">
+          <div className="snapshot-groups-head">
+            <span className="prefix-sub">Capture errors:</span>
+            <button
+              className="ghost-btn snapshot-all-btn"
+              onClick={() => void update({ snapshotGroups: [] })}
+              disabled={busy || allSelected}
+            >
+              {allSelected ? 'All selected' : 'Select all'}
+            </button>
+          </div>
+          <div className="snapshot-group-list">
+            {SNAPSHOT_ERROR_GROUPS.map((g) => {
+              const checked = allSelected || groups.includes(g.id);
+              return (
+                <label key={g.id} className="snapshot-group-item">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleGroup(g.id)}
+                    disabled={busy}
+                  />
+                  <span>{g.label}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

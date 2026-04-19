@@ -18,6 +18,8 @@ const DEFAULTS: Settings = {
   jobsColumnOrder: [],
   jobsColumnHidden: [],
   jobsStatusFilter: [],
+  snapshotOnFailure: false,
+  snapshotGroups: [],
 };
 
 function filePath(): string {

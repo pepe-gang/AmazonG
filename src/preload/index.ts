@@ -54,6 +54,10 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.jobsVerifyOrder, attemptId) as ReturnType<
       AutoGBridge['jobsVerifyOrder']
     >,
+  jobsSnapshot: (attemptId) =>
+    ipcRenderer.invoke(IPC.jobsSnapshot, attemptId) as ReturnType<
+      AutoGBridge['jobsSnapshot']
+    >,
 
   onLog(cb) {
     const listener = (_: unknown, ev: LogEvent) => cb(ev);

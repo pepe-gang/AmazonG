@@ -6,6 +6,7 @@ import {
   appendFile,
   readdir,
   unlink,
+  rm,
 } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { JobAttempt, LogEvent } from '../shared/types.js';
@@ -31,6 +32,18 @@ function logsDir(): string {
 
 function logFile(attemptId: string): string {
   return join(logsDir(), `${attemptId}.jsonl`);
+}
+
+function snapshotsDir(): string {
+  return join(app.getPath('userData'), 'attempt-snapshots');
+}
+
+function snapshotDir(attemptId: string): string {
+  return join(snapshotsDir(), attemptId);
+}
+
+function removeSnapshot(attemptId: string): Promise<void> {
+  return rm(snapshotDir(attemptId), { recursive: true, force: true }).catch(() => undefined) as Promise<void>;
 }
 
 async function load(): Promise<Stored> {
@@ -97,6 +110,7 @@ function evictOldestIfNeeded(): void {
   for (const e of toEvict) {
     delete cache.attempts[e.id];
     void unlink(logFile(e.id)).catch(() => undefined);
+    void removeSnapshot(e.id);
   }
 }
 
@@ -174,6 +188,7 @@ export async function deleteAttempt(attemptId: string): Promise<void> {
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+  void removeSnapshot(attemptId);
 }
 
 /**
@@ -188,6 +203,7 @@ export async function pruneOlderThan(cutoffMs: number): Promise<number> {
       delete store.attempts[id];
       pruned += 1;
       void unlink(logFile(id)).catch(() => undefined);
+      void removeSnapshot(id);
     }
   }
   if (pruned > 0) scheduleSave();
@@ -197,7 +213,7 @@ export async function pruneOlderThan(cutoffMs: number): Promise<number> {
 export async function clearAll(): Promise<void> {
   cache = { attempts: {} };
   scheduleSave();
-  // Wipe every per-attempt log file too.
+  // Wipe every per-attempt log file + snapshot directory.
   try {
     const files = await readdir(logsDir());
     await Promise.all(
@@ -206,6 +222,7 @@ export async function clearAll(): Promise<void> {
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+  void rm(snapshotsDir(), { recursive: true, force: true }).catch(() => undefined);
 }
 
 /** Drop every attempt with status 'failed' and unlink its JSONL log. */
@@ -228,6 +245,7 @@ async function clearByStatus(
       delete store.attempts[id];
       removed += 1;
       void unlink(logFile(id)).catch(() => undefined);
+      void removeSnapshot(id);
     }
   }
   if (removed > 0) scheduleSave();
