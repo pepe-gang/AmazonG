@@ -133,6 +133,7 @@ function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
     orderId: s.placedOrderId ?? null,
     status: s.status,
     error: s.error,
+    buyMode: 'single',
     dryRun: false,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,

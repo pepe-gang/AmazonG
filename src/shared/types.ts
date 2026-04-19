@@ -174,6 +174,7 @@ export type JobAttempt = {
   orderId: string | null;
   status: JobAttemptStatus;
   error: string | null;
+  buyMode: 'single' | 'filler';
   dryRun: boolean;
   createdAt: string;
   updatedAt: string;

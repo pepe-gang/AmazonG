@@ -196,6 +196,7 @@ async function handleJob(
         orderId: null,
         status: 'queued',
         error: null,
+        buyMode: 'single',
         dryRun: deps.buyDryRun,
       }),
     ),
@@ -543,6 +544,7 @@ async function resolveVerifyAttemptRow(
       orderId: job.placedOrderId,
       status: 'in_progress',
       error: null,
+      buyMode: 'single',
       dryRun: false,
     })
     .catch(() => undefined);

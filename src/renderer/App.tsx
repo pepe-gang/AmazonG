@@ -478,7 +478,7 @@ function DashboardView(props: {
 /* ============================================================
    Jobs table
    ============================================================ */
-type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'status' | 'orderId';
+type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'buyMode' | 'qty' | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'status' | 'orderId';
 
 /**
  * Stable identifiers for each draggable column in the Jobs table. The
@@ -489,12 +489,12 @@ type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'tota
  * the data, it stays pinned to the right.
  */
 type JobColumnId =
-  | 'date' | 'item' | 'dealId' | 'account' | 'qty'
+  | 'date' | 'item' | 'dealId' | 'account' | 'buyMode' | 'qty'
   | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit'
   | 'orderId' | 'tracking' | 'status';
 
 const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
-  'date', 'item', 'dealId', 'account', 'qty',
+  'date', 'item', 'dealId', 'account', 'buyMode', 'qty',
   'retail', 'totalRetail', 'payout', 'cb', 'profit',
   'orderId', 'tracking', 'status',
 ];
@@ -619,6 +619,7 @@ function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
     case 'item':    return a.dealTitle ?? '';
     case 'dealId':  return a.dealId ?? a.dealKey ?? '';
     case 'account': return a.amazonEmail;
+    case 'buyMode': return a.buyMode === 'filler' ? 'Filler' : 'Single';
     case 'qty':     return typeof a.quantity === 'number' ? a.quantity : '';
     case 'retail':  return typeof a.maxPrice === 'number' ? a.maxPrice.toFixed(2) : '';
     case 'totalRetail': {
@@ -663,6 +664,7 @@ const COLUMN_LABEL: Record<JobColumnId, string> = {
   item: 'Item',
   dealId: 'Deal ID',
   account: 'Amazon Account',
+  buyMode: 'Buy Mode',
   qty: 'Qty',
   retail: 'Retail',
   totalRetail: 'Total Retail',
@@ -675,6 +677,7 @@ const COLUMN_LABEL: Record<JobColumnId, string> = {
 };
 
 const COLUMN_ALIGN: Partial<Record<JobColumnId, 'right' | 'center'>> = {
+  buyMode: 'center',
   qty: 'center',
   retail: 'right',
   totalRetail: 'right',
@@ -849,6 +852,8 @@ function JobsTable({
           return (a.dealId ?? a.dealKey ?? '').localeCompare(b.dealId ?? b.dealKey ?? '');
         case 'account':
           return a.amazonEmail.localeCompare(b.amazonEmail);
+        case 'buyMode':
+          return (a.buyMode ?? 'single').localeCompare(b.buyMode ?? 'single');
         case 'retail': {
           const an = typeof a.maxPrice === 'number' ? a.maxPrice : null;
           const bn = typeof b.maxPrice === 'number' ? b.maxPrice : null;
@@ -1497,6 +1502,14 @@ function JobsCell({
           {accountLabel && <div className="cell-account-name">{accountLabel}</div>}
         </td>
       );
+    case 'buyMode':
+      return (
+        <td className="cell-buymode">
+          <span className={`buymode-badge ${a.buyMode === 'filler' ? 'filler' : 'single'}`}>
+            {a.buyMode === 'filler' ? 'Filler' : 'Single'}
+          </span>
+        </td>
+      );
     case 'qty':
       return (
         <td className="cell-qty">
@@ -1878,6 +1891,7 @@ function AccountsView({
         <AllowedPrefixesPanel />
         <HeadlessTogglePanel profiles={profiles} />
         <AutoStartWorkerPanel />
+        <FillerModePanel />
         <SnapshotSettingsPanel />
         <AccountsList profiles={profiles} />
       </div>
@@ -1928,6 +1942,31 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function FillerModePanel() {
+  return (
+    <div className="prefix-panel filler-panel-locked">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">
+            Buy with Fillers
+            <span className="coming-soon-badge">Coming soon</span>
+          </div>
+          <div className="prefix-sub">
+            When enabled, AmazonG checks out the target item alongside multiple filler items to
+            meet minimum order thresholds. Filler items are automatically cancelled after the order
+            is verified. This mode shows as &quot;Filler&quot; in the Buy Mode column.
+          </div>
+        </div>
+        <label className="toggle off" title="Coming soon — this feature is not yet available">
+          <input type="checkbox" checked={false} disabled />
+          <span className="toggle-slider" />
+          <span className="toggle-label">Off</span>
+        </label>
+      </div>
+    </div>
+  );
 }
 
 function SnapshotSettingsPanel() {
