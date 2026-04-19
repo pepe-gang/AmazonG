@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IPC, type Settings } from '../shared/ipc.js';
-import { createBGClient } from '../bg/client.js';
+import { createBGClient, type ServerPurchase } from '../bg/client.js';
 import { startWorker, type WorkerHandle } from '../workflows/pollAndScrape.js';
 import { addLogSink, logger } from '../shared/logger.js';
 import {
@@ -90,10 +90,92 @@ function scheduleBroadcastJobs(): void {
   if (jobsBroadcastTimer) return;
   jobsBroadcastTimer = setTimeout(() => {
     jobsBroadcastTimer = null;
-    void storeListAttempts()
+    void listMergedAttempts()
       .then((list) => mainWindow?.webContents.send(IPC.evtJobs, list))
       .catch(() => undefined);
   }, 100);
+}
+
+function toNumOrNull(v: string | null | undefined): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
+  return {
+    attemptId: s.attemptId,
+    jobId: s.jobId,
+    amazonEmail: s.amazonEmail ?? '',
+    phase: s.phase,
+    dealKey: s.dealKey,
+    dealId: s.dealId,
+    dealTitle: s.dealTitle ?? null,
+    productUrl: s.productUrl ?? '',
+    maxPrice: toNumOrNull(s.maxPrice),
+    price: toNumOrNull(s.price),
+    quantity: s.quantity ?? null,
+    cost: s.placedPrice ?? null,
+    cashbackPct: s.placedCashbackPct ?? null,
+    orderId: s.placedOrderId ?? null,
+    status: s.status,
+    error: s.error,
+    dryRun: false,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+  };
+}
+
+/**
+ * Merge server-sourced purchases (authoritative for cross-device state)
+ * with the local attempts file (authoritative for dry-run rows and any
+ * just-written row whose /status POST hasn't landed yet).
+ *
+ * Merge key is (jobId, amazonEmail) — BOTH sides know these fields, and
+ * AutoBuyPurchase.id (server) ≠ makeAttemptId() (local), so we can't key
+ * on attemptId. When both exist, we take the server row but keep the
+ * local attemptId so "View logs" still resolves the on-disk JSONL file.
+ *
+ * If the server call fails (offline, 401, etc.) we fall back to local
+ * only so the table keeps rendering.
+ */
+async function listMergedAttempts(): Promise<JobAttempt[]> {
+  const local = await storeListAttempts();
+  if (!apiKey) return local;
+
+  let serverRows: ServerPurchase[] = [];
+  try {
+    const settings = await loadSettings();
+    const bg = createBGClient(settings.bgBaseUrl, apiKey);
+    serverRows = await bg.listPurchases(500);
+  } catch (err) {
+    logger.warn('listPurchases failed; falling back to local attempts', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return local;
+  }
+
+  const keyOf = (a: { jobId: string; amazonEmail: string | null }): string =>
+    `${a.jobId}__${a.amazonEmail ?? '__none__'}`;
+
+  const merged = new Map<string, JobAttempt>();
+  for (const s of serverRows) {
+    if (!s.amazonEmail) continue; // synthetic "no-attempt-yet" rows — skip
+    merged.set(keyOf(s), serverRowToJobAttempt(s));
+  }
+  for (const l of local) {
+    const k = keyOf(l);
+    const existing = merged.get(k);
+    if (existing) {
+      merged.set(k, { ...existing, attemptId: l.attemptId, dryRun: l.dryRun });
+    } else {
+      merged.set(k, l);
+    }
+  }
+
+  return Array.from(merged.values()).sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt),
+  );
 }
 
 function profileDir(): string {
@@ -101,7 +183,7 @@ function profileDir(): string {
 }
 
 const ONBOARDING_SIZE = { width: 500, height: 580 } as const;
-const APP_SIZE = { width: 1600, height: 1000 } as const;
+const APP_SIZE = { width: 1800, height: 1150 } as const;
 
 function createWindow(): void {
   const connected = identity !== null;
@@ -421,7 +503,7 @@ function registerIpcHandlers(): void {
     },
   );
 
-  ipcMain.handle(IPC.jobsList, () => storeListAttempts());
+  ipcMain.handle(IPC.jobsList, () => listMergedAttempts());
   ipcMain.handle(IPC.jobsLogs, (_e, attemptId: string) => storeReadLogs(attemptId));
   ipcMain.handle(IPC.jobsClearAll, async () => {
     await storeClearAll();

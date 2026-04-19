@@ -1,11 +1,48 @@
 import { BGApiError } from '../shared/errors.js';
-import type { AutoGJob, IdentityInfo, JobStatusReport } from '../shared/types.js';
+import type {
+  AutoGJob,
+  IdentityInfo,
+  JobAttemptStatus,
+  JobStatusReport,
+} from '../shared/types.js';
+
+/**
+ * One row from GET /api/autog/purchases — BetterBG normalizes statuses
+ * into AmazonG's per-attempt vocabulary server-side, so this shape maps
+ * almost 1:1 onto the local JobAttempt. Dates arrive as ISO strings
+ * (Next.js's default Date serialization).
+ */
+export type ServerPurchase = {
+  attemptId: string;
+  jobId: string;
+  commitmentId: string;
+  dealKey: string;
+  dealId: string | null;
+  dealTitle: string;
+  imageUrl: string | null;
+  upc: string | null;
+  productUrl: string;
+  maxPrice: string;
+  price: string | null;
+  quantity: number;
+  phase: 'buy' | 'verify';
+  amazonEmail: string | null;
+  status: JobAttemptStatus;
+  placedAt: string | null;
+  placedPrice: string | null;
+  placedCashbackPct: number | null;
+  placedOrderId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type BGClient = {
   readonly baseUrl: string;
   me(): Promise<IdentityInfo>;
   claimJob(): Promise<AutoGJob | null>;
   reportStatus(jobId: string, report: JobStatusReport): Promise<void>;
+  listPurchases(limit?: number): Promise<ServerPurchase[]>;
 };
 
 /**
@@ -86,6 +123,15 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         method: 'POST',
         body: JSON.stringify(report),
       });
+    },
+
+    async listPurchases(limit = 500) {
+      const n = Math.max(1, Math.min(500, Math.floor(limit)));
+      const r = await request<{ attempts: ServerPurchase[] }>(
+        `/api/autog/purchases?limit=${n}`,
+        { method: 'GET' },
+      );
+      return r?.attempts ?? [];
     },
   };
 }
