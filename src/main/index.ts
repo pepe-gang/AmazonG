@@ -18,7 +18,6 @@ import {
   updateAttempt as storeUpdateAttempt,
 } from './jobStore.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
-import { applyUpdate, checkForUpdates, getReleaseNotes } from './updater.js';
 import { makeAttemptId } from '../shared/sanitize.js';
 import type { JobAttempt, JobAttemptStatus } from '../shared/types.js';
 import { BGApiError } from '../shared/errors.js';
@@ -505,15 +504,6 @@ function registerIpcHandlers(): void {
       }
     },
   );
-
-  ipcMain.handle(IPC.updateCheck, () => checkForUpdates());
-  ipcMain.handle(IPC.updateApply, async (_e, downloadUrl: string) => {
-    await applyUpdate(downloadUrl);
-  });
-  ipcMain.handle(IPC.updateGetReleaseNotes, (_e, version: string) =>
-    getReleaseNotes(version),
-  );
-  ipcMain.handle(IPC.appVersion, () => app.getVersion());
 
   async function openOrderPageInProfile(email: string, url: string): Promise<void> {
     // If the worker is currently running AND has a live session for this

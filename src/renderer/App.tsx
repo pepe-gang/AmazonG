@@ -161,12 +161,6 @@ function MainScreen({ status }: { status: RendererStatus }) {
   const [attempts, setAttempts] = useState<JobAttempt[]>([]);
   const [uptimeTick, setUptimeTick] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [appVersion, setAppVersion] = useState<string>('');
-
-  useEffect(() => {
-    void window.autog.appVersion().then(setAppVersion);
-  }, []);
-
   useEffect(() => {
     // Update the dashboard's "Jobs" stat card by listening to the same log
     // stream the worker emits. Cheaper than maintaining a separate counter
@@ -239,12 +233,11 @@ function MainScreen({ status }: { status: RendererStatus }) {
     <div className="app">
       <div className="toolbar">
         <div className="toolbar-left">
-          <div className="brand-pill" title={appVersion ? `AmazonG ${appVersion}` : 'AmazonG'}>
+          <div className="brand-pill" title="AmazonG">
             <div className="app-badge">
               <AppIcon />
             </div>
             <span className="brand-pill-label">AmazonG</span>
-            {appVersion && <span className="brand-pill-version">v{appVersion}</span>}
           </div>
 
           {view === 'dashboard' ? (
@@ -297,9 +290,6 @@ function MainScreen({ status }: { status: RendererStatus }) {
 
       <div className="content">
         {status.lastError && <div className="error-banner">{status.lastError}</div>}
-        <UpdateBanner />
-        <ChangelogModal currentVersion={appVersion} />
-
         {view === 'dashboard' ? (
           <DashboardView
             status={status}
@@ -1181,101 +1171,6 @@ function JobsTable({
   );
 }
 
-function UpdateBanner() {
-  // Polls GitHub Releases on mount + every 6h. Renders nothing when
-  // already up-to-date or when the check failed (silently — failures are
-  // logged in main, no need to nag the user). On "available" we show a
-  // dismissible banner with a one-click Update button that triggers the
-  // self-update flow (download → swap → relaunch).
-  type S =
-    | { kind: 'idle' }
-    | { kind: 'available'; current: string; latest: string; downloadUrl: string }
-    | { kind: 'installing' }
-    | { kind: 'error'; message: string };
-  const [state, setState] = useState<S>({ kind: 'idle' });
-  const [dismissed, setDismissed] = useState(false);
-
-  const check = useCallback(async () => {
-    try {
-      const r = await window.autog.updateCheck();
-      if (r.kind === 'available') {
-        setState({
-          kind: 'available',
-          current: r.current,
-          latest: r.latest,
-          downloadUrl: r.downloadUrl,
-        });
-      } else {
-        setState({ kind: 'idle' });
-      }
-    } catch {
-      // swallow — main logs it
-    }
-  }, []);
-
-  useEffect(() => {
-    void check();
-    const t = setInterval(() => void check(), 6 * 60 * 60 * 1000);
-    return () => clearInterval(t);
-  }, [check]);
-
-  if (dismissed) return null;
-  if (state.kind === 'idle') return null;
-
-  const onUpdate = async () => {
-    if (state.kind !== 'available') return;
-    setState({ kind: 'installing' });
-    try {
-      await window.autog.updateApply(state.downloadUrl);
-      // App is about to quit; stay in installing UI.
-    } catch (err) {
-      setState({
-        kind: 'error',
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
-  return (
-    <div className="update-banner" role="status">
-      {state.kind === 'available' && (
-        <>
-          <span className="update-banner-icon">⬆</span>
-          <span>
-            <b>AmazonG {state.latest}</b> is available (you have {state.current}).
-          </span>
-          <div className="update-banner-actions">
-            <button className="primary-action" onClick={() => void onUpdate()}>
-              Update &amp; Restart
-            </button>
-            <button className="ghost-btn" onClick={() => setDismissed(true)}>
-              Later
-            </button>
-          </div>
-        </>
-      )}
-      {state.kind === 'installing' && (
-        <>
-          <span className="update-banner-icon">⬇</span>
-          <span>
-            Downloading update… AmazonG will quit and relaunch automatically when ready (~30 seconds).
-          </span>
-        </>
-      )}
-      {state.kind === 'error' && (
-        <>
-          <span className="update-banner-icon">⚠</span>
-          <span>Update failed: {state.message}</span>
-          <div className="update-banner-actions">
-            <button className="ghost-btn" onClick={() => setDismissed(true)}>
-              Dismiss
-            </button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
 
 /**
  * Dropdown to show/hide individual Jobs-table columns. Lives next to
@@ -1645,75 +1540,6 @@ function JobsCell({
   }
 }
 
-function ChangelogModal({ currentVersion }: { currentVersion: string }) {
-  // First-launch-after-update "What's new" modal. Compare current version
-  // to the version we last showed the changelog for (persisted in
-  // settings.lastSeenVersion). On any version bump, fetch the GitHub
-  // release notes for the current tag and pop them in a modal. The user
-  // dismisses it once and we record the new version so it doesn't show
-  // again until the NEXT update.
-  //
-  // Fresh installs: lastSeenVersion is "" → we DON'T show the modal
-  // (would be annoying), but we do record the current version so the
-  // next update triggers it.
-  const { settings, update } = useSettings();
-  const [notes, setNotes] = useState<{ tag: string; name: string; body: string } | null>(null);
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    if (!settings || !currentVersion) return;
-    const last = settings.lastSeenVersion;
-    if (!last) {
-      // Fresh install — record the current version so we only show the
-      // modal on actual upgrades, not on every first launch.
-      void update({ lastSeenVersion: currentVersion });
-      return;
-    }
-    if (last === currentVersion) return;
-    // Some kind of version bump (or downgrade — either way, show the
-    // notes for the version we're now running).
-    void window.autog.updateGetReleaseNotes(currentVersion).then((n) => {
-      if (n) {
-        setNotes(n);
-        setOpen(true);
-      } else {
-        // No release on GitHub for this version (dev build?) — silently
-        // record so we don't keep retrying every launch.
-        void update({ lastSeenVersion: currentVersion });
-      }
-    });
-  }, [settings, currentVersion, update]);
-
-  const dismiss = () => {
-    setOpen(false);
-    void update({ lastSeenVersion: currentVersion });
-  };
-
-  if (!open || !notes) return null;
-  return (
-    <div className="modal-backdrop" onClick={dismiss}>
-      <div className="modal-card changelog-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <div>
-            <div className="changelog-eyebrow">What's new</div>
-            <div className="modal-title">AmazonG {notes.name}</div>
-          </div>
-          <button className="ghost-btn" onClick={dismiss}>Close</button>
-        </div>
-        <div className="changelog-body">
-          {notes.body
-            ? notes.body.split(/\r?\n/).map((line, i) => (
-                <div key={i} className="changelog-line">{line || '\u00A0'}</div>
-              ))
-            : <div className="changelog-line muted">No release notes were published for this version.</div>}
-        </div>
-        <div className="modal-actions">
-          <button className="primary-action" onClick={dismiss}>Got it</button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function ViewLogButton({ onViewLogs }: { onViewLogs: () => void }) {
   return (
@@ -1939,7 +1765,6 @@ function AccountsView({
         <AllowedPrefixesPanel />
         <HeadlessTogglePanel profiles={profiles} />
         <AutoStartWorkerPanel />
-        <UpdatesPanel />
         <AccountsList profiles={profiles} />
       </div>
       {lockedToast && (
@@ -1979,96 +1804,6 @@ function AutoStartWorkerPanel() {
           <span className="toggle-slider" />
           <span className="toggle-label">{on ? 'On' : 'Off'}</span>
         </label>
-      </div>
-    </div>
-  );
-}
-
-function UpdatesPanel() {
-  // Manual update check + install. Surfaced in the Accounts (settings)
-  // view alongside the other Headless / Address-prefix panels. The
-  // proactive UpdateBanner at the top of every view handles the
-  // background poll + auto-prompt; this panel is for users who want to
-  // poke the check now.
-  type S =
-    | { kind: 'idle' }
-    | { kind: 'checking' }
-    | { kind: 'up_to_date'; current: string }
-    | { kind: 'available'; current: string; latest: string; downloadUrl: string }
-    | { kind: 'installing' }
-    | { kind: 'error'; message: string };
-  const [state, setState] = useState<S>({ kind: 'idle' });
-  const [version, setVersion] = useState<string>('');
-
-  useEffect(() => {
-    void window.autog.appVersion().then(setVersion);
-  }, []);
-
-  const check = async () => {
-    setState({ kind: 'checking' });
-    try {
-      const r = await window.autog.updateCheck();
-      if (r.kind === 'available') {
-        setState({ kind: 'available', current: r.current, latest: r.latest, downloadUrl: r.downloadUrl });
-      } else if (r.kind === 'up_to_date') {
-        setState({ kind: 'up_to_date', current: r.current });
-      } else {
-        setState({ kind: 'error', message: r.message });
-      }
-    } catch (err) {
-      setState({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
-    }
-  };
-
-  const install = async () => {
-    if (state.kind !== 'available') return;
-    setState({ kind: 'installing' });
-    try {
-      await window.autog.updateApply(state.downloadUrl);
-      // App is about to quit; banner stays in installing state.
-    } catch (err) {
-      setState({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
-    }
-  };
-
-  const busy = state.kind === 'checking' || state.kind === 'installing';
-  const buttonLabel =
-    state.kind === 'checking' ? 'Checking…' :
-    state.kind === 'installing' ? 'Installing…' :
-    state.kind === 'available' ? 'Update & Restart' :
-    'Check for Updates';
-  const onClick = state.kind === 'available' ? install : check;
-
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Software updates</div>
-          <div className="prefix-sub">
-            {version ? <>Currently running AmazonG <b>v{version}</b>. </> : null}
-            Click <b>Check for Updates</b> to see if a newer release is available on GitHub.
-            Updating downloads the new build, swaps the app, and relaunches automatically — your
-            saved sessions and job history stay intact.
-          </div>
-          {state.kind === 'up_to_date' && (
-            <div className="prefix-status prefix-status-ok">✓ You're on the latest version (v{state.current}).</div>
-          )}
-          {state.kind === 'available' && (
-            <div className="prefix-status prefix-status-info">
-              ⬆ Update available: <b>v{state.latest}</b> (you have v{state.current}).
-            </div>
-          )}
-          {state.kind === 'error' && (
-            <div className="prefix-status prefix-status-err">⚠ {state.message}</div>
-          )}
-        </div>
-        <button
-          className={state.kind === 'available' ? 'primary-action' : 'ghost-btn'}
-          onClick={() => void onClick()}
-          disabled={busy}
-        >
-          {buttonLabel}
-        </button>
       </div>
     </div>
   );

@@ -54,15 +54,6 @@ const bridge: AutoGBridge = {
       AutoGBridge['jobsVerifyOrder']
     >,
 
-  updateCheck: () => ipcRenderer.invoke(IPC.updateCheck) as ReturnType<AutoGBridge['updateCheck']>,
-  updateApply: (downloadUrl) =>
-    ipcRenderer.invoke(IPC.updateApply, downloadUrl) as Promise<void>,
-  updateGetReleaseNotes: (version) =>
-    ipcRenderer.invoke(IPC.updateGetReleaseNotes, version) as ReturnType<
-      AutoGBridge['updateGetReleaseNotes']
-    >,
-  appVersion: () => ipcRenderer.invoke(IPC.appVersion) as Promise<string>,
-
   onLog(cb) {
     const listener = (_: unknown, ev: LogEvent) => cb(ev);
     ipcRenderer.on(IPC.evtLog, listener);

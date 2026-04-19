@@ -6,11 +6,6 @@ import type {
   RendererStatus,
 } from './types.js';
 
-export type UpdateCheckResult =
-  | { kind: 'up_to_date'; current: string }
-  | { kind: 'available'; current: string; latest: string; downloadUrl: string }
-  | { kind: 'error'; message: string };
-
 export const IPC = {
   identityGet: 'identity:get',
   identityConnect: 'identity:connect',
@@ -42,11 +37,6 @@ export const IPC = {
   jobsDelete: 'jobs:delete',
   jobsVerifyOrder: 'jobs:verify-order',
 
-  updateCheck: 'update:check',
-  updateApply: 'update:apply',
-  updateGetReleaseNotes: 'update:get-release-notes',
-  appVersion: 'app:version',
-
   evtLog: 'evt:log',
   evtStatus: 'evt:status',
   evtProfiles: 'evt:profiles',
@@ -66,14 +56,6 @@ export type Settings = {
    * saved address. Mirrors old AutoG's behavior.
    */
   allowedAddressPrefixes: string[];
-  /**
-   * The version we last showed the changelog for. On launch the renderer
-   * compares this against `app.getVersion()` and pops a "What's new"
-   * modal when they differ (and the current version is newer). Empty
-   * string on fresh installs — those get a one-time write to suppress
-   * the first-launch modal.
-   */
-  lastSeenVersion: string;
   /**
    * Whether the polling worker should start automatically when the app
    * launches (assuming a connected BG identity exists). Off by default
@@ -138,10 +120,6 @@ export type AutoGBridge = {
     | { kind: 'error' | 'busy'; message: string }
   >;
 
-  updateCheck(): Promise<UpdateCheckResult>;
-  updateApply(downloadUrl: string): Promise<void>;
-  updateGetReleaseNotes(version: string): Promise<{ tag: string; name: string; body: string } | null>;
-  appVersion(): Promise<string>;
   onLog(cb: (ev: LogEvent) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;
