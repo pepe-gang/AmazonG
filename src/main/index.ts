@@ -46,9 +46,20 @@ app.setName('AmazonG');
 // var has to be set BEFORE any `require('playwright')` that triggers
 // browser discovery (driver.ts imports it lazily at session time, so
 // setting here is safe).
-if (app.isPackaged) {
-  const bundled = join(process.resourcesPath, 'playwright-browsers');
-  process.env.PLAYWRIGHT_BROWSERS_PATH = bundled;
+//
+// We also set it when running from an app bundle even if Electron doesn't
+// report isPackaged (e.g. debug builds), by detecting resourcesPath
+// containing a playwright-browsers directory.
+import { existsSync } from 'node:fs';
+
+const bundledBrowsers = join(process.resourcesPath, 'playwright-browsers');
+if (existsSync(bundledBrowsers)) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = bundledBrowsers;
+} else if (app.isPackaged) {
+  // Packaged but browsers missing — log so we can diagnose.
+  console.error(
+    `[AmazonG] PLAYWRIGHT_BROWSERS_PATH target missing: ${bundledBrowsers}`
+  );
 }
 
 let mainWindow: BrowserWindow | null = null;

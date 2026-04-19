@@ -26,17 +26,30 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
   // var is set in index.ts).
   const { chromium } = await import('playwright');
 
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: opts.headless,
-    viewport: { width: 1280, height: 900 },
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    args: [
-      // Silences Chromium's WebAuthn / passkey conditional-UI dialogs that
-      // Amazon's sign-in page triggers ("No passkeys available").
-      '--disable-features=WebAuthenticationPasskeys,PasskeyAutofill,PasskeyFromAnotherDevice,WebAuthenticationConditionalUI',
-    ],
-  });
+  let context: BrowserContext;
+  try {
+    context = await chromium.launchPersistentContext(userDataDir, {
+      headless: opts.headless,
+      viewport: { width: 1280, height: 900 },
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      args: [
+        // Silences Chromium's WebAuthn / passkey conditional-UI dialogs that
+        // Amazon's sign-in page triggers ("No passkeys available").
+        '--disable-features=WebAuthenticationPasskeys,PasskeyAutofill,PasskeyFromAnotherDevice,WebAuthenticationConditionalUI',
+      ],
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/Executable doesn't exist|download new browsers/i.test(msg)) {
+      const browsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH ?? '(not set)';
+      throw new Error(
+        `Chromium browser not found. PLAYWRIGHT_BROWSERS_PATH=${browsersPath}. ` +
+        'The app may need to be reinstalled — download the latest DMG from the BetterBG setup guide.',
+      );
+    }
+    throw err;
+  }
 
   // Stub the WebAuthn JS APIs so Amazon's conditional-mediation call can't
   // surface the Chromium passkey picker even if the flag above misses it.
