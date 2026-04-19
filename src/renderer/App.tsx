@@ -162,8 +162,19 @@ function MainScreen({ status }: { status: RendererStatus }) {
   const [uptimeTick, setUptimeTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const [appVersion, setAppVersion] = useState<string>('');
+  const [updateInfo, setUpdateInfo] = useState<{ latest: string } | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   useEffect(() => {
     void window.autog.appVersion().then(setAppVersion);
+    // Check for updates on mount + every 6 hours
+    const check = () => {
+      void window.autog.versionCheck().then((r) => {
+        if (r.updateAvailable && r.latest) setUpdateInfo({ latest: r.latest });
+      }).catch(() => undefined);
+    };
+    check();
+    const t = setInterval(check, 6 * 60 * 60 * 1000);
+    return () => clearInterval(t);
   }, []);
   useEffect(() => {
     // Update the dashboard's "Jobs" stat card by listening to the same log
@@ -295,6 +306,15 @@ function MainScreen({ status }: { status: RendererStatus }) {
       </div>
 
       <div className="content">
+        {updateInfo && !updateDismissed && (
+          <div className="update-notice" role="status">
+            <span>
+              <b>AmazonG v{updateInfo.latest}</b> is available (you have v{appVersion}).
+              Download the latest from the <button className="link-inline" onClick={() => void window.autog.openExternal('https://betterbg.vercel.app/dashboard/auto-buy')}>BetterBG setup guide</button>.
+            </span>
+            <button className="ghost-btn" onClick={() => setUpdateDismissed(true)}>Dismiss</button>
+          </div>
+        )}
         {status.lastError && <div className="error-banner">{status.lastError}</div>}
         {view === 'dashboard' ? (
           <DashboardView

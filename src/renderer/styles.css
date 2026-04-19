@@ -1582,6 +1582,34 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   font-size: 12px;
 }
 
+/* Update available notice */
+.update-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e3a8a;
+  font-size: 13px;
+}
+.link-inline {
+  background: none;
+  border: none;
+  color: #2563eb;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+.link-inline:hover {
+  color: #1d4ed8;
+}
+
 /* Snapshot preview in logs view */
 .logs-head-actions {
   display: flex;

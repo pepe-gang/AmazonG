@@ -37,12 +37,18 @@ export type ServerPurchase = {
   updatedAt: string;
 };
 
+export type VersionInfo = {
+  latestVersion: string | null;
+  downloadUrls: { darwin?: string; win32?: string; linux?: string };
+};
+
 export type BGClient = {
   readonly baseUrl: string;
   me(): Promise<IdentityInfo>;
   claimJob(): Promise<AutoGJob | null>;
   reportStatus(jobId: string, report: JobStatusReport): Promise<void>;
   listPurchases(limit?: number): Promise<ServerPurchase[]>;
+  checkVersion(): Promise<VersionInfo>;
 };
 
 /**
@@ -132,6 +138,11 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         { method: 'GET' },
       );
       return r?.attempts ?? [];
+    },
+
+    async checkVersion() {
+      const r = await request<VersionInfo>('/api/autog/version', { method: 'GET' });
+      return r ?? { latestVersion: null, downloadUrls: {} };
     },
   };
 }

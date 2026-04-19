@@ -17,6 +17,7 @@ export const IPC = {
   settingsSet: 'settings:set',
   openExternal: 'shell:open-external',
   appVersion: 'app:version',
+  versionCheck: 'version:check',
 
   profilesList: 'profiles:list',
   profilesAdd: 'profiles:add',
@@ -105,6 +106,7 @@ export type AutoGBridge = {
   settingsSet(partial: Partial<Settings>): Promise<Settings>;
   openExternal(url: string): Promise<void>;
   appVersion(): Promise<string>;
+  versionCheck(): Promise<{ updateAvailable: boolean; latest: string | null; current: string }>;
   profilesList(): Promise<AmazonProfile[]>;
   profilesAdd(email: string, displayName?: string): Promise<AmazonProfile[]>;
   profilesRemove(email: string): Promise<AmazonProfile[]>;

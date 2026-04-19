@@ -20,6 +20,8 @@ const bridge: AutoGBridge = {
   settingsSet: (p) => ipcRenderer.invoke(IPC.settingsSet, p) as Promise<Settings>,
   openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url) as Promise<void>,
   appVersion: () => ipcRenderer.invoke(IPC.appVersion) as Promise<string>,
+  versionCheck: () =>
+    ipcRenderer.invoke(IPC.versionCheck) as ReturnType<AutoGBridge['versionCheck']>,
 
   profilesList: () => ipcRenderer.invoke(IPC.profilesList) as Promise<AmazonProfile[]>,
   profilesAdd: (email, displayName) =>
