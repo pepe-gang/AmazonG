@@ -1696,6 +1696,29 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   cursor: pointer;
 }
 
+/* Snapshot disk usage indicator */
+.snapshot-disk {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.snapshot-disk-label {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.snapshot-clear-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.snapshot-clear-btn:hover:not(:disabled) {
+  background: var(--danger-bg);
+}
+
 /* Activity log card (legacy — kept for any leftover usage) */
 .log-card {
   flex: 1;

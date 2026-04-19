@@ -1,5 +1,5 @@
 import type { BrowserContext, Page } from 'playwright';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readdir, stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { app } from 'electron';
 
@@ -192,4 +192,56 @@ export async function captureFailureSnapshot(
   } catch {
     return null;
   }
+}
+
+/**
+ * Calculate disk usage of all snapshot directories.
+ * Returns { count: number of attempt dirs, bytes: total size }.
+ */
+export async function snapshotsDiskUsage(): Promise<{ count: number; bytes: number }> {
+  const dir = snapshotsDir();
+  let count = 0;
+  let bytes = 0;
+  try {
+    const entries = await readdir(dir);
+    for (const entry of entries) {
+      const entryPath = join(dir, entry);
+      try {
+        const s = await stat(entryPath);
+        if (!s.isDirectory()) continue;
+        count += 1;
+        const files = await readdir(entryPath);
+        for (const file of files) {
+          try {
+            const fs = await stat(join(entryPath, file));
+            bytes += fs.size;
+          } catch { /* skip */ }
+        }
+      } catch { /* skip */ }
+    }
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  return { count, bytes };
+}
+
+/**
+ * Delete all snapshot directories. Returns number of dirs removed.
+ * Job rows and logs are kept — only the heavy debug files go away.
+ */
+export async function clearAllSnapshots(): Promise<number> {
+  const dir = snapshotsDir();
+  let count = 0;
+  try {
+    const entries = await readdir(dir);
+    for (const entry of entries) {
+      try {
+        await rm(join(dir, entry), { recursive: true, force: true });
+        count += 1;
+      } catch { /* skip */ }
+    }
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  return count;
 }

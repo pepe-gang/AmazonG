@@ -1947,8 +1947,33 @@ const SNAPSHOT_ERROR_GROUPS = [
   { id: 'verify_failed', label: 'Order verification error' },
 ] as const;
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 function SnapshotSettingsPanel() {
   const { settings, busy, update } = useSettings();
+  const [diskUsage, setDiskUsage] = useState<{ count: number; bytes: number } | null>(null);
+  const [clearing, setClearing] = useState(false);
+
+  useEffect(() => {
+    void window.autog.snapshotsDiskUsage().then(setDiskUsage);
+  }, []);
+
+  const clearSnapshots = async () => {
+    if (!confirm('Delete all snapshot files (screenshots, HTML, traces)? Job history and logs are kept.')) return;
+    setClearing(true);
+    try {
+      await window.autog.snapshotsClearAll();
+      setDiskUsage({ count: 0, bytes: 0 });
+    } finally {
+      setClearing(false);
+    }
+  };
+
   if (!settings) return null;
   const on = settings.snapshotOnFailure;
   const groups = settings.snapshotGroups ?? [];
@@ -2026,6 +2051,20 @@ function SnapshotSettingsPanel() {
               );
             })}
           </div>
+        </div>
+      )}
+      {diskUsage && diskUsage.count > 0 && (
+        <div className="snapshot-disk">
+          <span className="snapshot-disk-label">
+            {diskUsage.count} snapshot{diskUsage.count !== 1 ? 's' : ''} · {formatBytes(diskUsage.bytes)}
+          </span>
+          <button
+            className="ghost-btn snapshot-clear-btn"
+            onClick={() => void clearSnapshots()}
+            disabled={clearing}
+          >
+            {clearing ? 'Clearing…' : 'Clear all snapshots'}
+          </button>
         </div>
       )}
     </div>

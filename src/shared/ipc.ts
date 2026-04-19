@@ -40,6 +40,8 @@ export const IPC = {
   jobsVerifyOrder: 'jobs:verify-order',
   jobsSnapshot: 'jobs:snapshot',
   jobsOpenTrace: 'jobs:open-trace',
+  snapshotsDiskUsage: 'snapshots:disk-usage',
+  snapshotsClearAll: 'snapshots:clear-all',
 
   evtLog: 'evt:log',
   evtStatus: 'evt:status',
@@ -132,6 +134,8 @@ export type AutoGBridge = {
 
   jobsSnapshot(attemptId: string): Promise<{ screenshot: string | null; html: string | null; hasTrace: boolean }>;
   jobsOpenTrace(attemptId: string): Promise<void>;
+  snapshotsDiskUsage(): Promise<{ count: number; bytes: number }>;
+  snapshotsClearAll(): Promise<number>;
   onLog(cb: (ev: LogEvent) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;

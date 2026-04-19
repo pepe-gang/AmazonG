@@ -558,6 +558,14 @@ function registerIpcHandlers(): void {
     const tracePath = join(snapshotDir(attemptId), 'trace.zip');
     await shell.showItemInFolder(tracePath);
   });
+  ipcMain.handle(IPC.snapshotsDiskUsage, async () => {
+    const { snapshotsDiskUsage } = await import('../browser/snapshot.js');
+    return snapshotsDiskUsage();
+  });
+  ipcMain.handle(IPC.snapshotsClearAll, async () => {
+    const { clearAllSnapshots } = await import('../browser/snapshot.js');
+    return clearAllSnapshots();
+  });
   ipcMain.handle(IPC.jobsClearAll, async () => {
     await storeClearAll();
     scheduleBroadcastJobs();

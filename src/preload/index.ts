@@ -62,6 +62,10 @@ const bridge: AutoGBridge = {
     >,
   jobsOpenTrace: (attemptId) =>
     ipcRenderer.invoke(IPC.jobsOpenTrace, attemptId) as Promise<void>,
+  snapshotsDiskUsage: () =>
+    ipcRenderer.invoke(IPC.snapshotsDiskUsage) as ReturnType<AutoGBridge['snapshotsDiskUsage']>,
+  snapshotsClearAll: () =>
+    ipcRenderer.invoke(IPC.snapshotsClearAll) as ReturnType<AutoGBridge['snapshotsClearAll']>,
 
   onLog(cb) {
     const listener = (_: unknown, ev: LogEvent) => cb(ev);
