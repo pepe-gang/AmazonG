@@ -10,6 +10,7 @@ import {
 } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { JobAttempt, LogEvent } from '../shared/types.js';
+import { snapshotDir, snapshotsDir, clearAllSnapshots } from '../browser/snapshot.js';
 
 export { makeAttemptId, sanitizeProfileKey } from '../shared/sanitize.js';
 
@@ -32,14 +33,6 @@ function logsDir(): string {
 
 function logFile(attemptId: string): string {
   return join(logsDir(), `${attemptId}.jsonl`);
-}
-
-function snapshotsDir(): string {
-  return join(app.getPath('userData'), 'attempt-snapshots');
-}
-
-function snapshotDir(attemptId: string): string {
-  return join(snapshotsDir(), attemptId);
 }
 
 function removeSnapshot(attemptId: string): Promise<void> {
@@ -222,7 +215,7 @@ export async function clearAll(): Promise<void> {
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
-  void rm(snapshotsDir(), { recursive: true, force: true }).catch(() => undefined);
+  void clearAllSnapshots();
 }
 
 /** Drop every attempt with status 'failed' and unlink its JSONL log. */

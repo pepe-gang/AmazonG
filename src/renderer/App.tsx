@@ -7,6 +7,7 @@ import type {
   RendererStatus,
 } from '@shared/types';
 import type { Settings } from '@shared/ipc';
+import { SNAPSHOT_ERROR_GROUPS } from '@shared/snapshotGroups';
 import { parsePrice } from '@parsers/amazonProduct';
 
 const SETUP_GUIDE_URL = 'https://betterbg.vercel.app/dashboard/auto-buy';
@@ -1716,7 +1717,7 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
     return off;
   }, [attempt.jobId, attempt.amazonEmail]);
 
-  const hasSnapshot = logs.some((ev) => ev.message === 'snapshot.captured');
+  const hasSnapshot = useMemo(() => logs.some((ev) => ev.message === 'snapshot.captured'), [logs]);
 
   const openSnapshot = async (kind: 'screenshot' | 'html') => {
     if (!snapshotData) {
@@ -1803,22 +1804,13 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
             <button className="ghost-btn" onClick={() => setSnapshotPreview(null)}>Close</button>
           </div>
           <div className="snapshot-preview-body">
-            {snapshotPreview === 'screenshot' && snapshotData.screenshot && (
-              <img
-                src={`data:image/png;base64,${snapshotData.screenshot}`}
-                alt="Failure screenshot"
-                className="snapshot-img"
-              />
-            )}
-            {snapshotPreview === 'screenshot' && !snapshotData.screenshot && (
-              <div className="log-empty">No screenshot available.</div>
-            )}
-            {snapshotPreview === 'html' && snapshotData.html && (
-              <pre className="snapshot-html">{snapshotData.html}</pre>
-            )}
-            {snapshotPreview === 'html' && !snapshotData.html && (
-              <div className="log-empty">No HTML snapshot available.</div>
-            )}
+            {snapshotPreview === 'screenshot'
+              ? snapshotData.screenshot
+                ? <img src={`data:image/png;base64,${snapshotData.screenshot}`} alt="Failure screenshot" className="snapshot-img" />
+                : <div className="log-empty">No screenshot available.</div>
+              : snapshotData.html
+                ? <pre className="snapshot-html">{snapshotData.html}</pre>
+                : <div className="log-empty">No HTML snapshot available.</div>}
           </div>
         </div>
       )}
@@ -1930,22 +1922,6 @@ function AutoStartWorkerPanel() {
     </div>
   );
 }
-
-const SNAPSHOT_ERROR_GROUPS = [
-  { id: 'price_exceeded', label: 'Price exceeds max' },
-  { id: 'out_of_stock', label: 'Out of stock' },
-  { id: 'address_mismatch', label: 'Address not found' },
-  { id: 'address_stuck', label: 'Address picker failed' },
-  { id: 'cashback_low', label: 'Cashback below minimum' },
-  { id: 'cashback_toggle', label: 'BG name toggle failed' },
-  { id: 'buy_button', label: 'Buy Now button issue' },
-  { id: 'place_order', label: 'Place Order failed' },
-  { id: 'confirm_stuck', label: 'Confirmation page stuck' },
-  { id: 'checkout_price', label: 'Checkout price unreadable' },
-  { id: 'condition_blocked', label: 'Item condition rejected' },
-  { id: 'shipping_blocked', label: 'Shipping / Prime issue' },
-  { id: 'verify_failed', label: 'Order verification error' },
-] as const;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

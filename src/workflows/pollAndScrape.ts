@@ -448,10 +448,7 @@ async function handleVerifyJob(
         { jobId: job.id, profile: profile.email, orderId: targetOrderId, amazonMessage: outcome.message },
         cid,
       );
-      if (shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
-        const snap = await captureFailureSnapshot(page, activeAttemptId, session.context).catch(() => null);
-        if (snap) logger.info('snapshot.captured', { jobId: job.id, profile: profile.email, ...snap }, cid);
-      }
+      await maybeSnapshot(error, page, activeAttemptId, session, deps, cid, { jobId: job.id, profile: profile.email });
       await deps.jobAttempts
         .update(activeAttemptId, { status: 'failed', error })
         .catch(() => undefined);
@@ -653,12 +650,7 @@ async function runForProfile(
       // without it. Fall back to reason, then to a generic message.
       const error = (report.detail ?? report.reason ?? 'verification failed').replace(/\.\s*$/, '');
       logger.error('step.verify.fail', { jobId: job.id, profile, reason: report.reason }, cid);
-      if (page && shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
-        const snap = await captureFailureSnapshot(page, attemptId, session?.context);
-        if (snap) logger.info('snapshot.captured', { jobId: job.id, profile, ...snap }, cid);
-      } else if (session && deps.snapshotOnFailure) {
-        await discardTracing(session.context);
-      }
+      await maybeSnapshot(error, page, attemptId, session, deps, cid, { jobId: job.id, profile });
       await deps.jobAttempts
         .update(attemptId, {
           status: 'failed',
@@ -704,12 +696,7 @@ async function runForProfile(
         { jobId: job.id, profile, stage: buy.stage, reason: buy.reason },
         cid,
       );
-      if (page && shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
-        const snap = await captureFailureSnapshot(page, attemptId, session?.context);
-        if (snap) logger.info('snapshot.captured', { jobId: job.id, profile, ...snap }, cid);
-      } else if (session && deps.snapshotOnFailure) {
-        await discardTracing(session.context);
-      }
+      await maybeSnapshot(error, page, attemptId, session, deps, cid, { jobId: job.id, profile });
       await deps.jobAttempts
         .update(attemptId, {
           status: 'failed',
@@ -807,12 +794,7 @@ async function runForProfile(
     const raw = err instanceof Error ? err.message : String(err);
     const message = friendlyJobError(raw, profile);
     logger.error('job.profile.fail', { jobId: job.id, profile, error: message }, cid);
-    if (page && shouldCapture(message, deps.snapshotOnFailure, deps.snapshotGroups)) {
-      const snap = await captureFailureSnapshot(page, attemptId, session?.context).catch(() => null);
-      if (snap) logger.info('snapshot.captured', { jobId: job.id, profile, ...snap }, cid);
-    } else if (session && deps.snapshotOnFailure) {
-      await discardTracing(session.context).catch(() => undefined);
-    }
+    await maybeSnapshot(message, page, attemptId, session, deps, cid, { jobId: job.id, profile });
     await deps.jobAttempts
       .update(attemptId, { status: 'failed', error: message })
       .catch(() => undefined);
@@ -821,6 +803,23 @@ async function runForProfile(
     // Do NOT close the page — it's the session's only tab and closing it
     // would terminate the persistent Chromium context (browser quits when
     // the last page closes). Next job reuses the same tab via goto().
+  }
+}
+
+async function maybeSnapshot(
+  error: string,
+  page: Page | null,
+  attemptId: string,
+  session: DriverSession | null,
+  deps: Deps,
+  cid: string,
+  logCtx: Record<string, unknown>,
+): Promise<void> {
+  if (page && shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
+    const snap = await captureFailureSnapshot(page, attemptId, session?.context).catch(() => null);
+    if (snap) logger.info('snapshot.captured', { ...logCtx, ...snap }, cid);
+  } else if (session && deps.snapshotOnFailure) {
+    await discardTracing(session.context).catch(() => undefined);
   }
 }
 

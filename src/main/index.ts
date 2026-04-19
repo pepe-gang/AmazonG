@@ -32,6 +32,7 @@ import {
   upsertProfile,
 } from './profiles.js';
 import { openSession } from '../browser/driver.js';
+import { snapshotDir, snapshotsDiskUsage, clearAllSnapshots } from '../browser/snapshot.js';
 import { isLoggedInAmazon, loginAmazon } from '../actions/loginAmazon.js';
 import type { AmazonProfile, IdentityInfo, RendererStatus } from '../shared/types.js';
 
@@ -534,38 +535,21 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC.jobsList, () => listMergedAttempts());
   ipcMain.handle(IPC.jobsLogs, (_e, attemptId: string) => storeReadLogs(attemptId));
   ipcMain.handle(IPC.jobsSnapshot, async (_e, attemptId: string) => {
-    const { snapshotDir } = await import('../browser/snapshot.js');
+    const { readFile } = await import('node:fs/promises');
     const dir = snapshotDir(attemptId);
-    const { readFile, access } = await import('node:fs/promises');
     let screenshot: string | null = null;
     let html: string | null = null;
     let hasTrace = false;
-    try {
-      const buf = await readFile(join(dir, 'screenshot.png'));
-      screenshot = buf.toString('base64');
-    } catch { /* no screenshot */ }
-    try {
-      html = await readFile(join(dir, 'page.html'), 'utf8');
-    } catch { /* no html */ }
-    try {
-      await access(join(dir, 'trace.zip'));
-      hasTrace = true;
-    } catch { /* no trace */ }
+    try { screenshot = (await readFile(join(dir, 'screenshot.png'))).toString('base64'); } catch { /* no file */ }
+    try { html = await readFile(join(dir, 'page.html'), 'utf8'); } catch { /* no file */ }
+    try { const { stat } = await import('node:fs/promises'); await stat(join(dir, 'trace.zip')); hasTrace = true; } catch { /* no file */ }
     return { screenshot, html, hasTrace };
   });
-  ipcMain.handle(IPC.jobsOpenTrace, async (_e, attemptId: string) => {
-    const { snapshotDir } = await import('../browser/snapshot.js');
-    const tracePath = join(snapshotDir(attemptId), 'trace.zip');
-    await shell.showItemInFolder(tracePath);
+  ipcMain.handle(IPC.jobsOpenTrace, (_e, attemptId: string) => {
+    shell.showItemInFolder(join(snapshotDir(attemptId), 'trace.zip'));
   });
-  ipcMain.handle(IPC.snapshotsDiskUsage, async () => {
-    const { snapshotsDiskUsage } = await import('../browser/snapshot.js');
-    return snapshotsDiskUsage();
-  });
-  ipcMain.handle(IPC.snapshotsClearAll, async () => {
-    const { clearAllSnapshots } = await import('../browser/snapshot.js');
-    return clearAllSnapshots();
-  });
+  ipcMain.handle(IPC.snapshotsDiskUsage, () => snapshotsDiskUsage());
+  ipcMain.handle(IPC.snapshotsClearAll, () => clearAllSnapshots());
   ipcMain.handle(IPC.jobsClearAll, async () => {
     await storeClearAll();
     scheduleBroadcastJobs();
