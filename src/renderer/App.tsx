@@ -436,17 +436,17 @@ function DashboardView(props: {
           rows={[
             {
               label: 'Today',
-              value: `${fmt(profitSummary.pToday)} · ${profitSummary.uToday}u`,
+              value: `${fmt(profitSummary.pToday)}`,
               valueClass: profitSummary.pToday >= 0 ? 'green' : 'red',
             },
             {
               label: 'Last 7d',
-              value: `${fmt(profitSummary.pWeek)} · ${profitSummary.uWeek}u`,
+              value: `${fmt(profitSummary.pWeek)}`,
               valueClass: profitSummary.pWeek >= 0 ? 'green' : 'red',
             },
             {
               label: 'All time',
-              value: `${fmt(profitSummary.pAll)} · ${profitSummary.uAll}u`,
+              value: `${fmt(profitSummary.pAll)}`,
               valueClass: profitSummary.pAll >= 0 ? 'green' : 'red',
             },
           ]}
