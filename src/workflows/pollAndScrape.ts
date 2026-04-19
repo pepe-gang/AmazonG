@@ -8,7 +8,7 @@ import { buyNow } from '../actions/buyNow.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
 import { logger } from '../shared/logger.js';
-import { captureFailureSnapshot, shouldCapture } from '../browser/snapshot.js';
+import { captureFailureSnapshot, discardTracing, shouldCapture, startTracing } from '../browser/snapshot.js';
 import { makeAttemptId } from '../shared/sanitize.js';
 import type {
   AmazonProfile,
@@ -354,6 +354,7 @@ async function handleVerifyJob(
 
   try {
     const session = await getSession(deps, sessions, profile.email, profile.headless);
+    if (deps.snapshotOnFailure) await startTracing(session.context);
     const existing = session.context.pages();
     const page = existing[0] ?? (await session.newPage());
     const outcome = await verifyOrder(page, targetOrderId);
@@ -448,7 +449,7 @@ async function handleVerifyJob(
         cid,
       );
       if (shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
-        const snap = await captureFailureSnapshot(page, activeAttemptId).catch(() => null);
+        const snap = await captureFailureSnapshot(page, activeAttemptId, session.context).catch(() => null);
         if (snap) logger.info('snapshot.captured', { jobId: job.id, profile: profile.email, ...snap }, cid);
       }
       await deps.jobAttempts
@@ -582,9 +583,11 @@ async function runForProfile(
     .catch(() => undefined);
 
   let page: Page | null = null;
+  let session: DriverSession | null = null;
   try {
     logger.info('job.profile.start', { jobId: job.id, profile }, cid);
-    const session = await getSession(deps, sessions, profile, profileData.headless);
+    session = await getSession(deps, sessions, profile, profileData.headless);
+    if (deps.snapshotOnFailure) await startTracing(session.context);
     // Reuse the persistent context's existing tab (Chromium starts with an
     // about:blank). Don't create a new tab for each job — that leaves the
     // initial blank tab orphaned next to ours.
@@ -651,8 +654,10 @@ async function runForProfile(
       const error = (report.detail ?? report.reason ?? 'verification failed').replace(/\.\s*$/, '');
       logger.error('step.verify.fail', { jobId: job.id, profile, reason: report.reason }, cid);
       if (page && shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
-        const snap = await captureFailureSnapshot(page, attemptId);
+        const snap = await captureFailureSnapshot(page, attemptId, session?.context);
         if (snap) logger.info('snapshot.captured', { jobId: job.id, profile, ...snap }, cid);
+      } else if (session && deps.snapshotOnFailure) {
+        await discardTracing(session.context);
       }
       await deps.jobAttempts
         .update(attemptId, {
@@ -700,8 +705,10 @@ async function runForProfile(
         cid,
       );
       if (page && shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
-        const snap = await captureFailureSnapshot(page, attemptId);
+        const snap = await captureFailureSnapshot(page, attemptId, session?.context);
         if (snap) logger.info('snapshot.captured', { jobId: job.id, profile, ...snap }, cid);
+      } else if (session && deps.snapshotOnFailure) {
+        await discardTracing(session.context);
       }
       await deps.jobAttempts
         .update(attemptId, {
@@ -713,6 +720,8 @@ async function runForProfile(
         .catch(() => undefined);
       return failed(profile, error);
     }
+
+    if (session && deps.snapshotOnFailure) await discardTracing(session.context);
 
     if (buy.dryRun) {
       logger.info(
@@ -799,8 +808,10 @@ async function runForProfile(
     const message = friendlyJobError(raw, profile);
     logger.error('job.profile.fail', { jobId: job.id, profile, error: message }, cid);
     if (page && shouldCapture(message, deps.snapshotOnFailure, deps.snapshotGroups)) {
-      const snap = await captureFailureSnapshot(page, attemptId).catch(() => null);
+      const snap = await captureFailureSnapshot(page, attemptId, session?.context).catch(() => null);
       if (snap) logger.info('snapshot.captured', { jobId: job.id, profile, ...snap }, cid);
+    } else if (session && deps.snapshotOnFailure) {
+      await discardTracing(session.context).catch(() => undefined);
     }
     await deps.jobAttempts
       .update(attemptId, { status: 'failed', error: message })

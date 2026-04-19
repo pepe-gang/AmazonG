@@ -536,9 +536,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC.jobsSnapshot, async (_e, attemptId: string) => {
     const { snapshotDir } = await import('../browser/snapshot.js');
     const dir = snapshotDir(attemptId);
-    const { readFile } = await import('node:fs/promises');
+    const { readFile, access } = await import('node:fs/promises');
     let screenshot: string | null = null;
     let html: string | null = null;
+    let hasTrace = false;
     try {
       const buf = await readFile(join(dir, 'screenshot.png'));
       screenshot = buf.toString('base64');
@@ -546,7 +547,16 @@ function registerIpcHandlers(): void {
     try {
       html = await readFile(join(dir, 'page.html'), 'utf8');
     } catch { /* no html */ }
-    return { screenshot, html };
+    try {
+      await access(join(dir, 'trace.zip'));
+      hasTrace = true;
+    } catch { /* no trace */ }
+    return { screenshot, html, hasTrace };
+  });
+  ipcMain.handle(IPC.jobsOpenTrace, async (_e, attemptId: string) => {
+    const { snapshotDir } = await import('../browser/snapshot.js');
+    const tracePath = join(snapshotDir(attemptId), 'trace.zip');
+    await shell.showItemInFolder(tracePath);
   });
   ipcMain.handle(IPC.jobsClearAll, async () => {
     await storeClearAll();

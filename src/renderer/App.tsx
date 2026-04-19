@@ -1687,7 +1687,7 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [snapshotPreview, setSnapshotPreview] = useState<'screenshot' | 'html' | null>(null);
-  const [snapshotData, setSnapshotData] = useState<{ screenshot: string | null; html: string | null } | null>(null);
+  const [snapshotData, setSnapshotData] = useState<{ screenshot: string | null; html: string | null; hasTrace: boolean } | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -1764,6 +1764,15 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
             <>
               <button className="ghost-btn" onClick={() => void openSnapshot('screenshot')}>Screenshot</button>
               <button className="ghost-btn" onClick={() => void openSnapshot('html')}>HTML</button>
+              {snapshotData?.hasTrace && (
+                <button
+                  className="ghost-btn"
+                  title="Open trace file in Finder — drag into trace.playwright.dev to inspect"
+                  onClick={() => void window.autog.jobsOpenTrace(attempt.attemptId)}
+                >
+                  Trace
+                </button>
+              )}
             </>
           )}
           <button className="ghost-btn" onClick={() => void reload()} disabled={loading}>

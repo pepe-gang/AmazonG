@@ -60,6 +60,8 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.jobsSnapshot, attemptId) as ReturnType<
       AutoGBridge['jobsSnapshot']
     >,
+  jobsOpenTrace: (attemptId) =>
+    ipcRenderer.invoke(IPC.jobsOpenTrace, attemptId) as Promise<void>,
 
   onLog(cb) {
     const listener = (_: unknown, ev: LogEvent) => cb(ev);

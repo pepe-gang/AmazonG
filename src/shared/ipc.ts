@@ -39,6 +39,7 @@ export const IPC = {
   jobsDelete: 'jobs:delete',
   jobsVerifyOrder: 'jobs:verify-order',
   jobsSnapshot: 'jobs:snapshot',
+  jobsOpenTrace: 'jobs:open-trace',
 
   evtLog: 'evt:log',
   evtStatus: 'evt:status',
@@ -129,7 +130,8 @@ export type AutoGBridge = {
     | { kind: 'error' | 'busy'; message: string }
   >;
 
-  jobsSnapshot(attemptId: string): Promise<{ screenshot: string | null; html: string | null }>;
+  jobsSnapshot(attemptId: string): Promise<{ screenshot: string | null; html: string | null; hasTrace: boolean }>;
+  jobsOpenTrace(attemptId: string): Promise<void>;
   onLog(cb: (ev: LogEvent) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;
