@@ -16,7 +16,7 @@ function stripIpcPrefix(msg: string): string {
 }
 
 /** Fetch settings once on mount + provide an updater. Used by the
- *  three setting panels (DryRunBanner / HeadlessTogglePanel /
+ *  settings panels (LiveModePanel / HeadlessTogglePanel /
  *  AllowedPrefixesPanel) instead of each panel doing its own IPC dance. */
 function useSettings(): {
   settings: Settings | null;
@@ -377,8 +377,6 @@ function DashboardView(props: {
 
   return (
     <>
-      <DryRunBanner />
-
       <div className="stat-row">
         <StatCard
           icon={<BoltIcon />}
@@ -403,7 +401,7 @@ function DashboardView(props: {
         <StatCard
           icon={<ShoppingIcon />}
           iconVariant="purple"
-          title="Jobs"
+          title="Amazon Purchases"
           subtitle="Since session start"
           rows={[
             { label: 'Pending', value: statusCounts.pending, valueClass: 'purple' },
@@ -975,7 +973,7 @@ function JobsTable({
   return (
     <div className="jobs-card">
       <div className="jobs-head">
-        <h2>Jobs</h2>
+        <h2>Amazon Purchases</h2>
         <div className="jobs-head-right">
           <div className="jobs-count">
             {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
@@ -1777,30 +1775,34 @@ function formatTime(iso: string): string {
 /* ============================================================
    Dry-run banner (toggle)
    ============================================================ */
-function DryRunBanner() {
+function LiveModePanel() {
   const { settings, busy, update } = useSettings();
   if (!settings) return null;
-  const on = settings.buyDryRun;
-  const toggle = () => void update({ buyDryRun: !on });
+  const live = !settings.buyDryRun;
   return (
-    <div className={`dry-run-banner ${on ? 'dry' : 'live'}`}>
-      <div className="dry-run-text">
-        <div className="dry-run-title">
-          {on ? '🧪 Dry-run mode' : '🔥 LIVE mode — real orders will be placed'}
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Live mode</div>
+          <div className="prefix-sub">
+            When on, real Amazon orders are placed. When off, dry-run — runs the full flow
+            (including saved-address mutations like BG1/BG2) but stops before clicking Place Order.
+          </div>
         </div>
-        <div className="dry-run-sub">
-          {on
-            ? "Runs the full checkout flow — including saved-address mutations like the BG1/BG2 toggle. Stops only before clicking Place Order."
-            : 'Every claimed job that passes verification will place a real Amazon order.'}
-        </div>
+        <label
+          className={`toggle ${live ? 'on' : 'off'}`}
+          title={live ? 'Real orders will be placed' : 'Dry-run — no orders placed'}
+        >
+          <input
+            type="checkbox"
+            checked={live}
+            onChange={(e) => void update({ buyDryRun: !e.target.checked })}
+            disabled={busy}
+          />
+          <span className="toggle-slider" />
+          <span className="toggle-label">{live ? 'On' : 'Off'}</span>
+        </label>
       </div>
-      <button
-        className={`ghost-btn ${on ? '' : 'danger-text'}`}
-        onClick={() => void toggle()}
-        disabled={busy}
-      >
-        {on ? 'Go Live' : 'Back to Dry-run'}
-      </button>
     </div>
   );
 }
@@ -1936,6 +1938,7 @@ function AccountsView({
           handleLockedClick();
         }}
       >
+        <LiveModePanel />
         <AllowedPrefixesPanel />
         <HeadlessTogglePanel profiles={profiles} />
         <AutoStartWorkerPanel />
