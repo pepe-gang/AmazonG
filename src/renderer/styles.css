@@ -489,6 +489,71 @@ a,
 .stat-value.purple { color: var(--purple); }
 .stat-value.orange { color: var(--warn); }
 .stat-value.muted { color: var(--text-muted); font-weight: 500; }
+.stat-label-info-wrap {
+  position: relative;
+  display: inline-flex;
+  margin-left: 6px;
+}
+.stat-label-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+  border-radius: 4px;
+  line-height: 0;
+}
+.stat-label-info:hover { color: var(--text); background: var(--surface-2, #f1f5f9); }
+.error-breakdown-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 260px;
+  max-width: 360px;
+  padding: 10px 12px;
+  background: var(--bg, #fff);
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+.error-breakdown-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.error-breakdown-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.error-breakdown-list li {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+.error-breakdown-count {
+  flex: 0 0 auto;
+  min-width: 24px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--danger);
+  text-align: right;
+}
+.error-breakdown-msg {
+  flex: 1 1 auto;
+  word-break: break-word;
+}
 
 /* Count badge on toolbar button */
 .count-badge {
@@ -1259,11 +1324,11 @@ a,
 .jobs-table .cell-cb,
 .jobs-table .cell-profit { text-align: right; }
 .jobs-table .cell-qty { text-align: center; }
+.jobs-table .cell-status { text-align: center; }
 /* Top-align cells that may have multiple lines (item title + chips,
-   account email + name, status + error) so they hang from the top. */
+   account email + name) so they hang from the top. */
 .jobs-table .cell-item,
-.jobs-table .cell-account,
-.jobs-table .cell-status { vertical-align: top; }
+.jobs-table .cell-account { vertical-align: top; }
 .cell-date {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -1318,7 +1383,7 @@ a,
   font-variant-numeric: tabular-nums;
 }
 .cell-retail {
-  color: var(--text-subtle);
+  color: var(--text);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1339,7 +1404,7 @@ a,
 .profit-good { color: var(--success); }
 .profit-bad { color: var(--danger); }
 .cell-qty {
-  color: var(--text-subtle);
+  color: var(--text);
   font-variant-numeric: tabular-nums;
   text-align: center;
   white-space: nowrap;
@@ -1348,13 +1413,14 @@ a,
   white-space: nowrap;
   font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
   font-size: 11px;
-  color: var(--text-subtle);
+  color: var(--text);
 }
 .cell-dealid .dealid-text {
   cursor: help;
   border-bottom: 1px dotted var(--text-subtle);
 }
 .cell-dealid .muted { color: var(--text-subtle); border-bottom: none; cursor: default; }
+.jobs-table .cell-tracking { color: var(--text-subtle); white-space: nowrap; }
 .cb-good { color: var(--success); font-weight: 600; }
 .cb-low { color: var(--warn); font-weight: 600; }
 .cell-error {

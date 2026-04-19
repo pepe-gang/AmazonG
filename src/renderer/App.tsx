@@ -303,9 +303,7 @@ function MainScreen({ status }: { status: RendererStatus }) {
         {view === 'dashboard' ? (
           <DashboardView
             status={status}
-            stats={stats}
             uptimeLabel={uptimeLabel}
-            lastJobLabel={lastJobLabel}
             attempts={attempts}
             profiles={profiles}
             onViewLogs={(attempt) => setView({ kind: 'logs', attempt })}
@@ -325,46 +323,54 @@ function MainScreen({ status }: { status: RendererStatus }) {
    ============================================================ */
 function DashboardView(props: {
   status: RendererStatus;
-  stats: Stats;
   uptimeLabel: string;
-  lastJobLabel: string;
   attempts: JobAttempt[];
   profiles: AmazonProfile[];
   onViewLogs: (a: JobAttempt) => void;
 }) {
-  const { status, stats, uptimeLabel, lastJobLabel, attempts, profiles, onViewLogs } = props;
+  const { status, uptimeLabel, attempts, profiles, onViewLogs } = props;
 
-  // Aggregate profit + units across verified rows. Three windows: today
-  // (since local midnight), last 7 days rolling, all-time. Re-uses
-  // computeProfit so the math stays in lockstep with the per-row column.
+  const accountsCount = profiles.length;
+  const accountsReady = profiles.filter((p) => p.enabled && p.loggedIn).length;
+
   const profitSummary = useMemo(() => {
-    const now = Date.now();
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const todayMs = startOfToday.getTime();
-    const weekMs = now - 7 * 24 * 60 * 60 * 1000;
+    const startOfMonth = new Date();
+    startOfMonth.setHours(0, 0, 0, 0);
+    startOfMonth.setDate(1);
+    const monthMs = startOfMonth.getTime();
 
-    let pAll = 0, pWeek = 0, pToday = 0;
-    let uAll = 0, uWeek = 0, uToday = 0;
-    let nAll = 0;
+    let pAll = 0, pMonth = 0, pToday = 0, nAll = 0;
     for (const a of attempts) {
       const profit = computeProfit(a);
-      if (profit === null) continue; // only verified rows count
-      const qty = typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : 0;
+      if (profit === null) continue;
       const t = new Date(a.createdAt).getTime();
       pAll += profit;
-      uAll += qty;
       nAll += 1;
-      if (t >= weekMs) {
-        pWeek += profit;
-        uWeek += qty;
-      }
-      if (t >= todayMs) {
-        pToday += profit;
-        uToday += qty;
-      }
+      if (t >= monthMs) pMonth += profit;
+      if (t >= todayMs) pToday += profit;
     }
-    return { pAll, pWeek, pToday, uAll, uWeek, uToday, nAll };
+    return { pAll, pMonth, pToday, nAll };
+  }, [attempts]);
+
+  const statusCounts = useMemo(() => {
+    const c = { pending: 0, success: 0, cancelled: 0, failed: 0 };
+    for (const a of attempts) {
+      c[STATUS_GROUP[a.status]] += 1;
+    }
+    return c;
+  }, [attempts]);
+
+  const failedErrorBreakdown = useMemo(() => {
+    const by = new Map<string, number>();
+    for (const a of attempts) {
+      if (STATUS_GROUP[a.status] !== 'failed') continue;
+      const key = normalizeFailureError(a.error);
+      by.set(key, (by.get(key) ?? 0) + 1);
+    }
+    return Array.from(by.entries()).sort((a, b) => b[1] - a[1]);
   }, [attempts]);
 
   const fmt = (n: number) => `${n >= 0 ? '+' : '−'}$${Math.abs(n).toFixed(2)}`;
@@ -386,7 +392,12 @@ function DashboardView(props: {
               valueClass: status.running ? 'green' : 'muted',
             },
             { label: 'Uptime', value: uptimeLabel, valueClass: 'muted' },
-            { label: 'Account', value: status.identity?.userEmail ?? '—', valueClass: 'muted' },
+            {
+              label: 'Amazon accounts',
+              value: `${accountsReady} of ${accountsCount}`,
+              valueClass: 'muted',
+            },
+            { label: 'Better BG Account', value: status.identity?.userEmail ?? '—', valueClass: 'muted' },
           ]}
         />
         <StatCard
@@ -395,9 +406,19 @@ function DashboardView(props: {
           title="Jobs"
           subtitle="Since session start"
           rows={[
-            { label: 'Claimed', value: stats.claimed, valueClass: 'purple' },
-            { label: 'Completed', value: stats.completed, valueClass: 'green' },
-            { label: 'Failed', value: stats.failed, valueClass: 'red' },
+            { label: 'Pending', value: statusCounts.pending, valueClass: 'purple' },
+            { label: 'Success', value: statusCounts.success, valueClass: 'green' },
+            { label: 'Cancelled', value: statusCounts.cancelled, valueClass: 'muted' },
+            {
+              label: (
+                <>
+                  Failed
+                  <FailedErrorPopover breakdown={failedErrorBreakdown} total={statusCounts.failed} />
+                </>
+              ),
+              value: statusCounts.failed,
+              valueClass: 'red',
+            },
           ]}
         />
         <StatCard
@@ -416,9 +437,9 @@ function DashboardView(props: {
               valueClass: profitSummary.pToday >= 0 ? 'green' : 'red',
             },
             {
-              label: 'Last 7d',
-              value: `${fmt(profitSummary.pWeek)}`,
-              valueClass: profitSummary.pWeek >= 0 ? 'green' : 'red',
+              label: 'This month',
+              value: `${fmt(profitSummary.pMonth)}`,
+              valueClass: profitSummary.pMonth >= 0 ? 'green' : 'red',
             },
             {
               label: 'All time',
@@ -455,12 +476,12 @@ type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'tota
 type JobColumnId =
   | 'date' | 'item' | 'dealId' | 'account' | 'qty'
   | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit'
-  | 'orderId' | 'status';
+  | 'orderId' | 'tracking' | 'status';
 
 const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
   'date', 'item', 'dealId', 'account', 'qty',
   'retail', 'totalRetail', 'payout', 'cb', 'profit',
-  'orderId', 'status',
+  'orderId', 'tracking', 'status',
 ];
 
 /**
@@ -480,11 +501,20 @@ function resolveColumnOrder(saved: string[]): JobColumnId[] {
       seen.add(id as JobColumnId);
     }
   }
-  // Append any defaults the saved order didn't mention (e.g. brand-new
-  // columns added in a later release).
-  for (const id of DEFAULT_COLUMN_ORDER) {
-    if (!seen.has(id)) out.push(id);
-  }
+  // Slot any defaults the saved order didn't mention (e.g. brand-new
+  // columns added in a later release) into their natural position —
+  // right after the nearest default-predecessor the user already has.
+  DEFAULT_COLUMN_ORDER.forEach((id, i) => {
+    if (seen.has(id)) return;
+    let insertAt = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = DEFAULT_COLUMN_ORDER[j]!;
+      const idx = out.indexOf(prev);
+      if (idx !== -1) { insertAt = idx + 1; break; }
+    }
+    out.splice(insertAt, 0, id);
+    seen.add(id);
+  });
   return out;
 }
 
@@ -589,6 +619,7 @@ function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
       return p === null ? '' : p.toFixed(2);
     }
     case 'orderId': return a.orderId ?? '';
+    case 'tracking': return '';
     case 'status':  return STATUS_LABEL[a.status] ?? a.status;
   }
 }
@@ -624,6 +655,7 @@ const COLUMN_LABEL: Record<JobColumnId, string> = {
   cb: 'CB',
   profit: 'Profit',
   orderId: 'Order ID',
+  tracking: 'Tracking',
   status: 'Status',
 };
 
@@ -634,6 +666,7 @@ const COLUMN_ALIGN: Partial<Record<JobColumnId, 'right' | 'center'>> = {
   payout: 'right',
   cb: 'right',
   profit: 'right',
+  status: 'center',
 };
 type SortDir = 'asc' | 'desc';
 
@@ -699,6 +732,9 @@ function JobsTable({
     if (visible) next.add(s);
     else next.delete(s);
     void update({ jobsStatusFilter: ALL_STATUS_GROUPS.filter((x) => next.has(x)) });
+  };
+  const setAllStatusGroupsVisible = (visible: boolean) => {
+    void update({ jobsStatusFilter: visible ? [...ALL_STATUS_GROUPS] : ['__none__'] });
   };
   const resetStatusFilter = () => {
     void update({ jobsStatusFilter: [] });
@@ -767,8 +803,14 @@ function JobsTable({
   };
 
   const accountOptions = useMemo(() => {
-    return Array.from(new Set(attempts.map((a) => a.amazonEmail))).sort();
-  }, [attempts]);
+    const emails = Array.from(new Set(attempts.map((a) => a.amazonEmail)));
+    return emails
+      .map((email) => {
+        const name = accountLabelByEmail.get(email.toLowerCase()) ?? null;
+        return { email, label: name ?? email };
+      })
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [attempts, accountLabelByEmail]);
 
 
   const visible = useMemo(() => {
@@ -938,12 +980,6 @@ function JobsTable({
           <div className="jobs-count">
             {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
           </div>
-          <ColumnsMenu
-            order={fullColumnOrder}
-            hidden={hiddenSet}
-            onToggle={setColumnHidden}
-            onReset={() => void update({ jobsColumnOrder: [], jobsColumnHidden: [] })}
-          />
         </div>
       </div>
 
@@ -956,16 +992,23 @@ function JobsTable({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+          <ColumnsMenu
+            order={fullColumnOrder}
+            hidden={hiddenSet}
+            onToggle={setColumnHidden}
+            onReset={() => void update({ jobsColumnOrder: [], jobsColumnHidden: [] })}
+          />
           <StatusFilterMenu
             visible={visibleStatusGroups}
             onToggle={setStatusGroupVisible}
+            onToggleAll={setAllStatusGroupsVisible}
             onReset={resetStatusFilter}
           />
           <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
             <option value="all">All accounts</option>
-            {accountOptions.map((email) => (
+            {accountOptions.map(({ email, label }) => (
               <option key={email} value={email}>
-                {email}
+                {label}
               </option>
             ))}
           </select>
@@ -1015,7 +1058,7 @@ function JobsTable({
             }
             onClick={() => void runBulkVerify()}
           >
-            Verify ({selectedVerifiable.length})
+            Verify Order ({selectedVerifiable.length})
           </button>
           <button
             className="ghost-btn danger-text"
@@ -1023,13 +1066,6 @@ function JobsTable({
             onClick={() => void runBulkDelete()}
           >
             Delete ({selected.size})
-          </button>
-          <button
-            className="ghost-btn"
-            disabled={bulkBusy !== null}
-            onClick={() => setSelected(new Set())}
-          >
-            Clear selection
           </button>
         </div>
       )}
@@ -1128,14 +1164,7 @@ function JobsTable({
                     />
                   ))}
                   <td className="cell-actions">
-                    <ActionMenu
-                      attempt={a}
-                      onViewLogs={() => onViewLogs(a)}
-                      onToast={(msg) => {
-                        setOrderToast(msg);
-                        setTimeout(() => setOrderToast(null), 5000);
-                      }}
-                    />
+                    <ViewLogButton onViewLogs={() => onViewLogs(a)} />
                   </td>
                 </tr>
               ))}
@@ -1281,9 +1310,9 @@ function ColumnsMenu({
       <button
         className="ghost-btn"
         onClick={() => setOpen((o) => !o)}
-        title="Show/hide columns. Drag column headers to reorder."
+        title="Show/hide fields. Drag column headers to reorder."
       >
-        Columns ({visibleCount}/{order.length}) ▾
+        Fields ({visibleCount}/{order.length}) ▾
       </button>
       {open && (
         <div className="action-menu columns-menu">
@@ -1325,10 +1354,12 @@ function ColumnsMenu({
 function StatusFilterMenu({
   visible,
   onToggle,
+  onToggleAll,
   onReset,
 }: {
   visible: Set<StatusGroup>;
   onToggle: (s: StatusGroup, visible: boolean) => void;
+  onToggleAll: (visible: boolean) => void;
   onReset: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1341,6 +1372,12 @@ function StatusFilterMenu({
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [open]);
+  const allChecked = visible.size === ALL_STATUS_GROUPS.length;
+  const someChecked = visible.size > 0 && !allChecked;
+  const allCheckboxRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (allCheckboxRef.current) allCheckboxRef.current.indeterminate = someChecked;
+  }, [someChecked, open]);
   return (
     <div className="action-menu-wrap" ref={ref}>
       <button
@@ -1352,6 +1389,16 @@ function StatusFilterMenu({
       </button>
       {open && (
         <div className="action-menu columns-menu">
+          <label className="columns-menu-item">
+            <input
+              ref={allCheckboxRef}
+              type="checkbox"
+              checked={allChecked}
+              onChange={(e) => onToggleAll(e.target.checked)}
+            />
+            All
+          </label>
+          <div className="action-menu-sep" />
           {ALL_STATUS_GROUPS.map((s) => (
             <label key={s} className="columns-menu-item">
               <input
@@ -1582,6 +1629,12 @@ function JobsCell({
           )}
         </td>
       );
+    case 'tracking':
+      return (
+        <td className="cell-tracking">
+          <span className="muted">—</span>
+        </td>
+      );
     case 'status':
       return (
         <td className="cell-status">
@@ -1662,73 +1715,15 @@ function ChangelogModal({ currentVersion }: { currentVersion: string }) {
   );
 }
 
-function ActionMenu({
-  attempt,
-  onViewLogs,
-  onToast,
-}: {
-  attempt: JobAttempt;
-  onViewLogs: () => void;
-  onToast: (msg: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<'verify' | null>(null);
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [open]);
-
-  const doVerify = async () => {
-    setOpen(false);
-    if (!attempt.orderId) {
-      onToast('No order id on this row — nothing to verify.');
-      return;
-    }
-    setBusy('verify');
-    try {
-      const r = await window.autog.jobsVerifyOrder(attempt.attemptId);
-      if (r.kind === 'active') onToast(`✓ Order ${r.orderId} is still active.`);
-      else if (r.kind === 'cancelled') onToast(`✗ Order ${r.orderId} was cancelled by Amazon.`);
-      else if (r.kind === 'timeout') onToast(`Verify timed out for ${r.orderId}. Try again.`);
-      else if (r.kind === 'busy') onToast(r.message);
-      else if (r.kind === 'error') onToast(`Verify failed: ${r.message}`);
-    } finally {
-      setBusy(null);
-    }
-  };
-
+function ViewLogButton({ onViewLogs }: { onViewLogs: () => void }) {
   return (
-    <div className="action-menu-wrap" ref={ref}>
-      <button
-        className="ghost-btn"
-        onClick={() => setOpen((o) => !o)}
-        disabled={busy !== null}
-        title="Row actions"
-      >
-        {busy === 'verify' ? 'Verifying…' : 'Action ▾'}
-      </button>
-      {open && (
-        <div className="action-menu">
-          <button className="action-menu-item" onClick={() => { setOpen(false); onViewLogs(); }}>
-            View Log
-          </button>
-          <button
-            className="action-menu-item"
-            onClick={() => void doVerify()}
-            disabled={!attempt.orderId}
-            title={attempt.orderId ? 'Re-check Amazon order status' : 'No order id to verify'}
-          >
-            Verify Order
-          </button>
-        </div>
-      )}
-    </div>
+    <button
+      className="ghost-btn"
+      onClick={onViewLogs}
+      title="View logs for this row"
+    >
+      View Log
+    </button>
   );
 }
 
@@ -2732,12 +2727,73 @@ function applyLogsToStats(prev: Stats, batch: LogEvent[]): Stats {
   return next;
 }
 
+/**
+ * Collapse failure messages with embedded variable data (prices, counts,
+ * titles) into stable group labels so the Failed-row popover doesn't
+ * list each `$199.99 exceeds max $199.00` variant separately.
+ */
+function normalizeFailureError(raw: string | null | undefined): string {
+  const err = raw?.trim();
+  if (!err) return '(no error message)';
+  if (/exceeds max \$?[\d.]+/i.test(err)) return 'Price exceeds expected price';
+  if (/unable to parse current price|price_unknown/i.test(err)) return 'Price unavailable';
+  if (/out of stock|currently unavailable/i.test(err)) return 'Out of stock';
+  if (/listing is Used/i.test(err)) return 'Listing is Used';
+  if (/listing is Amazon Renewed/i.test(err)) return 'Listing is Renewed';
+  if (/won't ship|wont ship|not eligible for shipping/i.test(err)) return 'Won\u2019t ship to address';
+  if (/not prime/i.test(err)) return 'Not Prime eligible';
+  if (/no buy[- ]?now|buy now unavailable/i.test(err)) return 'No Buy Now button';
+  if (/quantity.*limit|quantity_limit/i.test(err)) return 'Quantity limit';
+  if (/timed out|timeout/i.test(err)) return 'Timeout';
+  if (/cancelled by Amazon/i.test(err)) return 'Cancelled by Amazon';
+  return err;
+}
+
+function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][]; total: number }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  if (breakdown.length === 0) return null;
+  return (
+    <span className="stat-label-info-wrap" ref={ref}>
+      <button
+        type="button"
+        className="stat-label-info"
+        aria-label={`Show error breakdown for ${total} failed order${total === 1 ? '' : 's'}`}
+        onClick={(e) => { e.preventDefault(); setOpen((o) => !o); }}
+      >
+        <InfoIcon size={14} />
+      </button>
+      {open && (
+        <div className="error-breakdown-pop" role="dialog">
+          <div className="error-breakdown-head">Failures by reason</div>
+          <ul className="error-breakdown-list">
+            {breakdown.map(([msg, n]) => (
+              <li key={msg}>
+                <span className="error-breakdown-count">{n}</span>
+                <span className="error-breakdown-msg">{msg}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </span>
+  );
+}
+
 function StatCard(props: {
   icon: React.ReactNode;
   iconVariant: 'blue' | 'purple' | 'orange' | 'green' | 'red';
   title: string;
   subtitle?: string;
-  rows: { label: string; value: React.ReactNode; valueClass?: string }[];
+  rows: { label: React.ReactNode; value: React.ReactNode; valueClass?: string }[];
 }) {
   return (
     <div className="stat-card">
@@ -2832,19 +2888,19 @@ function StopIcon() {
     </svg>
   );
 }
-function BoltIcon() {
-  return (
-    <svg {...svgProps}>
-      <path d="M13 2 3 14h7l-1 8 10-12h-7z" />
-    </svg>
-  );
-}
 function ShoppingIcon() {
   return (
     <svg {...svgProps}>
       <circle cx="9" cy="21" r="1" />
       <circle cx="20" cy="21" r="1" />
       <path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6" />
+    </svg>
+  );
+}
+function BoltIcon() {
+  return (
+    <svg {...svgProps}>
+      <path d="M13 2 3 14h7l-1 8 10-12h-7z" />
     </svg>
   );
 }
@@ -2903,9 +2959,9 @@ function AlertIcon() {
     </svg>
   );
 }
-function InfoIcon() {
+function InfoIcon({ size = 22 }: { size?: number } = {}) {
   return (
-    <svg {...svgProps} width="22" height="22">
+    <svg {...svgProps} width={size} height={size}>
       <circle cx="12" cy="12" r="10" />
       <line x1="12" y1="16" x2="12" y2="12" />
       <line x1="12" y1="8" x2="12.01" y2="8" />
