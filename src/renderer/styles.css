@@ -264,6 +264,17 @@ a,
   font-weight: 600;
   font-size: 13px;
 }
+.brand-pill-version {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  margin-right: 4px;
+}
 .primary-action {
   display: inline-flex;
   align-items: center;

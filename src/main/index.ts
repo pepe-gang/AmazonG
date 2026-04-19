@@ -361,6 +361,8 @@ function registerIpcHandlers(): void {
     await shell.openExternal(url);
   });
 
+  ipcMain.handle(IPC.appVersion, () => app.getVersion());
+
   // If settings are updated while the worker is running (e.g. prefixes or
   // dry-run), restart the worker so it picks up the new config on the next
   // claim. Keeps "Save" in settings feel live without manual Stop/Start.

@@ -161,6 +161,10 @@ function MainScreen({ status }: { status: RendererStatus }) {
   const [attempts, setAttempts] = useState<JobAttempt[]>([]);
   const [uptimeTick, setUptimeTick] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [appVersion, setAppVersion] = useState<string>('');
+  useEffect(() => {
+    void window.autog.appVersion().then(setAppVersion);
+  }, []);
   useEffect(() => {
     // Update the dashboard's "Jobs" stat card by listening to the same log
     // stream the worker emits. Cheaper than maintaining a separate counter
@@ -233,11 +237,12 @@ function MainScreen({ status }: { status: RendererStatus }) {
     <div className="app">
       <div className="toolbar">
         <div className="toolbar-left">
-          <div className="brand-pill" title="AmazonG">
+          <div className="brand-pill" title={appVersion ? `AmazonG ${appVersion}` : 'AmazonG'}>
             <div className="app-badge">
               <AppIcon />
             </div>
             <span className="brand-pill-label">AmazonG</span>
+            {appVersion && <span className="brand-pill-version">v{appVersion}</span>}
           </div>
 
           {view === 'dashboard' ? (
