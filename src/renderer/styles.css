@@ -1131,11 +1131,16 @@ a,
 }
 .jobs-filters {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
   padding: 12px 18px;
   border-bottom: 1px solid var(--border);
   background: #fafbfc;
+}
+.jobs-filters .ghost-btn {
+  height: 34px;
+  white-space: nowrap;
 }
 .jobs-search {
   flex: 1;

@@ -401,30 +401,6 @@ function DashboardView(props: {
           ]}
         />
         <StatCard
-          icon={<ActivityIcon />}
-          iconVariant="orange"
-          title="Last Job"
-          subtitle={stats.lastJobAt ? `Finished ${lastJobLabel}` : 'No jobs yet'}
-          rows={[
-            {
-              label: 'Job ID',
-              value: stats.lastJobId ? shortId(stats.lastJobId) : '—',
-              valueClass: stats.lastJobId ? 'blue' : 'muted',
-            },
-            {
-              label: 'Result',
-              value: stats.lastJobResult ?? '—',
-              valueClass:
-                stats.lastJobResult === 'completed'
-                  ? 'green'
-                  : stats.lastJobResult === 'failed'
-                    ? 'red'
-                    : 'muted',
-            },
-            { label: 'When', value: lastJobLabel, valueClass: 'muted' },
-          ]}
-        />
-        <StatCard
           icon={<DollarIcon />}
           iconVariant={profitSummary.pAll >= 0 ? 'green' : 'red'}
           title="Profit"
@@ -537,45 +513,59 @@ function computeProfit(a: JobAttempt): number | null {
   return perUnit * qty;
 }
 
-// Labels are kept in sync with BetterBG's Auto Buy dashboard so the same
-// order shows the same status word in both places. BG uses British "ll"
-// spelling for cancelled, hence the matching here.
+// Display label per raw status — collapses to one of 4 visible buckets.
+// "Done" and "Dry-run OK" are gone; everything that's a finished-good
+// outcome reads as "Success" now.
 const STATUS_LABEL: Record<JobAttemptStatus, string> = {
-  queued: 'Queued',
-  in_progress: 'Running',
-  awaiting_verification: 'Waiting for Verification',
-  verified: 'Completed',
+  queued: 'Pending',
+  in_progress: 'Pending',
+  awaiting_verification: 'Pending',
+  verified: 'Success',
+  completed: 'Success',
+  dry_run_success: 'Success',
   cancelled_by_amazon: 'Cancelled',
-  completed: 'Done',
   failed: 'Failed',
-  dry_run_success: 'Dry-run OK',
 };
 
-const ALL_STATUSES: JobAttemptStatus[] = [
-  'queued',
-  'in_progress',
-  'awaiting_verification',
-  'verified',
-  'completed',
-  'dry_run_success',
-  'failed',
-  'cancelled_by_amazon',
-];
-
 /**
- * Statuses that show in the Jobs table for fresh installs. Failed and
- * Cancelled are off — once an order has settled into one of those, it
- * usually doesn't need attention until the user actively wants to
- * audit it. Filter dropdown still has them so the user can opt in.
+ * Visible status buckets. The underlying JobAttemptStatus enum still
+ * has 8 values for the worker's internal state machine, but the user
+ * only ever sees 4 buckets in the filter + badge — Pending, Success,
+ * Cancelled, Failed. The `Done` and `Dry-run OK` raw statuses get
+ * folded into Success; the in-flight three (queued / in_progress /
+ * awaiting_verification) all read as Pending.
  */
-const DEFAULT_VISIBLE_STATUSES: JobAttemptStatus[] = [
-  'queued',
-  'in_progress',
-  'awaiting_verification',
-  'verified',
-  'completed',
-  'dry_run_success',
-];
+type StatusGroup = 'pending' | 'success' | 'cancelled' | 'failed';
+
+const STATUS_GROUP: Record<JobAttemptStatus, StatusGroup> = {
+  queued: 'pending',
+  in_progress: 'pending',
+  awaiting_verification: 'pending',
+  verified: 'success',
+  completed: 'success',
+  dry_run_success: 'success',
+  cancelled_by_amazon: 'cancelled',
+  failed: 'failed',
+};
+
+const ALL_STATUS_GROUPS: StatusGroup[] = ['pending', 'success', 'cancelled', 'failed'];
+
+const STATUS_GROUP_LABEL: Record<StatusGroup, string> = {
+  pending: 'Pending',
+  success: 'Success',
+  cancelled: 'Cancelled',
+  failed: 'Failed',
+};
+
+const STATUS_GROUP_BADGE_CLASS: Record<StatusGroup, string> = {
+  pending: 'badge-amber',
+  success: 'badge-green',
+  cancelled: 'badge-red',
+  failed: 'badge-red',
+};
+
+/** Default visible: in-flight + finished-good. Settled bad rows hidden. */
+const DEFAULT_VISIBLE_STATUS_GROUPS: StatusGroup[] = ['pending', 'success'];
 
 /** TSV cell value extractor for one column id. Used by both copy paths. */
 function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
@@ -694,22 +684,21 @@ function JobsTable({
     }
     return set;
   }, [settings?.jobsColumnHidden, savedOrder]);
-  // Persisted multi-select status filter. Empty saved value = use the
-  // defaults (all statuses except Failed and Cancelled). Toggling any
-  // status writes back the explicit visible-set so the user's choice
-  // sticks across launches.
-  const visibleStatuses = useMemo<Set<JobAttemptStatus>>(() => {
+  // Persisted multi-select status filter (group-based). Empty saved
+  // value = use defaults: Pending + Success on, Cancelled + Failed
+  // off. Toggling writes back the explicit visible-set.
+  const visibleStatusGroups = useMemo<Set<StatusGroup>>(() => {
     const saved = settings?.jobsStatusFilter ?? [];
     const list = saved.length > 0
-      ? saved.filter((s): s is JobAttemptStatus => ALL_STATUSES.includes(s as JobAttemptStatus))
-      : DEFAULT_VISIBLE_STATUSES;
+      ? saved.filter((s): s is StatusGroup => ALL_STATUS_GROUPS.includes(s as StatusGroup))
+      : DEFAULT_VISIBLE_STATUS_GROUPS;
     return new Set(list);
   }, [settings?.jobsStatusFilter]);
-  const setStatusVisible = (s: JobAttemptStatus, visible: boolean) => {
-    const next = new Set(visibleStatuses);
+  const setStatusGroupVisible = (s: StatusGroup, visible: boolean) => {
+    const next = new Set(visibleStatusGroups);
     if (visible) next.add(s);
     else next.delete(s);
-    void update({ jobsStatusFilter: ALL_STATUSES.filter((x) => next.has(x)) });
+    void update({ jobsStatusFilter: ALL_STATUS_GROUPS.filter((x) => next.has(x)) });
   };
   const resetStatusFilter = () => {
     void update({ jobsStatusFilter: [] });
@@ -781,19 +770,11 @@ function JobsTable({
     return Array.from(new Set(attempts.map((a) => a.amazonEmail))).sort();
   }, [attempts]);
 
-  const failedCount = useMemo(
-    () => attempts.reduce((n, a) => (a.status === 'failed' ? n + 1 : n), 0),
-    [attempts],
-  );
-  const canceledCount = useMemo(
-    () => attempts.reduce((n, a) => (a.status === 'cancelled_by_amazon' ? n + 1 : n), 0),
-    [attempts],
-  );
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = attempts.filter((a) => {
-      if (!visibleStatuses.has(a.status)) return false;
+      if (!visibleStatusGroups.has(STATUS_GROUP[a.status])) return false;
       if (accountFilter !== 'all' && a.amazonEmail !== accountFilter) return false;
       if (q.length > 0) {
         const hay = `${a.dealTitle ?? ''} ${a.amazonEmail} ${a.dealId ?? ''} ${a.dealKey ?? ''} ${a.orderId ?? ''}`.toLowerCase();
@@ -859,7 +840,7 @@ function JobsTable({
     };
     filtered.sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
     return filtered;
-  }, [attempts, sortKey, sortDir, visibleStatuses, accountFilter, search]);
+  }, [attempts, sortKey, sortDir, visibleStatusGroups, accountFilter, search]);
 
   const onSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -877,8 +858,8 @@ function JobsTable({
   };
 
   const statusFilterIsCustom =
-    visibleStatuses.size !== DEFAULT_VISIBLE_STATUSES.length ||
-    !DEFAULT_VISIBLE_STATUSES.every((s) => visibleStatuses.has(s));
+    visibleStatusGroups.size !== DEFAULT_VISIBLE_STATUS_GROUPS.length ||
+    !DEFAULT_VISIBLE_STATUS_GROUPS.every((s) => visibleStatusGroups.has(s));
   const hasFilter = statusFilterIsCustom || accountFilter !== 'all' || search.length > 0;
 
   // Drop selections that no longer exist in the visible-or-attempts set
@@ -963,45 +944,6 @@ function JobsTable({
             onToggle={setColumnHidden}
             onReset={() => void update({ jobsColumnOrder: [], jobsColumnHidden: [] })}
           />
-          {failedCount > 0 && (
-            <button
-              className="ghost-btn"
-              title="Delete every row whose status is Failed (keeps successful + in-flight rows)"
-              onClick={() => {
-                if (confirm(`Delete ${failedCount} failed row${failedCount === 1 ? '' : 's'} and their logs?`)) {
-                  void window.autog.jobsClearFailed();
-                }
-              }}
-            >
-              Clear Failed
-            </button>
-          )}
-          {canceledCount > 0 && (
-            <button
-              className="ghost-btn"
-              title="Delete every row whose order was Canceled by Amazon"
-              onClick={() => {
-                if (confirm(`Delete ${canceledCount} canceled row${canceledCount === 1 ? '' : 's'} and their logs?`)) {
-                  void window.autog.jobsClearCanceled();
-                }
-              }}
-            >
-              Clear Canceled
-            </button>
-          )}
-          {attempts.length > 0 && (
-            <button
-              className="ghost-btn danger-text"
-              title="Delete every job + its logs (testing only)"
-              onClick={() => {
-                if (confirm(`Delete all ${attempts.length} job rows and their logs? This can't be undone.`)) {
-                  void window.autog.jobsClearAll();
-                }
-              }}
-            >
-              Clear All
-            </button>
-          )}
         </div>
       </div>
 
@@ -1015,8 +957,8 @@ function JobsTable({
             onChange={(e) => setSearch(e.target.value)}
           />
           <StatusFilterMenu
-            visible={visibleStatuses}
-            onToggle={setStatusVisible}
+            visible={visibleStatusGroups}
+            onToggle={setStatusGroupVisible}
             onReset={resetStatusFilter}
           />
           <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
@@ -1188,7 +1130,6 @@ function JobsTable({
                   <td className="cell-actions">
                     <ActionMenu
                       attempt={a}
-                      columnOrder={columnOrder}
                       onViewLogs={() => onViewLogs(a)}
                       onToast={(msg) => {
                         setOrderToast(msg);
@@ -1386,8 +1327,8 @@ function StatusFilterMenu({
   onToggle,
   onReset,
 }: {
-  visible: Set<JobAttemptStatus>;
-  onToggle: (s: JobAttemptStatus, visible: boolean) => void;
+  visible: Set<StatusGroup>;
+  onToggle: (s: StatusGroup, visible: boolean) => void;
   onReset: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1407,18 +1348,18 @@ function StatusFilterMenu({
         onClick={() => setOpen((o) => !o)}
         title="Show only the statuses you tick"
       >
-        Statuses ({visible.size}/{ALL_STATUSES.length}) ▾
+        Statuses ({visible.size}/{ALL_STATUS_GROUPS.length}) ▾
       </button>
       {open && (
         <div className="action-menu columns-menu">
-          {ALL_STATUSES.map((s) => (
+          {ALL_STATUS_GROUPS.map((s) => (
             <label key={s} className="columns-menu-item">
               <input
                 type="checkbox"
                 checked={visible.has(s)}
                 onChange={(e) => onToggle(s, e.target.checked)}
               />
-              {STATUS_LABEL[s]}
+              {STATUS_GROUP_LABEL[s]}
             </label>
           ))}
           <div className="action-menu-sep" />
@@ -1723,17 +1664,15 @@ function ChangelogModal({ currentVersion }: { currentVersion: string }) {
 
 function ActionMenu({
   attempt,
-  columnOrder,
   onViewLogs,
   onToast,
 }: {
   attempt: JobAttempt;
-  columnOrder: JobColumnId[];
   onViewLogs: () => void;
   onToast: (msg: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<'verify' | 'delete' | null>(null);
+  const [busy, setBusy] = useState<'verify' | null>(null);
   const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -1764,19 +1703,6 @@ function ActionMenu({
     }
   };
 
-  const doDelete = async () => {
-    setOpen(false);
-    if (!confirm(`Delete this row? Logs for this attempt will also be deleted.`)) return;
-    setBusy('delete');
-    try {
-      await window.autog.jobsDelete(attempt.attemptId);
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   return (
     <div className="action-menu-wrap" ref={ref}>
       <button
@@ -1785,7 +1711,7 @@ function ActionMenu({
         disabled={busy !== null}
         title="Row actions"
       >
-        {busy === 'verify' ? 'Verifying…' : busy === 'delete' ? 'Deleting…' : 'Action ▾'}
+        {busy === 'verify' ? 'Verifying…' : 'Action ▾'}
       </button>
       {open && (
         <div className="action-menu">
@@ -1794,31 +1720,11 @@ function ActionMenu({
           </button>
           <button
             className="action-menu-item"
-            onClick={async () => {
-              setOpen(false);
-              const tsv = attemptsToTSV([attempt], columnOrder);
-              try {
-                await navigator.clipboard.writeText(tsv);
-                onToast('Row copied — paste into a spreadsheet.');
-              } catch (err) {
-                onToast(`Copy failed: ${err instanceof Error ? err.message : String(err)}`);
-              }
-            }}
-            title="Copy row as tab-separated values (paste into Google Sheets / Excel)"
-          >
-            Copy row
-          </button>
-          <button
-            className="action-menu-item"
             onClick={() => void doVerify()}
             disabled={!attempt.orderId}
             title={attempt.orderId ? 'Re-check Amazon order status' : 'No order id to verify'}
           >
             Verify Order
-          </button>
-          <div className="action-menu-sep" />
-          <button className="action-menu-item action-menu-danger" onClick={() => void doDelete()}>
-            Delete
           </button>
         </div>
       )}
@@ -1857,18 +1763,12 @@ function SortableTh({
 }
 
 function StatusBadge({ status }: { status: JobAttemptStatus }) {
-  const map: Record<JobAttemptStatus, { label: string; cls: string }> = {
-    queued: { label: 'Queued', cls: 'badge-gray' },
-    in_progress: { label: 'Running', cls: 'badge-blue' },
-    awaiting_verification: { label: 'Waiting for Verification', cls: 'badge-amber' },
-    verified: { label: 'Completed', cls: 'badge-green' },
-    cancelled_by_amazon: { label: 'Cancelled', cls: 'badge-red' },
-    completed: { label: 'Done', cls: 'badge-green' },
-    failed: { label: 'Failed', cls: 'badge-red' },
-    dry_run_success: { label: 'Dry-run OK', cls: 'badge-blue' },
-  };
-  const m = map[status];
-  return <span className={`status-badge ${m.cls}`}>{m.label}</span>;
+  const group = STATUS_GROUP[status];
+  return (
+    <span className={`status-badge ${STATUS_GROUP_BADGE_CLASS[group]}`}>
+      {STATUS_GROUP_LABEL[group]}
+    </span>
+  );
 }
 
 function formatDate(iso: string): string {
