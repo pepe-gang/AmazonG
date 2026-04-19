@@ -177,11 +177,17 @@ function MainScreen({ status }: { status: RendererStatus }) {
     const offJobs = window.autog.onJobs(setAttempts);
     void window.autog.jobsList().then(setAttempts);
     const tick = setInterval(() => setUptimeTick((n) => n + 1), 1000);
+    // Server-state poll: picks up cross-device changes and verify-phase
+    // flips that happen on the BetterBG worker without a local trigger.
+    const serverPoll = setInterval(() => {
+      void window.autog.jobsList().then(setAttempts).catch(() => undefined);
+    }, 30_000);
     return () => {
       off();
       offProfiles();
       offJobs();
       clearInterval(tick);
+      clearInterval(serverPoll);
     };
   }, []);
 
@@ -284,11 +290,6 @@ function MainScreen({ status }: { status: RendererStatus }) {
                 </span>
               )}
             </button>
-          )}
-          {status.identity && (
-            <div className="identity-chip">
-              {status.identity.userEmail} · …{status.identity.last4}
-            </div>
           )}
         </div>
       </div>
