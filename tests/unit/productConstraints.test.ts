@@ -80,7 +80,7 @@ describe('checkProductConstraints', () => {
     expect(r).toEqual({
       ok: false,
       reason: 'price_unknown',
-      detail: 'unable to parse current price',
+      detail: 'Out of stock',
     });
   });
 
