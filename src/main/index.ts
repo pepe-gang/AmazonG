@@ -33,6 +33,7 @@ import {
 } from './profiles.js';
 import { openSession } from '../browser/driver.js';
 import { snapshotDir, snapshotsDiskUsage, clearAllSnapshots } from '../browser/snapshot.js';
+import { compareSemver } from '../shared/version.js';
 import { isLoggedInAmazon, loginAmazon } from '../actions/loginAmazon.js';
 import type { AmazonProfile, IdentityInfo, RendererStatus } from '../shared/types.js';
 
@@ -786,17 +787,6 @@ function registerIpcHandlers(): void {
       }
     }
   });
-}
-
-/** Compare two semver strings. Returns >0 if a > b, <0 if a < b, 0 if equal. */
-function compareSemver(a: string, b: string): number {
-  const pa = a.replace(/^v/, '').split('.').map(Number);
-  const pb = b.replace(/^v/, '').split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
 }
 
 function friendlyConnectError(err: unknown): Error {

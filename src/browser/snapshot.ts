@@ -2,51 +2,7 @@ import type { BrowserContext, Page } from 'playwright';
 import { mkdir, writeFile, readdir, stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { app } from 'electron';
-import type { ErrorGroupId } from '../shared/snapshotGroups.js';
-
-/**
- * Classify an error message into one of the known error groups.
- * Returns null for unrecognised messages (they still get captured
- * when the user has "capture all" selected).
- */
-export function classifyError(error: string): ErrorGroupId | null {
-  const e = error.toLowerCase();
-
-  if (/exceeds (max|retail cap) \$/.test(error) || /exceeds max \$/.test(e)) return 'price_exceeded';
-  if (e.includes('not in stock') || e.includes('out of stock') || e.includes('currently unavailable') || e.includes('item_unavailable')) return 'out_of_stock';
-  if (e.includes('no saved address starts with') || e.includes('no allowed prefixes configured')) return 'address_mismatch';
-  if (e.includes('address picker') || e.includes('address submitted but') || e.includes('deliver button persisted') || e.includes('change-address link not found') || e.includes('did not re-render')) return 'address_stuck';
-  if (e.includes('name-toggle')) return 'cashback_toggle';
-  if (/cashback \d/.test(e) || e.includes('cashback missing')) return 'cashback_low';
-  if (e.includes('buy-now button never appeared') || e.includes('buy now button is not available') || e.includes('failed to click buy now')) return 'buy_button';
-  if (e.includes('no place order button') || e.includes('failed to click place order')) return 'place_order';
-  if (e.includes('pending order page') || e.includes('confirmation url never loaded')) return 'confirm_stuck';
-  if (e.includes('could not read item price on /spc')) return 'checkout_price';
-  if (e.includes('listing is used') || e.includes('listing is amazon renewed')) return 'condition_blocked';
-  if (e.includes('cannot ship') || e.includes('not prime-eligible')) return 'shipping_blocked';
-  if (e.startsWith('verify:')) return 'verify_failed';
-
-  return null;
-}
-
-/**
- * Whether we should capture a snapshot for this error, given the current
- * settings. Returns true when capture is enabled and the error's group
- * is in the selected set (or the set is empty = capture all).
- */
-export function shouldCapture(
-  error: string,
-  snapshotOnFailure: boolean,
-  snapshotGroups: string[],
-): boolean {
-  if (!snapshotOnFailure) return false;
-  if (snapshotGroups.length === 0) return true; // empty = all
-  const group = classifyError(error);
-  // null group (unrecognised) is captured when "all" is selected (empty array)
-  // but skipped when specific groups are chosen
-  if (!group) return false;
-  return snapshotGroups.includes(group);
-}
+export { classifyError, shouldCapture } from '../shared/snapshotGroups.js';
 
 export type SnapshotResult = {
   screenshotPath: string;
