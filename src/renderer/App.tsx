@@ -466,7 +466,7 @@ function DashboardView(props: {
 /* ============================================================
    Jobs table
    ============================================================ */
-type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'totalProfit' | 'status' | 'orderId';
+type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'status' | 'orderId';
 
 /**
  * Stable identifiers for each draggable column in the Jobs table. The
@@ -478,12 +478,12 @@ type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'qty' | 'retail' | 'tota
  */
 type JobColumnId =
   | 'date' | 'item' | 'dealId' | 'account' | 'qty'
-  | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'totalProfit'
+  | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit'
   | 'orderId' | 'status';
 
 const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
   'date', 'item', 'dealId', 'account', 'qty',
-  'retail', 'totalRetail', 'payout', 'cb', 'profit', 'totalProfit',
+  'retail', 'totalRetail', 'payout', 'cb', 'profit',
   'orderId', 'status',
 ];
 
@@ -492,7 +492,7 @@ const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
  * tick the column on (which writes the new order back to settings),
  * the "haven't-seen-it-yet" check stops firing.
  */
-const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail', 'totalProfit']);
+const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail']);
 
 function resolveColumnOrder(saved: string[]): JobColumnId[] {
   const valid = new Set<JobColumnId>(DEFAULT_COLUMN_ORDER);
@@ -598,13 +598,6 @@ function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
       const p = computeProfit(a);
       return p === null ? '' : p.toFixed(2);
     }
-    case 'totalProfit': {
-      // Same value as `profit` — kept as a separate column so users who
-      // want to surface the total in their spreadsheet without changing
-      // the per-row "Profit" header can do so independently.
-      const p = computeProfit(a);
-      return p === null ? '' : p.toFixed(2);
-    }
     case 'orderId': return a.orderId ?? '';
     case 'status':  return STATUS_LABEL[a.status] ?? a.status;
   }
@@ -640,7 +633,6 @@ const COLUMN_LABEL: Record<JobColumnId, string> = {
   payout: 'Payout',
   cb: 'CB',
   profit: 'Profit',
-  totalProfit: 'Total Profit',
   orderId: 'Order ID',
   status: 'Status',
 };
@@ -652,7 +644,6 @@ const COLUMN_ALIGN: Partial<Record<JobColumnId, 'right' | 'center'>> = {
   payout: 'right',
   cb: 'right',
   profit: 'right',
-  totalProfit: 'right',
 };
 type SortDir = 'asc' | 'desc';
 
@@ -850,8 +841,7 @@ function JobsTable({
         }
         case 'qty':
           return (a.quantity ?? 0) - (b.quantity ?? 0);
-        case 'profit':
-        case 'totalProfit': {
+        case 'profit': {
           const an = computeProfit(a);
           const bn = computeProfit(b);
           if (an === null && bn === null) return 0;
@@ -1625,22 +1615,6 @@ function JobsCell({
               className={p >= 0 ? 'profit-good' : 'profit-bad'}
               title={`payout ${a.price} − retail ${a.maxPrice} × (1 − ${a.cashbackPct}% cb) × qty ${a.quantity}`}
             >
-              {p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(2)}
-            </span>
-          )}
-        </td>
-      );
-    }
-    case 'totalProfit': {
-      // Same value as 'profit' — exposed as a separate column so users
-      // can show one without the other in their spreadsheet copy.
-      const p = computeProfit(a);
-      return (
-        <td className="cell-profit">
-          {p === null ? (
-            <span className="muted">—</span>
-          ) : (
-            <span className={p >= 0 ? 'profit-good' : 'profit-bad'}>
               {p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(2)}
             </span>
           )}
