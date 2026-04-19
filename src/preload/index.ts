@@ -19,6 +19,7 @@ const bridge: AutoGBridge = {
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet) as Promise<Settings>,
   settingsSet: (p) => ipcRenderer.invoke(IPC.settingsSet, p) as Promise<Settings>,
   openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url) as Promise<void>,
+  appVersion: () => ipcRenderer.invoke(IPC.appVersion) as Promise<string>,
 
   profilesList: () => ipcRenderer.invoke(IPC.profilesList) as Promise<AmazonProfile[]>,
   profilesAdd: (email, displayName) =>
@@ -53,15 +54,6 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.jobsVerifyOrder, attemptId) as ReturnType<
       AutoGBridge['jobsVerifyOrder']
     >,
-
-  updateCheck: () => ipcRenderer.invoke(IPC.updateCheck) as ReturnType<AutoGBridge['updateCheck']>,
-  updateApply: (downloadUrl) =>
-    ipcRenderer.invoke(IPC.updateApply, downloadUrl) as Promise<void>,
-  updateGetReleaseNotes: (version) =>
-    ipcRenderer.invoke(IPC.updateGetReleaseNotes, version) as ReturnType<
-      AutoGBridge['updateGetReleaseNotes']
-    >,
-  appVersion: () => ipcRenderer.invoke(IPC.appVersion) as Promise<string>,
 
   onLog(cb) {
     const listener = (_: unknown, ev: LogEvent) => cb(ev);
