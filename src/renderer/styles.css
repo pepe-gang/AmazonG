@@ -1333,8 +1333,11 @@ a,
   color: var(--text);
 }
 .cell-dealid .dealid-text {
-  cursor: help;
-  border-bottom: 1px dotted var(--text-subtle);
+  cursor: pointer;
+  user-select: none;
+}
+.cell-dealid .dealid-text:hover {
+  color: var(--primary);
 }
 .cell-dealid .muted { color: var(--text-subtle); border-bottom: none; cursor: default; }
 .jobs-table .cell-tracking { color: var(--text-subtle); white-space: nowrap; }

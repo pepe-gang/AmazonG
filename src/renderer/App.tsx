@@ -1379,6 +1379,31 @@ function DraggableTh(props: {
   );
 }
 
+/** Click-to-copy Deal ID chip with a transient "Copied!" tooltip. */
+function DealIdChip({ text, copyValue }: { text: string; copyValue?: string }) {
+  const [copied, setCopied] = useState(false);
+  const value = copyValue ?? text;
+  return (
+    <span
+      className="dealid-text"
+      title={copied ? 'Copied!' : 'Click to copy'}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        void navigator.clipboard
+          .writeText(value)
+          .then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          })
+          .catch(() => {});
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
 /**
  * Render one Jobs-table cell for a given column id. All the per-column
  * JSX lives here so the column-order iteration in the parent stays
@@ -1436,13 +1461,9 @@ function JobsCell({
       return (
         <td className="cell-dealid">
           {a.dealId ? (
-            <span className="dealid-text" title={a.dealKey ?? a.dealId}>
-              {a.dealId}
-            </span>
+            <DealIdChip text={a.dealId} />
           ) : a.dealKey ? (
-            <span className="dealid-text" title={a.dealKey}>
-              {a.dealKey.slice(0, 8)}
-            </span>
+            <DealIdChip text={a.dealKey.slice(0, 8)} copyValue={a.dealKey} />
           ) : (
             <span className="muted">—</span>
           )}
