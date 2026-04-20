@@ -18,6 +18,7 @@ import {
   updateAttempt as storeUpdateAttempt,
 } from './jobStore.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
+import { fetchTracking } from '../actions/fetchTracking.js';
 import { makeAttemptId } from '../shared/sanitize.js';
 import type { JobAttempt, JobAttemptStatus } from '../shared/types.js';
 import { BGApiError } from '../shared/errors.js';
@@ -135,6 +136,7 @@ function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
     error: s.error,
     buyMode: 'single',
     dryRun: false,
+    trackingIds: s.trackingIds ?? null,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
@@ -181,7 +183,15 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
     const k = keyOf(l);
     const existing = merged.get(k);
     if (existing) {
-      merged.set(k, { ...existing, attemptId: l.attemptId, dryRun: l.dryRun });
+      merged.set(k, {
+        ...existing,
+        attemptId: l.attemptId,
+        dryRun: l.dryRun,
+        // Prefer non-null trackingIds. BG may not know about a freshly-run
+        // manual Fetch Tracking yet; local store has it and we don't want
+        // to clobber the UI while BG catches up.
+        trackingIds: existing.trackingIds ?? l.trackingIds,
+      });
     } else {
       merged.set(k, l);
     }
@@ -626,6 +636,114 @@ function registerIpcHandlers(): void {
           return { kind: 'error' as const, message: outcome.message };
         }
         return { kind: 'timeout' as const, orderId };
+      } finally {
+        try {
+          await session.close();
+        } catch {
+          // already closed
+        }
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.jobsFetchTracking,
+    async (_e, attemptId: string) => {
+      // Manual fetch-tracking — runs in a fresh headless session. Same
+      // 'busy' handling as jobsVerifyOrder for when the worker holds the
+      // profile's userDataDir lock. Updates the local attempt row on any
+      // terminal outcome so the Jobs table's tracking cell fills in
+      // without waiting on a BG round-trip.
+      // Prefer local store (fast path), fall back to the server-merged list
+      // for rows that were synced from BG but never ran through this worker.
+      // Without the fallback, server-only rows fail with "attempt not found"
+      // even though they appear in the UI.
+      let a = (await storeListAttempts()).find((x) => x.attemptId === attemptId);
+      let serverOnly = false;
+      if (!a) {
+        a = (await listMergedAttempts()).find((x) => x.attemptId === attemptId);
+        serverOnly = !!a;
+      }
+      if (!a) return { kind: 'error' as const, message: 'attempt not found' };
+      if (!a.orderId) return { kind: 'error' as const, message: 'no order id on this row' };
+      const email = a.amazonEmail;
+      const orderId = a.orderId;
+
+      // Mirror server-only rows into the local store so storeUpdateAttempt
+      // lands — otherwise the trackingIds we fetch would vanish on next
+      // broadcast until BG round-trips the field (BG doesn't yet).
+      if (serverOnly) {
+        await storeCreateAttempt({
+          ...a,
+          trackingIds: a.trackingIds ?? null,
+        }).catch(() => undefined);
+      }
+
+      // Respect per-profile headless preference (fall back to global setting)
+      // so the user sees the browser when they've toggled visible mode on
+      // for this account — e.g. for debugging.
+      const profiles = await loadProfiles();
+      const profile = profiles.find((p) => p.email.toLowerCase() === email.toLowerCase());
+      const settings = await loadSettings();
+      const headless = profile?.headless ?? settings.headless;
+
+      let session: DriverSession | null = null;
+      try {
+        session = await openSession(email, {
+          userDataRoot: profileDir(),
+          headless,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/ProcessSingleton|profile is already in use|SingletonLock/i.test(msg)) {
+          return {
+            kind: 'busy' as const,
+            message: `${email} is being used by the running worker. Stop the worker and try again.`,
+          };
+        }
+        return { kind: 'error' as const, message: msg };
+      }
+
+      try {
+        const pages = session.context.pages();
+        const page = pages[0] ?? (await session.newPage());
+        let outcome;
+        try {
+          outcome = await fetchTracking(page, orderId);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn('jobs.fetchTracking.threw', { attemptId, orderId, error: msg });
+          return { kind: 'error' as const, message: msg };
+        }
+
+        if (outcome.kind === 'tracked' || outcome.kind === 'partial') {
+          await storeUpdateAttempt(attemptId, {
+            trackingIds: outcome.trackingIds,
+            error: null,
+          });
+          scheduleBroadcastJobs();
+          return {
+            kind: outcome.kind,
+            orderId,
+            trackingIds: outcome.trackingIds,
+          };
+        }
+
+        if (outcome.kind === 'cancelled') {
+          await storeUpdateAttempt(attemptId, {
+            status: 'cancelled_by_amazon',
+            error: outcome.reason,
+          });
+          scheduleBroadcastJobs();
+          return { kind: 'cancelled' as const, orderId, reason: outcome.reason };
+        }
+
+        if (outcome.kind === 'retry') {
+          return { kind: 'retry' as const, orderId, reason: outcome.reason };
+        }
+
+        // outcome.kind === 'not_shipped'
+        return { kind: 'not_shipped' as const, orderId };
       } finally {
         try {
           await session.close();

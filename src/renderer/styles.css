@@ -1341,6 +1341,25 @@ a,
 }
 .cell-dealid .muted { color: var(--text-subtle); border-bottom: none; cursor: default; }
 .jobs-table .cell-tracking { color: var(--text-subtle); white-space: nowrap; }
+.tracking-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.tracking-pill {
+  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  cursor: copy;
+}
+.tracking-pill:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
 .cb-good { color: var(--success); font-weight: 600; }
 .cb-low { color: var(--warn); font-weight: 600; }
 .cell-error {

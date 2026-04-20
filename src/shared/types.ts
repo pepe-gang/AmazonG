@@ -1,6 +1,6 @@
 export type AutoGJob = {
   id: string;
-  phase: 'buy' | 'verify';
+  phase: 'buy' | 'verify' | 'fetch_tracking';
   dealTitle: string | null;
   dealKey: string | null;
   /** Human-readable BG deal id (e.g. "DL-04260029"). Joined server-side. */
@@ -79,7 +79,7 @@ export type ProductInfo = {
 
 /** Payload shape accepted by POST /api/autog/jobs/[id]/status */
 export type JobStatusReport = {
-  status: 'in_progress' | 'awaiting_verification' | 'completed' | 'completed_with_filler_items' | 'partial' | 'failed' | 'cancelled';
+  status: 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'completed_with_filler_items' | 'partial' | 'failed' | 'cancelled';
   error?: string | null;
   placedAt?: string | null;
   placedQuantity?: number | null;
@@ -87,17 +87,28 @@ export type JobStatusReport = {
   placedPrice?: string | null;
   placedEmail?: string | null;
   placedOrderId?: string | null;
+  /** Carrier tracking codes collected by a fetch_tracking job. One order
+   *  can split into multiple shipments (qty=3 MacBooks → 3 codes). */
+  trackingIds?: string[] | null;
   purchases?: {
     amazonEmail: string;
-    status: 'queued' | 'in_progress' | 'awaiting_verification' | 'completed' | 'completed_with_filler_items' | 'failed' | 'cancelled';
+    status: 'queued' | 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'completed_with_filler_items' | 'failed' | 'cancelled';
     purchasedCount?: number;
     orderId?: string | null;
     error?: string | null;
     placedAt?: string | null;
     placedCashbackPct?: number | null;
     placedPrice?: string | null;
+    trackingIds?: string[] | null;
   }[];
 };
+
+export type FetchTrackingOutcome =
+  | { kind: 'tracked'; trackingIds: string[] }
+  | { kind: 'partial'; trackingIds: string[] }
+  | { kind: 'not_shipped' }
+  | { kind: 'retry'; reason: 'verify_error' | 'verify_timeout' }
+  | { kind: 'cancelled'; reason: string };
 
 export type IdentityInfo = {
   userEmail: string;
@@ -160,7 +171,7 @@ export type JobAttempt = {
   attemptId: string;
   jobId: string;
   amazonEmail: string;
-  phase: 'buy' | 'verify';
+  phase: 'buy' | 'verify' | 'fetch_tracking';
   dealKey: string | null;
   /** Human-readable BG deal id (e.g. "DL-04260029"). Displayed in the Jobs table. */
   dealId: string | null;
@@ -179,6 +190,10 @@ export type JobAttempt = {
   error: string | null;
   buyMode: 'single' | 'filler';
   dryRun: boolean;
+  /** Carrier tracking codes collected by fetch_tracking. Null until the
+   *  fetch_tracking loop runs; empty array if the loop ran but Amazon
+   *  hasn't shipped anything yet. */
+  trackingIds: string[] | null;
   createdAt: string;
   updatedAt: string;
 };

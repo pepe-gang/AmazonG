@@ -635,7 +635,7 @@ function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
       return p === null ? '' : p.toFixed(2);
     }
     case 'orderId': return a.orderId ?? '';
-    case 'tracking': return '';
+    case 'tracking': return (a.trackingIds ?? []).join(', ');
     case 'status':  return STATUS_LABEL[a.status] ?? a.status;
   }
 }
@@ -712,7 +712,7 @@ function JobsTable({
   const [search, setSearch] = useState('');
   const [orderToast, setOrderToast] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkBusy, setBulkBusy] = useState<null | 'verify' | 'delete'>(null);
+  const [bulkBusy, setBulkBusy] = useState<null | 'verify' | 'delete' | 'tracking'>(null);
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
 
   // Drag-to-reorder + hide/show columns. Both persist in settings so
@@ -971,6 +971,50 @@ function JobsTable({
     setTimeout(() => setOrderToast(null), 6000);
   };
 
+  // Fetch-tracking bulk action. Same eligibility as verify (row needs an
+  // orderId), but skips rows that already have every tracking we've seen
+  // — re-running on a fully-tracked row is harmless, just wastes time.
+  const selectedForTracking = selectedVerifiable;
+
+  const runBulkFetchTracking = async () => {
+    if (selectedForTracking.length === 0) return;
+    setBulkBusy('tracking');
+    setBulkProgress({ done: 0, total: selectedForTracking.length });
+    let tracked = 0, notShipped = 0, retry = 0, cancelled = 0, failed = 0;
+    let lastError: string | null = null;
+    for (let i = 0; i < selectedForTracking.length; i++) {
+      const a = selectedForTracking[i]!;
+      try {
+        const r = await window.autog.jobsFetchTracking(a.attemptId);
+        if (r.kind === 'tracked' || r.kind === 'partial') tracked++;
+        else if (r.kind === 'not_shipped') notShipped++;
+        else if (r.kind === 'retry') retry++;
+        else if (r.kind === 'cancelled') cancelled++;
+        else if (r.kind === 'error' || r.kind === 'busy') {
+          failed++;
+          lastError = r.message;
+        } else {
+          failed++;
+        }
+      } catch (err) {
+        failed++;
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+      setBulkProgress({ done: i + 1, total: selectedForTracking.length });
+    }
+    setBulkBusy(null);
+    setBulkProgress(null);
+    const parts = [
+      `${tracked} tracked`,
+      notShipped ? `${notShipped} not shipped` : null,
+      retry ? `${retry} retrying` : null,
+      cancelled ? `${cancelled} cancelled` : null,
+      failed ? `${failed} failed${lastError ? ` — ${lastError}` : ''}` : null,
+    ].filter(Boolean);
+    setOrderToast(`Fetch tracking complete · ${parts.join(', ')}.`);
+    setTimeout(() => setOrderToast(null), 8000);
+  };
+
   const runBulkDelete = async () => {
     if (selectedAttempts.length === 0) return;
     if (!confirm(`Delete ${selectedAttempts.length} selected row${selectedAttempts.length === 1 ? '' : 's'} and their logs?`)) {
@@ -1044,7 +1088,7 @@ function JobsTable({
         <div className="bulk-bar" role="toolbar">
           <span className="bulk-count">
             {bulkBusy && bulkProgress
-              ? `${bulkBusy === 'verify' ? 'Verifying' : 'Deleting'} ${bulkProgress.done}/${bulkProgress.total}…`
+              ? `${bulkBusy === 'verify' ? 'Verifying' : bulkBusy === 'tracking' ? 'Fetching tracking' : 'Deleting'} ${bulkProgress.done}/${bulkProgress.total}…`
               : `${selected.size} selected`}
           </span>
           <button
@@ -1079,6 +1123,18 @@ function JobsTable({
             onClick={() => void runBulkVerify()}
           >
             Verify Order ({selectedVerifiable.length})
+          </button>
+          <button
+            className="ghost-btn"
+            disabled={bulkBusy !== null || selectedForTracking.length === 0}
+            title={
+              selectedForTracking.length === 0
+                ? 'None of the selected rows have an order id to fetch tracking for'
+                : `Fetch carrier tracking for ${selectedForTracking.length} order${selectedForTracking.length === 1 ? '' : 's'}`
+            }
+            onClick={() => void runBulkFetchTracking()}
+          >
+            Fetch Tracking ({selectedForTracking.length})
           </button>
           <button
             className="ghost-btn danger-text"
@@ -1586,7 +1642,23 @@ function JobsCell({
     case 'tracking':
       return (
         <td className="cell-tracking">
-          <span className="muted">—</span>
+          {a.trackingIds && a.trackingIds.length > 0 ? (
+            <div className="tracking-list">
+              {a.trackingIds.map((code) => (
+                <button
+                  key={code}
+                  type="button"
+                  className="tracking-pill"
+                  title="Click to copy"
+                  onClick={() => void navigator.clipboard.writeText(code).catch(() => undefined)}
+                >
+                  {code}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span className="muted">—</span>
+          )}
         </td>
       );
     case 'status':

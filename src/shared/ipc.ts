@@ -38,6 +38,7 @@ export const IPC = {
   jobsClearCanceled: 'jobs:clear-canceled',
   jobsDelete: 'jobs:delete',
   jobsVerifyOrder: 'jobs:verify-order',
+  jobsFetchTracking: 'jobs:fetch-tracking',
   jobsSnapshot: 'jobs:snapshot',
   jobsOpenTrace: 'jobs:open-trace',
   snapshotsDiskUsage: 'snapshots:disk-usage',
@@ -129,6 +130,12 @@ export type AutoGBridge = {
   jobsDelete(attemptId: string): Promise<void>;
   jobsVerifyOrder(attemptId: string): Promise<
     | { kind: 'active' | 'cancelled' | 'timeout'; orderId: string }
+    | { kind: 'error' | 'busy'; message: string }
+  >;
+  jobsFetchTracking(attemptId: string): Promise<
+    | { kind: 'tracked' | 'partial'; orderId: string; trackingIds: string[] }
+    | { kind: 'not_shipped' | 'retry'; orderId: string; reason?: string }
+    | { kind: 'cancelled'; orderId: string; reason: string }
     | { kind: 'error' | 'busy'; message: string }
   >;
 

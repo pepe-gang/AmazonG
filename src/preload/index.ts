@@ -56,6 +56,10 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.jobsVerifyOrder, attemptId) as ReturnType<
       AutoGBridge['jobsVerifyOrder']
     >,
+  jobsFetchTracking: (attemptId) =>
+    ipcRenderer.invoke(IPC.jobsFetchTracking, attemptId) as ReturnType<
+      AutoGBridge['jobsFetchTracking']
+    >,
   jobsSnapshot: (attemptId) =>
     ipcRenderer.invoke(IPC.jobsSnapshot, attemptId) as ReturnType<
       AutoGBridge['jobsSnapshot']

@@ -6,6 +6,7 @@ import { openSession } from '../browser/driver.js';
 import { scrapeProduct } from '../actions/scrapeProduct.js';
 import { buyNow } from '../actions/buyNow.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
+import { fetchTracking } from '../actions/fetchTracking.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
 import { logger } from '../shared/logger.js';
 import { captureFailureSnapshot, discardTracing, shouldCapture, startTracing } from '../browser/snapshot.js';
@@ -163,6 +164,10 @@ async function handleJob(
     await handleVerifyJob(deps, sessions, job, cid, eligible);
     return;
   }
+  if (job.phase === 'fetch_tracking') {
+    await handleFetchTrackingJob(deps, sessions, job, cid, eligible);
+    return;
+  }
   // Caller (worker loop) already enforces the eligibility gate, so we
   // trust `eligible` is non-empty here.
   logger.info(
@@ -198,6 +203,7 @@ async function handleJob(
         error: null,
         buyMode: 'single',
         dryRun: deps.buyDryRun,
+        trackingIds: null,
       }),
     ),
   );
@@ -497,6 +503,284 @@ async function handleVerifyJob(
 }
 
 /**
+ * Fetch-tracking phase: BG sends one of these every 6h (starting 6h after
+ * the verify confirmed the order was still active) until either every
+ * shipment has a carrier tracking code OR Amazon cancels the order.
+ *
+ * Mirrors the verify handler's shape — single profile (placedEmail), rolls
+ * the original buy attempt row forward, closes the session in `finally`.
+ * Calls `fetchTracking` which internally runs a verifyOrder pass first.
+ *
+ * Outcome → BG status + local row:
+ *   tracked      → BG 'completed' + trackingIds; local 'verified' + trackingIds
+ *   partial      → BG 'pending_tracking' + trackingIds; local 'verified' + trackingIds
+ *   not_shipped  → BG 'pending_tracking'; local 'verified' (no trackingIds yet)
+ *   retry        → BG 'pending_tracking'; local 'verified' (transient verify fail)
+ *   cancelled    → BG 'cancelled'; local 'cancelled_by_amazon'
+ */
+async function handleFetchTrackingJob(
+  deps: Deps,
+  sessions: Map<string, DriverSession>,
+  job: AutoGJob,
+  cid: string,
+  eligible: AmazonProfile[],
+): Promise<void> {
+  const targetEmail = job.placedEmail;
+  const targetOrderId = job.placedOrderId;
+  if (!targetEmail || !targetOrderId) {
+    const error = `fetch_tracking: missing placedEmail (${targetEmail ?? 'null'}) or placedOrderId (${targetOrderId ?? 'null'}) on the job`;
+    logger.error('job.fetchTracking.invalid', { jobId: job.id, error }, cid);
+    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+    return;
+  }
+
+  const profile = eligible.find((p) => p.email.toLowerCase() === targetEmail.toLowerCase());
+  if (!profile) {
+    const error = `fetch_tracking: profile "${targetEmail}" not enabled or not signed in — cannot read its order history`;
+    logger.error('job.fetchTracking.profile_missing', { jobId: job.id, targetEmail }, cid);
+    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+    return;
+  }
+
+  const activeAttemptId = await resolveFetchTrackingAttemptRow(deps, job, profile.email);
+
+  logger.info(
+    'job.fetchTracking.start',
+    { jobId: job.id, profile: profile.email, orderId: targetOrderId },
+    cid,
+  );
+
+  try {
+    const session = await getSession(deps, sessions, profile.email, profile.headless);
+    const existing = session.context.pages();
+    const page = existing[0] ?? (await session.newPage());
+    const outcome = await fetchTracking(page, targetOrderId);
+
+    if (outcome.kind === 'tracked') {
+      logger.info(
+        'job.fetchTracking.tracked',
+        {
+          jobId: job.id,
+          profile: profile.email,
+          orderId: targetOrderId,
+          trackingIds: outcome.trackingIds,
+          message: `✓ Got ${outcome.trackingIds.length} tracking ID${outcome.trackingIds.length === 1 ? '' : 's'} for ${targetOrderId}`,
+        },
+        cid,
+      );
+      await deps.jobAttempts
+        .update(activeAttemptId, {
+          status: 'verified',
+          error: null,
+          orderId: targetOrderId,
+          trackingIds: outcome.trackingIds,
+        })
+        .catch(() => undefined);
+      await reportSafe(
+        deps,
+        job.id,
+        {
+          status: 'completed',
+          placedOrderId: targetOrderId,
+          placedEmail: profile.email,
+          trackingIds: outcome.trackingIds,
+        },
+        cid,
+      );
+      return;
+    }
+
+    if (outcome.kind === 'partial') {
+      logger.info(
+        'job.fetchTracking.partial',
+        {
+          jobId: job.id,
+          profile: profile.email,
+          orderId: targetOrderId,
+          trackingIds: outcome.trackingIds,
+          message: `Partial tracking — ${outcome.trackingIds.length} code(s) so far, more shipments still pending`,
+        },
+        cid,
+      );
+      await deps.jobAttempts
+        .update(activeAttemptId, {
+          status: 'verified',
+          error: null,
+          orderId: targetOrderId,
+          trackingIds: outcome.trackingIds,
+        })
+        .catch(() => undefined);
+      await reportSafe(
+        deps,
+        job.id,
+        {
+          status: 'pending_tracking',
+          placedOrderId: targetOrderId,
+          placedEmail: profile.email,
+          trackingIds: outcome.trackingIds,
+        },
+        cid,
+      );
+      return;
+    }
+
+    if (outcome.kind === 'not_shipped') {
+      logger.info(
+        'job.fetchTracking.not_shipped',
+        {
+          jobId: job.id,
+          profile: profile.email,
+          orderId: targetOrderId,
+          message: 'Order active but not yet shipped — BG will reschedule in 6h',
+        },
+        cid,
+      );
+      await deps.jobAttempts
+        .update(activeAttemptId, { status: 'verified', error: null, orderId: targetOrderId })
+        .catch(() => undefined);
+      await reportSafe(
+        deps,
+        job.id,
+        {
+          status: 'pending_tracking',
+          placedOrderId: targetOrderId,
+          placedEmail: profile.email,
+        },
+        cid,
+      );
+      return;
+    }
+
+    if (outcome.kind === 'retry') {
+      logger.warn(
+        'job.fetchTracking.retry',
+        {
+          jobId: job.id,
+          profile: profile.email,
+          orderId: targetOrderId,
+          reason: outcome.reason,
+          message: 'Verify step failed transiently — BG will reschedule in 6h',
+        },
+        cid,
+      );
+      await deps.jobAttempts
+        .update(activeAttemptId, { status: 'verified', error: null, orderId: targetOrderId })
+        .catch(() => undefined);
+      await reportSafe(
+        deps,
+        job.id,
+        {
+          status: 'pending_tracking',
+          placedOrderId: targetOrderId,
+          placedEmail: profile.email,
+        },
+        cid,
+      );
+      return;
+    }
+
+    // outcome.kind === 'cancelled'
+    logger.warn(
+      'job.fetchTracking.cancelled',
+      {
+        jobId: job.id,
+        profile: profile.email,
+        orderId: targetOrderId,
+        reason: outcome.reason,
+        message: `✗ Order ${targetOrderId} was cancelled by Amazon`,
+      },
+      cid,
+    );
+    await deps.jobAttempts
+      .update(activeAttemptId, {
+        status: 'cancelled_by_amazon',
+        error: outcome.reason,
+        orderId: targetOrderId,
+      })
+      .catch(() => undefined);
+    await reportSafe(
+      deps,
+      job.id,
+      {
+        status: 'cancelled',
+        error: outcome.reason,
+        placedOrderId: targetOrderId,
+        placedEmail: profile.email,
+      },
+      cid,
+    );
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const error = friendlyJobError(raw, profile.email);
+    logger.error(
+      'job.fetchTracking.error',
+      { jobId: job.id, profile: profile.email, orderId: targetOrderId, error },
+      cid,
+    );
+    await deps.jobAttempts
+      .update(activeAttemptId, { status: 'failed', error })
+      .catch(() => undefined);
+    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+  } finally {
+    logger.info(
+      'job.fetchTracking.cleanup',
+      { jobId: job.id, profile: profile.email, message: 'Closing fetch_tracking browser window' },
+      cid,
+    );
+    await closeAndForgetSession(sessions, profile.email);
+  }
+}
+
+/**
+ * Roll the original buy attempt row forward (verified → in_progress) while
+ * fetch_tracking runs, then back to verified/cancelled on completion. If
+ * the buy row was cleared/pruned, create a fresh phase='fetch_tracking'
+ * row so the user sees the job actually running in the Jobs table.
+ */
+async function resolveFetchTrackingAttemptRow(
+  deps: Deps,
+  job: AutoGJob,
+  profileEmail: string,
+): Promise<string> {
+  const buyAttemptId = job.buyJobId
+    ? makeAttemptId(job.buyJobId, profileEmail)
+    : null;
+
+  if (buyAttemptId) {
+    const bumped = await deps.jobAttempts
+      .update(buyAttemptId, { status: 'in_progress', error: null })
+      .catch(() => null);
+    if (bumped) return buyAttemptId;
+  }
+
+  const attemptId = makeAttemptId(job.id, profileEmail);
+  await deps.jobAttempts
+    .create({
+      attemptId,
+      jobId: job.id,
+      amazonEmail: profileEmail,
+      phase: 'fetch_tracking',
+      dealKey: job.dealKey,
+      dealId: job.dealId,
+      dealTitle: job.dealTitle,
+      productUrl: job.productUrl,
+      maxPrice: job.maxPrice,
+      price: job.price,
+      quantity: job.quantity,
+      cost: null,
+      cashbackPct: null,
+      orderId: job.placedOrderId,
+      status: 'in_progress',
+      error: null,
+      buyMode: 'single',
+      dryRun: false,
+      trackingIds: null,
+    })
+    .catch(() => undefined);
+  return attemptId;
+}
+
+/**
  * Pick (and persist up-front) the attempt row this verify run will track.
  *
  * Preferred path: bump the original buy attempt row from
@@ -546,6 +830,7 @@ async function resolveVerifyAttemptRow(
       error: null,
       buyMode: 'single',
       dryRun: false,
+      trackingIds: null,
     })
     .catch(() => undefined);
   return verifyAttemptId;

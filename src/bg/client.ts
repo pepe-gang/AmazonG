@@ -25,7 +25,7 @@ export type ServerPurchase = {
   maxPrice: string;
   price: string | null;
   quantity: number;
-  phase: 'buy' | 'verify';
+  phase: 'buy' | 'verify' | 'fetch_tracking';
   amazonEmail: string | null;
   status: JobAttemptStatus;
   placedAt: string | null;
@@ -33,6 +33,9 @@ export type ServerPurchase = {
   placedCashbackPct: number | null;
   placedOrderId: string | null;
   error: string | null;
+  /** Carrier tracking codes populated by fetch_tracking. Null when BG
+   *  hasn't recorded any (legacy purchases + orders still pre-ship). */
+  trackingIds: string[] | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -61,7 +64,7 @@ function normalizeJob(raw: unknown): AutoGJob | null {
   const j = raw as Record<string, unknown>;
   return {
     id: String(j.id ?? ''),
-    phase: (j.phase === 'verify' ? 'verify' : 'buy'),
+    phase: j.phase === 'verify' ? 'verify' : j.phase === 'fetch_tracking' ? 'fetch_tracking' : 'buy',
     dealTitle: typeof j.dealTitle === 'string' ? j.dealTitle : null,
     dealKey: typeof j.dealKey === 'string' ? j.dealKey : null,
     dealId: typeof j.dealId === 'string' && j.dealId.length > 0 ? j.dealId : null,
