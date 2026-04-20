@@ -56,11 +56,14 @@ export type BGClient = {
    * Write the tracking codes for a single purchase. Distinct from
    * reportStatus so it doesn't touch the parent job's status. Full
    * replace — Amazon can evolve the list (more shipments, new codes).
+   * Also opportunistically syncs purchasedCount so rows written pre-0.5.5
+   * heal when the user runs a manual Fetch Tracking.
    */
   writeTracking(
     jobId: string,
     amazonEmail: string,
     trackingIds: string[],
+    purchasedCount?: number,
   ): Promise<void>;
 };
 
@@ -158,10 +161,14 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
       return r ?? { latestVersion: null, downloadUrls: {} };
     },
 
-    async writeTracking(jobId, amazonEmail, trackingIds) {
+    async writeTracking(jobId, amazonEmail, trackingIds, purchasedCount) {
+      const body: Record<string, unknown> = { jobId, amazonEmail, trackingIds };
+      if (typeof purchasedCount === 'number' && purchasedCount > 0) {
+        body.purchasedCount = purchasedCount;
+      }
       await request<{ ok: true }>('/api/autog/purchases/tracking', {
         method: 'POST',
-        body: JSON.stringify({ jobId, amazonEmail, trackingIds }),
+        body: JSON.stringify(body),
       });
     },
   };

@@ -732,7 +732,10 @@ function registerIpcHandlers(): void {
             try {
               const settings = await loadSettings();
               const bg = createBGClient(settings.bgBaseUrl, apiKey);
-              await bg.writeTracking(a.jobId, a.amazonEmail, outcome.trackingIds);
+              // Pass along the local quantity so BG can heal legacy rows
+              // whose purchasedCount is stuck at 0 (pre-0.5.5 thankyou fix).
+              const qty = typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : undefined;
+              await bg.writeTracking(a.jobId, a.amazonEmail, outcome.trackingIds, qty);
             } catch (err) {
               logger.warn('jobs.fetchTracking.bgSync.error', {
                 attemptId,
