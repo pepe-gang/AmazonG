@@ -504,7 +504,7 @@ const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
  * tick the column on (which writes the new order back to settings),
  * the "haven't-seen-it-yet" check stops firing.
  */
-const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail']);
+const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail', 'buyMode']);
 
 function resolveColumnOrder(saved: string[]): JobColumnId[] {
   const valid = new Set<JobColumnId>(DEFAULT_COLUMN_ORDER);
