@@ -52,6 +52,16 @@ export type BGClient = {
   reportStatus(jobId: string, report: JobStatusReport): Promise<void>;
   listPurchases(limit?: number): Promise<ServerPurchase[]>;
   checkVersion(): Promise<VersionInfo>;
+  /**
+   * Write the tracking codes for a single purchase. Distinct from
+   * reportStatus so it doesn't touch the parent job's status. Full
+   * replace — Amazon can evolve the list (more shipments, new codes).
+   */
+  writeTracking(
+    jobId: string,
+    amazonEmail: string,
+    trackingIds: string[],
+  ): Promise<void>;
 };
 
 /**
@@ -146,6 +156,13 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
     async checkVersion() {
       const r = await request<VersionInfo>('/api/autog/version', { method: 'GET' });
       return r ?? { latestVersion: null, downloadUrls: {} };
+    },
+
+    async writeTracking(jobId, amazonEmail, trackingIds) {
+      await request<{ ok: true }>('/api/autog/purchases/tracking', {
+        method: 'POST',
+        body: JSON.stringify({ jobId, amazonEmail, trackingIds }),
+      });
     },
   };
 }

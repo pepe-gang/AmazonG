@@ -183,14 +183,17 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
     const k = keyOf(l);
     const existing = merged.get(k);
     if (existing) {
+      // Prefer server trackingIds when non-empty. BG now returns [] for
+      // purchases without any codes (since the Postgres column defaults
+      // to an empty array), so a plain `??` would pick the empty array
+      // over a local non-empty list and clobber a freshly-run manual
+      // Fetch Tracking.
+      const serverHasCodes = !!(existing.trackingIds && existing.trackingIds.length > 0);
       merged.set(k, {
         ...existing,
         attemptId: l.attemptId,
         dryRun: l.dryRun,
-        // Prefer non-null trackingIds. BG may not know about a freshly-run
-        // manual Fetch Tracking yet; local store has it and we don't want
-        // to clobber the UI while BG catches up.
-        trackingIds: existing.trackingIds ?? l.trackingIds,
+        trackingIds: serverHasCodes ? existing.trackingIds : l.trackingIds,
       });
     } else {
       merged.set(k, l);
@@ -721,6 +724,23 @@ function registerIpcHandlers(): void {
             trackingIds: outcome.trackingIds,
             error: null,
           });
+          // Sync to BG so the Auto Buy dashboard shows the same codes.
+          // Best-effort: if BG is offline or rejects (legacy job without a
+          // purchase row), swallow — local persistence already happened and
+          // the user sees the codes in AmazonG.
+          if (apiKey && a.jobId && a.amazonEmail) {
+            try {
+              const settings = await loadSettings();
+              const bg = createBGClient(settings.bgBaseUrl, apiKey);
+              await bg.writeTracking(a.jobId, a.amazonEmail, outcome.trackingIds);
+            } catch (err) {
+              logger.warn('jobs.fetchTracking.bgSync.error', {
+                attemptId,
+                jobId: a.jobId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
           scheduleBroadcastJobs();
           return {
             kind: outcome.kind,
