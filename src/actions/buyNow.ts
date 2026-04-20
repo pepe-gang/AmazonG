@@ -11,8 +11,6 @@ type BuyOptions = {
   dryRun: boolean;
   minCashbackPct: number;
   maxPrice: number | null;
-  /** Target quantity from BG. null/undefined = 1. */
-  targetQuantity?: number | null;
   allowedAddressPrefixes: string[];
   correlationId?: string;
   /** Directory for debug screenshots captured on silent checkout failures. */
@@ -83,11 +81,11 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       return fail('buy_click', 'buy-now button never appeared', String(err));
     }
 
-    // 1.5. Set quantity in the #quantity dropdown. Use the target quantity
-    //      from BG when provided; otherwise default to 1. Best-effort:
+    // 1.5. Set quantity to the highest numeric option in the #quantity
+    //      dropdown (skipping "10+" / custom-input entries). Mirrors old
+    //      AutoG — BG always wants the max units per order. Best-effort:
     //      products with no dropdown (qty fixed at 1) just skip cleanly.
-    const targetQty = opts.targetQuantity ?? 1;
-    const qty = await setQuantity(page, targetQty);
+    const qty = await setMaxQuantity(page);
     // Track the quantity Amazon will actually check out with so the worker
     // can persist it on the JobAttempt row (the "Qty" column). When the
     // PDP has no dropdown — most items ship qty=1 — setMaxQuantity skips
@@ -1225,19 +1223,19 @@ async function waitForConfirmationOrPending(
 }
 
 /**
- * Find #quantity dropdown and set it to the target quantity. If the exact
- * target isn't available, pick the closest option that doesn't exceed it.
- * Falls back to 1 if no suitable option exists.
+ * Find #quantity dropdown, pick the highest concrete numeric option (skip
+ * "N+" entries which are "show custom-input field"), set it, fire change.
+ * Returns ok with the selected value, or a skip reason. Errors are
+ * non-fatal — caller should log + continue.
  */
-async function setQuantity(
+async function setMaxQuantity(
   page: Page,
-  target: number,
 ): Promise<
   | { ok: true; selected: number; allOptions: string[] }
   | { ok: false; reason: string; allOptions?: string[] }
 > {
   return page
-    .evaluate((target) => {
+    .evaluate(() => {
       const sel = document.querySelector<HTMLSelectElement>('select#quantity');
       if (!sel) return { ok: false as const, reason: 'no #quantity dropdown' };
 
@@ -1258,12 +1256,8 @@ async function setQuantity(
         };
       }
 
-      // Exact match first, then closest without exceeding target, then 1
-      const exact = numeric.find((o) => o.n === target);
-      const best = exact
-        ?? numeric.filter((o) => o.n <= target).reduce((m, o) => (o.n > m.n ? o : m), numeric[0]!)
-        ?? numeric.reduce((m, o) => (o.n < m.n ? o : m));
-
+      const best = numeric.reduce((m, o) => (o.n > m.n ? o : m));
+      // No-op if already on the highest option.
       if (sel.value === best.value) {
         return {
           ok: true as const,
@@ -1278,7 +1272,7 @@ async function setQuantity(
         selected: best.n,
         allOptions: options.map((o) => o.text),
       };
-    }, target)
+    })
     .catch((err) => ({ ok: false as const, reason: `eval error: ${String(err)}` }));
 }
 

@@ -686,7 +686,6 @@ async function runForProfile(
       dryRun: deps.buyDryRun,
       minCashbackPct: deps.minCashbackPct,
       maxPrice: job.maxPrice,
-      targetQuantity: job.quantity,
       allowedAddressPrefixes: deps.allowedAddressPrefixes,
       correlationId: cid,
       debugDir: deps.debugDir,
