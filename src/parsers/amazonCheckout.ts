@@ -13,7 +13,24 @@ export function parseOrderConfirmation(doc: Document, currentUrl: string): Order
   const finalPriceText = readFinalPriceText(doc);
   const finalPrice = parsePrice(finalPriceText);
 
-  return { orderId, finalPriceText, finalPrice };
+  const quantity = readQuantityFromDom(doc);
+
+  return { orderId, finalPriceText, finalPrice, quantity };
+}
+
+/**
+ * Amazon's thankyou page renders a small badge over each line-item's
+ * thumbnail: `<span class="checkout-quantity-badge">3</span>`. Absent for
+ * qty=1 (Amazon hides it). For single-product orders (our case) there's
+ * at most one badge; take the first numeric one we find.
+ */
+function readQuantityFromDom(doc: Document): number | null {
+  const badges = Array.from(doc.querySelectorAll('.checkout-quantity-badge'));
+  for (const b of badges) {
+    const n = parseInt((b.textContent ?? '').trim(), 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
 }
 
 function readOrderIdFromDom(doc: Document): string | null {

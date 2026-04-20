@@ -31,6 +31,9 @@ export type OrderConfirmation = {
   orderId: string | null;
   finalPriceText: string | null;
   finalPrice: number | null;
+  /** Qty as shown on the thankyou page's `.checkout-quantity-badge` image
+   *  badge. Null when the badge is absent (Amazon hides it for qty=1). */
+  quantity: number | null;
 };
 
 export type BuyResult =

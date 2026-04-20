@@ -296,7 +296,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       finalPrice: confirmation.finalPrice,
       finalPriceText: confirmation.finalPriceText,
       cashbackPct,
-      quantity: placedQuantity,
+      quantity: confirmation.quantity ?? placedQuantity,
     };
   } catch (err) {
     return fail('confirm_parse', 'unexpected error in buyNow flow', String(err));

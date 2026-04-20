@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { JSDOM } from 'jsdom';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   parseOrderConfirmation,
   findCheckoutCashbackPct,
@@ -7,6 +9,10 @@ import {
 
 function docOf(html: string): Document {
   return new JSDOM(html).window.document;
+}
+
+function fixture(name: string): string {
+  return readFileSync(join(__dirname, '../../fixtures', name), 'utf8');
 }
 
 describe('parseOrderConfirmation', () => {
@@ -62,6 +68,46 @@ describe('parseOrderConfirmation', () => {
     const r = parseOrderConfirmation(doc, 'x');
     expect(r.finalPriceText).toBe('$24.99');
     expect(r.finalPrice).toBe(24.99);
+  });
+
+  it('reads quantity from .checkout-quantity-badge', () => {
+    const doc = docOf(`
+      <html><body>
+        <span class="a-color-secondary checkout-quantity-badge">3</span>
+      </body></html>`);
+    expect(parseOrderConfirmation(doc, 'x').quantity).toBe(3);
+  });
+
+  it('returns null quantity when badge is absent (qty=1 case)', () => {
+    const doc = docOf('<html><body>Order placed, thanks!</body></html>');
+    expect(parseOrderConfirmation(doc, 'x').quantity).toBeNull();
+  });
+
+  it('reads quantity from a real thankyou fixture (qty=3)', () => {
+    const doc = docOf(fixture('thankyou-106-4510031-4901860.html'));
+    const r = parseOrderConfirmation(
+      doc,
+      'https://www.amazon.com/gp/buy/thankyou/handlers/display.html?purchaseId=106-4510031-4901860',
+    );
+    expect(r.quantity).toBe(3);
+  });
+
+  it('returns null from a real thankyou fixture (qty=1, badge omitted)', () => {
+    const doc = docOf(fixture('thankyou-106-3412656-3967431-qty1.html'));
+    const r = parseOrderConfirmation(
+      doc,
+      'https://www.amazon.com/gp/buy/thankyou/handlers/display.html?purchaseId=106-3412656-3967431',
+    );
+    expect(r.quantity).toBeNull();
+  });
+
+  it('reads quantity from a real thankyou fixture (qty=5)', () => {
+    const doc = docOf(fixture('thankyou-106-9503967-6167453-qty5.html'));
+    const r = parseOrderConfirmation(
+      doc,
+      'https://www.amazon.com/gp/buy/thankyou/handlers/display.html?purchaseId=106-9503967-6167453',
+    );
+    expect(r.quantity).toBe(5);
   });
 });
 
