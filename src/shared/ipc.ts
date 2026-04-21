@@ -26,6 +26,7 @@ export const IPC = {
   profilesRefresh: 'profiles:refresh',
   profilesSetEnabled: 'profiles:set-enabled',
   profilesSetHeadless: 'profiles:set-headless',
+  profilesSetBuyWithFillers: 'profiles:set-buy-with-fillers',
   profilesRename: 'profiles:rename',
   profilesOpenOrders: 'profiles:open-orders',
   profilesOpenOrder: 'profiles:open-order',
@@ -97,6 +98,15 @@ export type Settings = {
   snapshotOnFailure: boolean;
   /** Which error groups to capture. Empty = capture all groups. */
   snapshotGroups: string[];
+  /**
+   * Global default for "Buy with Fillers" mode. When on, the worker places
+   * the target item alongside ~10 random Prime filler items to disguise the
+   * order, then cancels the fillers once verify confirms the order is
+   * active. The per-account toggle (AmazonProfile.buyWithFillers) overrides
+   * this for individual accounts; this global setting is the default for
+   * new profiles and the master cascade control on the settings screen.
+   */
+  buyWithFillers: boolean;
 };
 
 export type AutoGBridge = {
@@ -118,6 +128,7 @@ export type AutoGBridge = {
   profilesRefresh(email: string): Promise<AmazonProfile | null>;
   profilesSetEnabled(email: string, enabled: boolean): Promise<AmazonProfile[]>;
   profilesSetHeadless(email: string, headless: boolean): Promise<AmazonProfile[]>;
+  profilesSetBuyWithFillers(email: string, buyWithFillers: boolean): Promise<AmazonProfile[]>;
   profilesRename(email: string, displayName: string | null): Promise<AmazonProfile[]>;
   profilesOpenOrders(email: string): Promise<void>;
   profilesOpenOrder(email: string, orderId: string): Promise<void>;

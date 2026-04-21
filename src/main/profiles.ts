@@ -24,9 +24,14 @@ export async function loadProfiles(): Promise<AmazonProfile[]> {
     const raw = await readFile(filePath(), 'utf8');
     const parsed = JSON.parse(raw) as Stored;
     const list = parsed.profiles ?? [];
-    // Backfill `headless` for profiles persisted before the field shipped.
-    // Default to true — matches the app-wide default (headless ON).
-    return list.map((p) => ({ ...p, headless: p.headless ?? true }));
+    // Backfill fields for profiles persisted before they shipped.
+    //  - `headless`: defaults to true (matches app-wide default).
+    //  - `buyWithFillers`: defaults to false (opt-in feature).
+    return list.map((p) => ({
+      ...p,
+      headless: p.headless ?? true,
+      buyWithFillers: p.buyWithFillers ?? false,
+    }));
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
@@ -84,6 +89,7 @@ export function newProfile(email: string, displayName?: string): AmazonProfile {
     lastLoginAt: null,
     loggedIn: false,
     headless: true,
+    buyWithFillers: false,
   };
 }
 

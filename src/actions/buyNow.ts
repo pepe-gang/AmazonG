@@ -47,10 +47,20 @@ const CHECKOUT_PLACE_SELECTORS = [
   '#submitOrderButtonId input',
   '#submitOrderButtonId button',
   'input[aria-labelledby*="submitOrderButton"]',
+  'input[aria-labelledby*="placeOrder" i]',
   '#placeYourOrder1 input[type="submit"]',
   'input[data-testid="place-order-button"]',
+  'button[data-testid*="place-order" i]',
   'span#bottomSubmitOrderButtonId input',
 ];
+
+/**
+ * Regex used as a fallback when every selector above misses. Matches the
+ * visible label on Amazon's Chewbacca Place Order button across locales
+ * and layout variants: "Place order", "Place your order", "Place your
+ * order and pay".
+ */
+const PLACE_ORDER_LABEL_RE = /^place\s+(your\s+)?order(\s+and\s+pay)?$/i;
 
 /**
  * Drive a real Amazon checkout from the product page that's ALREADY loaded
@@ -310,14 +320,15 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
    Sub-steps
    ============================================================ */
 
-type CheckoutReadyResult =
+export type CheckoutReadyResult =
   | { ok: true; detected: string }
   | { ok: false; reason: string; detail?: string; kind?: 'unavailable' | 'timeout' };
 
-async function waitForCheckout(
+export async function waitForCheckout(
   page: Page,
   allowedAddressPrefixes: string[] = [],
   debugDir?: string,
+  emit?: { step: StepEmitter; warn: StepEmitter },
 ): Promise<CheckoutReadyResult> {
   // Poll for either a Place Order button (success — we're on /spc), a
   // "Deliver to this address" button (interstitial — Amazon parked us at the
@@ -330,10 +341,12 @@ async function waitForCheckout(
   const deadline = Date.now() + 30_000;
   let deliverClickedTimes = 0;
   const MAX_DELIVER_CLICKS = 3;
+  let iteration = 0;
 
   while (Date.now() < deadline) {
+    iteration += 1;
     const state = await page
-      .evaluate((placeSelectors) => {
+      .evaluate(({ placeSelectors, placeLabelPattern }) => {
         const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ');
 
         // 0. Terminal failure — Amazon's "This item is currently
@@ -353,30 +366,119 @@ async function waitForCheckout(
           };
         }
 
-        // 1. Place Order — terminal success state.
+        // 1. Place Order — terminal success state. Try selector list
+        //    first (fast path); if none match, fall back to a text scan
+        //    across visible buttons/inputs so new Amazon layouts that
+        //    ship with different ids/attributes still resolve.
         for (const s of placeSelectors) {
           const el = document.querySelector(s) as HTMLElement | null;
           if (el && el.offsetParent !== null) {
             return { kind: 'place' as const, sel: s };
           }
         }
-        // 2. Look for an "Deliver to this address" labeled element. Amazon
-        //    uses several wrappers (span/button/input), so match by visible
-        //    text rather than a specific selector.
-        const candidates = Array.from(
-          document.querySelectorAll<HTMLElement>('span, button, input, a'),
-        );
-        for (const el of candidates) {
-          if (el.offsetParent === null) continue;
-          const label = (
+        // Label resolver that also follows aria-labelledby references.
+        // Amazon's Chewbacca pipeline commonly ships inputs with no value
+        // and no textContent — the visible label lives in a separate
+        // <span> referenced by aria-labelledby (e.g.
+        //   <input type="submit" aria-labelledby="…-continue-button-id-announce">
+        //   <span id="…-continue-button-id-announce">Deliver to this address</span>
+        // ). The old "value || aria-label || textContent" chain returned
+        // empty for those inputs, so text-based detection missed the real
+        // button. Resolve the referenced ids + concatenate their text.
+        const readLabel = (el: HTMLElement): string => {
+          const direct = (
             (el as HTMLInputElement).value ||
             el.getAttribute('aria-label') ||
             el.textContent ||
             ''
           ).trim();
-          if (/^deliver to this address$/i.test(label)) {
-            return { kind: 'deliver' as const, label };
+          if (direct) return direct;
+          const ref = el.getAttribute('aria-labelledby');
+          if (!ref) return '';
+          return ref
+            .split(/\s+/)
+            .map((id) => document.getElementById(id))
+            .filter((n): n is HTMLElement => n !== null)
+            .map((n) => (n.textContent || '').trim())
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+        };
+
+        const labelRe = new RegExp(placeLabelPattern, 'i');
+        const placeCandidates = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            'button, input[type="submit"], input[type="button"], a[role="button"], .a-button-input',
+          ),
+        );
+        for (const el of placeCandidates) {
+          if (el.offsetParent === null) continue;
+          if ((el as HTMLButtonElement).disabled) continue;
+          if (labelRe.test(readLabel(el))) {
+            return { kind: 'place' as const, sel: '__text_match__' };
           }
+        }
+        // 2. Look for a "Deliver to this address" INTERACTIVE element.
+        //    Restricted to buttons/inputs/role="button" — NOT <span>,
+        //    because the review page (post-interstitial) carries a
+        //    static <span>Deliver to this address</span> label above
+        //    the address summary, and loosening the selector to span
+        //    caused us to falsely re-detect the interstitial on every
+        //    iteration after a successful click. Amazon's real button
+        //    is always an <input type="submit"> (inside its a-button
+        //    wrapper) or a plain <button>, never a standalone <span>.
+        const candidates = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            'button, input[type="submit"], input[type="button"], a[role="button"], .a-button-input',
+          ),
+        );
+        // Chewbacca ships both a "primary" Deliver submit (yellow CTA the
+        // user sees) and a "secondary" Deliver submit (sticky/duplicate)
+        // whose click is a no-op — only the primary's click handler
+        // actually submits the address form. DOM order is NOT reliable:
+        // the secondary usually appears first, so a naive .find() picks
+        // the dead button and clicks it three times in a row. Sort matches
+        // so any element with `primary-continue-button` in its
+        // aria-labelledby wins over a `secondary-continue-button` match.
+        const deliverHits: HTMLElement[] = [];
+        for (const el of candidates) {
+          if (el.offsetParent === null) continue;
+          if ((el as HTMLButtonElement).disabled) continue;
+          const label = readLabel(el);
+          if (/^deliver to this address$/i.test(label)) {
+            deliverHits.push(el);
+          }
+        }
+        if (deliverHits.length > 0) {
+          // Only treat the PRIMARY Chewbacca Deliver button as actionable.
+          // The secondary submit (sticky/duplicate) is a no-op — clicking
+          // it advances nothing and just burns our retry counter. Once we
+          // click the primary, it disappears while the submit is in
+          // flight; during that window only the secondary is visible, so
+          // we want to fall through to state 'none' and keep polling.
+          const primary = deliverHits.find((el) => {
+            const aria = (el.getAttribute('aria-labelledby') || '').toLowerCase();
+            return aria.includes('primary-continue-button');
+          });
+          if (primary) {
+            return {
+              kind: 'deliver' as const,
+              label: readLabel(primary),
+              ariaLabelledby: primary.getAttribute('aria-labelledby') || null,
+              tag: primary.tagName.toLowerCase(),
+              elementId: primary.id || null,
+              matchCount: deliverHits.length,
+            };
+          }
+          // Primary absent (likely mid-submit) — don't touch the secondary
+          // button; just log the wait-state so the trace is legible.
+          const secondary = deliverHits[0] as HTMLElement;
+          return {
+            kind: 'deliver_pending' as const,
+            label: readLabel(secondary),
+            ariaLabelledby: secondary.getAttribute('aria-labelledby') || null,
+            matchCount: deliverHits.length,
+          };
         }
         // 3. "Make updates to your items" confirm page — a Buy-Now/cart
         //    pre-checkout panel where Amazon asks us to verify quantity +
@@ -387,8 +489,49 @@ async function waitForCheckout(
           return { kind: 'updates' as const };
         }
         return { kind: 'none' as const };
-      }, CHECKOUT_PLACE_SELECTORS)
+      }, { placeSelectors: CHECKOUT_PLACE_SELECTORS, placeLabelPattern: PLACE_ORDER_LABEL_RE.source })
       .catch(() => ({ kind: 'none' as const }));
+
+    // Per-iteration trace. Lets us see, e.g., "iter 1 kind=deliver …; iter
+    // 2 kind=deliver (same aria-labelledby) …" — makes a persisted Deliver
+    // button vs a real second interstitial click trivially distinguishable.
+    if (emit) {
+      const url = page.url();
+      if (state.kind === 'deliver') {
+        emit.step('step.waitForCheckout.iter', {
+          iteration,
+          kind: state.kind,
+          url,
+          label: state.label,
+          ariaLabelledby: state.ariaLabelledby,
+          elementId: state.elementId,
+          tag: state.tag,
+          deliverClickedTimes,
+        });
+      } else if (state.kind === 'deliver_pending') {
+        emit.step('step.waitForCheckout.iter', {
+          iteration,
+          kind: state.kind,
+          url,
+          ariaLabelledby: state.ariaLabelledby,
+          deliverClickedTimes,
+        });
+      } else {
+        emit.step('step.waitForCheckout.iter', {
+          iteration,
+          kind: state.kind,
+          url,
+          deliverClickedTimes,
+        });
+      }
+    }
+
+    if (state.kind === 'deliver_pending') {
+      // Primary submit is in flight — longer settle interval before the
+      // next poll so we don't burn iterations while Amazon processes.
+      await page.waitForTimeout(1_500);
+      continue;
+    }
 
     if (state.kind === 'place') {
       return { ok: true, detected: state.sel };
@@ -434,23 +577,53 @@ async function waitForCheckout(
       }
 
       // Click via the same DOM walk so we hit the visible "Deliver to this
-      // address" element (avoids the id collision with the modal's Use button).
+      // address" element. Mirror the tightened selector from the state
+      // detector above — excludes <span> so we don't no-op on a static
+      // label element that Amazon ships on the post-interstitial review
+      // page.
       const clicked = await page
         .evaluate(() => {
-          const all = Array.from(
-            document.querySelectorAll<HTMLElement>('span, button, input, a'),
-          );
-          const btn = all.find((el) => {
-            if (el.offsetParent === null) return false;
-            const label = (
+          const readLabel = (el: HTMLElement): string => {
+            const direct = (
               (el as HTMLInputElement).value ||
               el.getAttribute('aria-label') ||
               el.textContent ||
               ''
             ).trim();
-            return /^deliver to this address$/i.test(label);
+            if (direct) return direct;
+            const ref = el.getAttribute('aria-labelledby');
+            if (!ref) return '';
+            return ref
+              .split(/\s+/)
+              .map((id) => document.getElementById(id))
+              .filter((n): n is HTMLElement => n !== null)
+              .map((n) => (n.textContent || '').trim())
+              .filter(Boolean)
+              .join(' ')
+              .trim();
+          };
+          const all = Array.from(
+            document.querySelectorAll<HTMLElement>(
+              'button, input[type="submit"], input[type="button"], a[role="button"], .a-button-input',
+            ),
+          );
+          const matches = all.filter((el) => {
+            if (el.offsetParent === null) return false;
+            if ((el as HTMLButtonElement).disabled) return false;
+            return /^deliver to this address$/i.test(readLabel(el));
           });
-          if (!btn) return false;
+          if (matches.length === 0) return false;
+          // Prefer the primary-continue submit. DOM order is unreliable
+          // (secondary often comes first), so sort by aria-labelledby
+          // suffix before picking.
+          const scoreEl = (el: HTMLElement): number => {
+            const aria = (el.getAttribute('aria-labelledby') || '').toLowerCase();
+            if (aria.includes('primary-continue-button')) return 2;
+            if (aria.includes('secondary-continue-button')) return 0;
+            return 1;
+          };
+          matches.sort((a, b) => scoreEl(b) - scoreEl(a));
+          const btn = matches[0] as HTMLElement;
           btn.click();
           return true;
         })
@@ -458,12 +631,30 @@ async function waitForCheckout(
 
       if (!clicked) {
         // Couldn't click for some reason — short pause and retry.
+        if (emit) {
+          emit.warn('step.waitForCheckout.deliver.click.miss', {
+            iteration,
+            url: page.url(),
+          });
+        }
         await page.waitForTimeout(500);
         continue;
       }
       deliverClickedTimes += 1;
       await page.waitForLoadState('domcontentloaded').catch(() => undefined);
-      await page.waitForTimeout(1_000);
+      // Longer settle after a primary click — Chewbacca does the address
+      // submit over XHR, URL may stay on /address for several seconds
+      // while it processes, and the primary button disappears during that
+      // window. A 1s wait previously caused us to re-poll mid-submit and
+      // mis-detect state. 3s gives the handler a chance to finish.
+      await page.waitForTimeout(3_000);
+      if (emit) {
+        emit.step('step.waitForCheckout.deliver.clicked', {
+          iteration,
+          deliverClickedTimes,
+          urlAfter: page.url(),
+        });
+      }
       continue;
     }
 
@@ -704,11 +895,11 @@ async function verifyCheckoutPrice(page: Page, cap: number): Promise<PriceCheckR
   return { ok: true, priceText: result.chosen.raw, price };
 }
 
-type AddrResult =
+export type AddrResult =
   | { ok: true; current: string; prefix: string }
   | { ok: false; reason: string; detail?: string };
 
-async function ensureAddress(
+export async function ensureAddress(
   page: Page,
   allowedPrefixes: string[],
   emit: { step: StepEmitter; warn: StepEmitter },
@@ -868,11 +1059,11 @@ async function readCashbackOnPage(page: Page): Promise<number | null> {
   return findCashbackPct(doc);
 }
 
-type ToggleResult =
+export type ToggleResult =
   | { ok: true; cashbackPct: number | null; from: string; to: string }
   | { ok: false; reason: string; detail?: string };
 
-async function toggleBGNameAndRetry(
+export async function toggleBGNameAndRetry(
   page: Page,
   allowedPrefixes: string[],
   emit: { step: StepEmitter; warn: StepEmitter },
@@ -1091,7 +1282,7 @@ async function toggleBGNameAndRetry(
  *
  * Returns ok when we land on a confirmation URL, fail otherwise.
  */
-async function waitForConfirmationOrPending(
+export async function waitForConfirmationOrPending(
   page: Page,
   step: StepEmitter,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
@@ -1228,7 +1419,7 @@ async function waitForConfirmationOrPending(
  * Returns ok with the selected value, or a skip reason. Errors are
  * non-fatal — caller should log + continue.
  */
-async function setMaxQuantity(
+export async function setMaxQuantity(
   page: Page,
 ): Promise<
   | { ok: true; selected: number; allOptions: string[] }
@@ -1276,11 +1467,22 @@ async function setMaxQuantity(
     .catch((err) => ({ ok: false as const, reason: `eval error: ${String(err)}` }));
 }
 
-async function findPlaceOrderLocator(page: Page) {
+export async function findPlaceOrderLocator(page: Page) {
   for (const sel of CHECKOUT_PLACE_SELECTORS) {
     const loc = page.locator(sel).first();
     if ((await loc.count()) > 0) return loc;
   }
+  // Text fallback — mirrors waitForCheckout's detector. Picks any
+  // visible interactive element whose label matches "Place your order".
+  // Uses Playwright's role+name locator so auto-waiting + actionability
+  // checks still apply at click time.
+  const roleLoc = page.getByRole('button', { name: PLACE_ORDER_LABEL_RE }).first();
+  if ((await roleLoc.count()) > 0) return roleLoc;
+  const inputLoc = page
+    .locator('input[type="submit"], input[type="button"]')
+    .filter({ hasText: PLACE_ORDER_LABEL_RE })
+    .first();
+  if ((await inputLoc.count()) > 0) return inputLoc;
   return null;
 }
 

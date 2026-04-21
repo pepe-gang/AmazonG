@@ -137,6 +137,8 @@ function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
     buyMode: 'single',
     dryRun: false,
     trackingIds: s.trackingIds ?? null,
+    fillerOrderIds: null,
+    productTitle: null,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
@@ -283,6 +285,7 @@ async function startWorkerNow(): Promise<void> {
     snapshotGroups: settings.snapshotGroups,
     headless: settings.headless,
     buyDryRun: settings.buyDryRun,
+    buyWithFillers: settings.buyWithFillers,
     minCashbackPct: settings.minCashbackPct,
     allowedAddressPrefixes: settings.allowedAddressPrefixes,
     listEligibleProfiles: async () => {
@@ -523,6 +526,15 @@ function registerIpcHandlers(): void {
     IPC.profilesSetHeadless,
     async (_e, email: string, headless: boolean) => {
       const list = await updateProfile(email, { headless });
+      await broadcastProfiles(list);
+      return list;
+    },
+  );
+
+  ipcMain.handle(
+    IPC.profilesSetBuyWithFillers,
+    async (_e, email: string, buyWithFillers: boolean) => {
+      const list = await updateProfile(email, { buyWithFillers });
       await broadcastProfiles(list);
       return list;
     },

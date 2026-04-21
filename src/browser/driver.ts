@@ -51,6 +51,20 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     throw err;
   }
 
+  // esbuild (used by tsx for standalone scripts) emits `__name(fn, "label")`
+  // wrappers around named functions to preserve their `.name` property for
+  // stack traces. When those wrapped functions are serialized into a
+  // `page.evaluate()` call, the browser context has no `__name` global and
+  // throws `ReferenceError: __name is not defined`. Production Electron
+  // builds don't emit this helper, but the shim is a safe no-op there, so
+  // we install it unconditionally.
+  await context.addInitScript(() => {
+    const g = globalThis as { __name?: unknown };
+    if (typeof g.__name === 'undefined') {
+      g.__name = <T>(fn: T, _label?: string): T => fn;
+    }
+  });
+
   // Stub the WebAuthn JS APIs so Amazon's conditional-mediation call can't
   // surface the Chromium passkey picker even if the flag above misses it.
   await context.addInitScript(() => {

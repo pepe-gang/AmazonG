@@ -57,7 +57,19 @@ export type BuyResult =
         | 'checkout_address'
         | 'cashback_gate'
         | 'place_order'
-        | 'confirm_parse';
+        | 'confirm_parse'
+        // Filler-mode specific stages. Keeping them here (rather than a
+        // separate union) lets the worker loop handle filler and normal
+        // buys with the same BuyResult surface — just different stage
+        // labels in logs.
+        | 'clear_cart'
+        | 'product_verify'
+        | 'buy_now_click'
+        | 'buy_now_nav'
+        | 'cart_verify'
+        | 'proceed_checkout'
+        | 'spc_wait'
+        | 'spc_ready';
       reason: string;
       detail?: string;
     };
@@ -93,6 +105,15 @@ export type JobStatusReport = {
   purchases?: {
     amazonEmail: string;
     status: 'queued' | 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'completed_with_filler_items' | 'failed' | 'cancelled';
+    /**
+     * When true, this purchase used the "Buy with Fillers" flow (cart
+     * padded with random items). BG reads this flag (instead of or in
+     * addition to a `completed_with_filler_items` status string) to
+     * decide whether to set `viaFiller=true` on the scheduled verify
+     * job — which triggers AmazonG's filler-cancellation cleanup on
+     * the verify-phase run.
+     */
+    viaFiller?: boolean;
     purchasedCount?: number;
     orderId?: string | null;
     error?: string | null;
@@ -130,6 +151,14 @@ export type AmazonProfile = {
    * on the account card.
    */
   headless: boolean;
+  /**
+   * Whether this account uses the "Buy with Fillers" checkout flow
+   * (cart the target + ~10 random Prime fillers, place the order, then
+   * cancel the fillers after verify). Defaults to false; settable per-
+   * account via the toggle on the account card. The master toggle on the
+   * settings screen cascades this field across every profile.
+   */
+  buyWithFillers: boolean;
 };
 
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug';
@@ -194,6 +223,21 @@ export type JobAttempt = {
    *  fetch_tracking loop runs; empty array if the loop ran but Amazon
    *  hasn't shipped anything yet. */
   trackingIds: string[] | null;
+  /**
+   * For filler-mode buys: every order id that came out of this Place
+   * Order click and does NOT contain the target ASIN. Persisted on the
+   * buy attempt so the verify phase (~10 min later) can re-check each
+   * one and retry cancelling any that slipped through the immediate
+   * post-placement sweep. Null on single-mode buys.
+   */
+  fillerOrderIds: string[] | null;
+  /**
+   * Target item's title as shown on /spc (Amazon's real title, not BG's
+   * dealTitle). Needed by the verify phase to locate the target line
+   * item on the cancel-items page when we uncheck-target-cancel-rest.
+   * Chewbacca /spc hides ASINs, so title match is our primary lookup.
+   */
+  productTitle: string | null;
   createdAt: string;
   updatedAt: string;
 };

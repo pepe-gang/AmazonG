@@ -5,12 +5,18 @@ import type { DriverSession } from '../browser/driver.js';
 import { openSession } from '../browser/driver.js';
 import { scrapeProduct } from '../actions/scrapeProduct.js';
 import { buyNow } from '../actions/buyNow.js';
+import {
+  buyWithFillers,
+  type BuyWithFillersResult,
+} from '../actions/buyWithFillers.js';
+import { cancelFillerOrder } from '../actions/cancelFillerOrder.js';
+import { cancelNonTargetItems } from '../actions/cancelNonTargetItems.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
 import { fetchTracking } from '../actions/fetchTracking.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
 import { logger } from '../shared/logger.js';
 import { captureFailureSnapshot, discardTracing, shouldCapture, startTracing } from '../browser/snapshot.js';
-import { makeAttemptId } from '../shared/sanitize.js';
+import { makeAttemptId, parseAsinFromUrl } from '../shared/sanitize.js';
 import type {
   AmazonProfile,
   AutoGJob,
@@ -39,6 +45,14 @@ type Deps = {
   snapshotGroups: string[];
   headless: boolean;
   buyDryRun: boolean;
+  /**
+   * Global "Buy with Fillers" switch — when true EVERY enabled account's
+   * buy phase routes through the cart+filler flow (Buy Now as add-to-cart,
+   * 10 filler items, Proceed to Checkout, then the shared SPC tail).
+   * When true the fan-out concurrency also drops to 1 (one account at a
+   * time) so we don't hammer Amazon with parallel filler sessions.
+   */
+  buyWithFillers: boolean;
   minCashbackPct: number;
   allowedAddressPrefixes: string[];
   /** Returns every enabled+loggedIn profile we should fan out the job to. */
@@ -59,6 +73,279 @@ export type WorkerHandle = {
 };
 
 const FANOUT_CONCURRENCY = 3;
+const FANOUT_CONCURRENCY_FILLER = 1;
+
+/**
+ * How many times we re-run the whole filler buy (clear cart → Buy Now
+ * → pick new random fillers → Proceed to Checkout → verify cashback)
+ * before giving up on a cashback_gate failure.
+ *
+ * Rationale: the 6% back eligibility on /spc is attached to Amazon's
+ * random shipping-group assignment, which depends on which fillers
+ * land in the cart this time around. A different filler set often
+ * lands the target in a different group with different cashback. So
+ * retrying the whole thing with fresh fillers is a legit way to shake
+ * the dice. Other failure stages (item_unavailable, buy_now_click,
+ * checkout_address, etc.) indicate the account or product is the
+ * problem, so we fail fast on those.
+ */
+const FILLER_MAX_ATTEMPTS = 3;
+
+/**
+ * Verify-phase filler cleanup. Runs after verifyOrder confirms the
+ * target order is still active on a viaFiller job. Two tasks:
+ *
+ *   1. For every filler-only order id we captured at buy time: re-try
+ *      cancelling it. Amazon sometimes silently rejects the pre-ship
+ *      cancel we attempted right after placement (or we misdetected a
+ *      success); the ~10-min delay before verify gives the order more
+ *      time to become cancellable.
+ *   2. For the target's order: cancel every item EXCEPT the target.
+ *      This removes the filler items that got bundled into the same
+ *      order as the target (per Amazon's shipping-group fan-out).
+ *
+ * Up to MAX_CANCEL_TRIES attempts per order. Amazon's "Unable to
+ * cancel requested items" is a terminal state (items already locked
+ * for shipment) — no amount of retry will help, and we stop retrying
+ * for that specific order as soon as we see it.
+ *
+ * Returns a summary that the caller can log or persist into
+ * attempt.error. Never throws.
+ */
+/**
+ * Reasons that mean "stop retrying this order" — something on Amazon's
+ * side prevents the cancel from ever succeeding, regardless of how
+ * many times we ask.
+ *
+ *   - "unable to cancel": Amazon's explicit refusal banner (items
+ *     locked for fulfillment)
+ *   - "not on cancel-items page": order redirected away → already
+ *     cancelled or shipped
+ *   - "could not identify target item": we can't confidently locate
+ *     the target; retrying won't make our locator smarter
+ *   - "only target item is cancellable": nothing else to cancel,
+ *     effectively done
+ */
+function isTerminalCancelReason(reason: string): boolean {
+  return (
+    /unable to cancel/i.test(reason) ||
+    /not on cancel-items page/i.test(reason) ||
+    /could not identify target item/i.test(reason) ||
+    /only target item is cancellable/i.test(reason)
+  );
+}
+
+async function runVerifyFillerCleanup(
+  page: Page,
+  targetOrderId: string,
+  fillerOrderIds: string[],
+  target: { asin: string | null; title: string | null },
+  cid: string,
+): Promise<{
+  fillerOrdersCancelled: string[];
+  fillerOrdersFailed: string[];
+  targetOrderCleaned: boolean;
+  targetCleanError: string | null;
+}> {
+  const MAX_TRIES = 3;
+  const fillerOrdersCancelled: string[] = [];
+  const fillerOrdersFailed: string[] = [];
+
+  // 1. Retry cancel on each filler-only order.
+  for (const fillerOrderId of fillerOrderIds) {
+    let cancelled = false;
+    let terminalRefusal = false;
+    let lastReason: string | undefined;
+    for (let tryN = 1; tryN <= MAX_TRIES; tryN++) {
+      const r = await cancelFillerOrder(page, fillerOrderId, {
+        correlationId: cid,
+      });
+      if (r.ok) {
+        cancelled = true;
+        logger.info(
+          'job.verify.filler.orderCancelled',
+          { orderId: fillerOrderId, itemsChecked: r.itemsChecked, attempt: tryN },
+          cid,
+        );
+        break;
+      }
+      lastReason = r.reason;
+      logger.warn(
+        'job.verify.filler.orderCancel.attempt',
+        { orderId: fillerOrderId, attempt: tryN, reason: r.reason, detail: r.detail },
+        cid,
+      );
+      if (isTerminalCancelReason(r.reason)) {
+        terminalRefusal = true;
+        break;
+      }
+      if (tryN < MAX_TRIES) await page.waitForTimeout(2_500);
+    }
+    if (cancelled) fillerOrdersCancelled.push(fillerOrderId);
+    else {
+      fillerOrdersFailed.push(fillerOrderId);
+      logger.warn(
+        'job.verify.filler.orderCancel.giveup',
+        { orderId: fillerOrderId, lastReason, terminalRefusal },
+        cid,
+      );
+    }
+  }
+
+  // 2. Clean the target order — cancel everything except the target.
+  let targetOrderCleaned = false;
+  let targetCleanError: string | null = null;
+  for (let tryN = 1; tryN <= MAX_TRIES; tryN++) {
+    const r = await cancelNonTargetItems(page, targetOrderId, target, {
+      correlationId: cid,
+    });
+    if (r.ok) {
+      targetOrderCleaned = true;
+      logger.info(
+        'job.verify.filler.targetCleaned',
+        { orderId: targetOrderId, cancelled: r.cancelled, kept: r.kept, attempt: tryN },
+        cid,
+      );
+      break;
+    }
+    targetCleanError = r.reason;
+    logger.warn(
+      'job.verify.filler.targetClean.attempt',
+      { orderId: targetOrderId, attempt: tryN, reason: r.reason, detail: r.detail },
+      cid,
+    );
+    // "only target cancellable" is a terminal state, but unlike the
+    // others it's effectively success — nothing else to cancel means
+    // the cleanup achieved its goal.
+    if (/only target item is cancellable/i.test(r.reason)) {
+      targetOrderCleaned = true;
+      break;
+    }
+    if (isTerminalCancelReason(r.reason)) break;
+    if (tryN < MAX_TRIES) await page.waitForTimeout(2_500);
+  }
+
+  return {
+    fillerOrdersCancelled,
+    fillerOrdersFailed,
+    targetOrderCleaned,
+    targetCleanError,
+  };
+}
+
+type FillerRunResult = {
+  /** BuyResult-shaped adapter output the rest of runForProfile consumes. */
+  buy: BuyResult;
+  /**
+   * Filler-only order ids from this buy (orders that don't contain the
+   * target ASIN). Empty on dry-run or failure. Persisted to the job
+   * attempt so verify phase can re-attempt cancellation.
+   */
+  fillerOrderIds: string[];
+  /**
+   * Amazon's actual product title for the target (from /spc scraping).
+   * Persisted so verify phase can locate the target on the cancel-
+   * items page without needing ASIN (Chewbacca hides ASINs).
+   */
+  productTitle: string | null;
+};
+
+async function runFillerBuyWithRetries(
+  page: Page,
+  deps: Deps,
+  job: AutoGJob,
+  cid: string,
+): Promise<FillerRunResult> {
+  let lastRaw: BuyWithFillersResult = {
+    ok: false,
+    stage: 'cashback_gate',
+    reason: 'filler buy never ran',
+  };
+  for (let attempt = 1; attempt <= FILLER_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      logger.info(
+        'step.fillerBuy.retryWhole.start',
+        { attempt, maxAttempts: FILLER_MAX_ATTEMPTS, priorReason: lastRaw.ok ? null : lastRaw.reason },
+        cid,
+      );
+    }
+    lastRaw = await buyWithFillers(page, {
+      productUrl: job.productUrl,
+      maxPrice: job.maxPrice,
+      allowedAddressPrefixes: deps.allowedAddressPrefixes,
+      minCashbackPct: deps.minCashbackPct,
+      dryRun: deps.buyDryRun,
+      correlationId: `${cid}/attempt-${attempt}`,
+    });
+    if (lastRaw.ok) {
+      if (attempt > 1) {
+        logger.info(
+          'step.fillerBuy.retryWhole.ok',
+          { attempt, maxAttempts: FILLER_MAX_ATTEMPTS },
+          cid,
+        );
+      }
+      break;
+    }
+    // Only retry when the failure is specifically a cashback_gate miss.
+    // Any other stage (item_unavailable, buy_now_click, checkout_address,
+    // etc.) points at account or product state that a rerun won't fix —
+    // cheaper to bail out than to burn another ~60–80s per attempt.
+    if (lastRaw.stage !== 'cashback_gate') break;
+    if (attempt >= FILLER_MAX_ATTEMPTS) {
+      logger.warn(
+        'step.fillerBuy.retryWhole.exhausted',
+        { attempt, maxAttempts: FILLER_MAX_ATTEMPTS, lastReason: lastRaw.reason },
+        cid,
+      );
+      break;
+    }
+  }
+  return {
+    buy: fillerToBuyResult(lastRaw),
+    fillerOrderIds:
+      lastRaw.ok && 'fillerOrderIds' in lastRaw ? lastRaw.fillerOrderIds : [],
+    productTitle: lastRaw.ok ? lastRaw.productInfo.title : null,
+  };
+}
+
+/**
+ * Effective fan-out concurrency. Filler mode spins up FILLER_WORKERS parallel tabs
+ * inside each account's BrowserContext already; running more than one
+ * account simultaneously layers on 5× extra tabs per account and is
+ * the fastest way to get rate-limited. One at a time for filler mode.
+ */
+function fanoutConcurrency(deps: { buyWithFillers: boolean }): number {
+  return deps.buyWithFillers ? FANOUT_CONCURRENCY_FILLER : FANOUT_CONCURRENCY;
+}
+
+/**
+ * Translate a BuyWithFillersResult into the BuyResult shape the rest of
+ * runForProfile consumes. Keeps the worker loop agnostic about which
+ * flavor ran. Stage labels pass through unchanged — we broadened
+ * BuyResult.stage to include the filler-specific ones so logs stay
+ * faithful.
+ */
+function fillerToBuyResult(f: BuyWithFillersResult): BuyResult {
+  if (!f.ok) {
+    return {
+      ok: false,
+      stage: f.stage,
+      reason: f.reason,
+      ...(f.detail ? { detail: f.detail } : {}),
+    };
+  }
+  const isDryRun = f.stage === 'dry_run_success';
+  return {
+    ok: true,
+    dryRun: isDryRun,
+    orderId: 'orderId' in f ? f.orderId : null,
+    finalPrice: 'finalPrice' in f ? f.finalPrice : null,
+    finalPriceText: 'finalPriceText' in f ? f.finalPriceText : null,
+    cashbackPct: f.targetCashbackPct,
+    quantity: f.placedQuantity ?? 1,
+  };
+}
 
 type ProfileResult = {
   email: string;
@@ -170,12 +457,14 @@ async function handleJob(
   }
   // Caller (worker loop) already enforces the eligibility gate, so we
   // trust `eligible` is non-empty here.
+  const concurrency = fanoutConcurrency(deps);
   logger.info(
     'job.fanout.start',
     {
       jobId: job.id,
       profiles: eligible.map((p) => p.email),
-      concurrency: Math.min(FANOUT_CONCURRENCY, eligible.length),
+      concurrency: Math.min(concurrency, eligible.length),
+      buyWithFillers: deps.buyWithFillers,
     },
     cid,
   );
@@ -201,14 +490,16 @@ async function handleJob(
         orderId: null,
         status: 'queued',
         error: null,
-        buyMode: 'single',
+        buyMode: deps.buyWithFillers ? 'filler' : 'single',
         dryRun: deps.buyDryRun,
         trackingIds: null,
+        fillerOrderIds: null,
+        productTitle: null,
       }),
     ),
   );
 
-  const results = await pMap(eligible, FANOUT_CONCURRENCY, (profile) =>
+  const results = await pMap(eligible, concurrency, (profile) =>
     runForProfile(deps, sessions, job, profile, cid),
   );
 
@@ -273,9 +564,13 @@ async function handleJob(
   }
 
   // Per-profile purchase rows for BG. Live successes report as
-  // 'awaiting_verification' (mirroring the parent + AmazonG's Jobs-table
-  // label); the verify-phase job will flip them to 'completed' or
-  // 'cancelled' later. Dry-runs always report as failed (no real order).
+  // 'awaiting_verification' regardless of buy mode — the user wants the
+  // display status consistent across modes. Whether the buy went
+  // through the filler-items flow is signalled via a separate
+  // `viaFiller` field on each purchase, which BG reads to flag the
+  // scheduled verify job with `viaFiller=true` (which in turn triggers
+  // our filler-cancellation cleanup on the verify-phase run).
+  // Dry-runs always report as failed (no real order).
   const purchases = results.map((r) => ({
     amazonEmail: r.email,
     status: r.dryRun
@@ -283,6 +578,9 @@ async function handleJob(
       : r.status === 'completed'
         ? ('awaiting_verification' as const)
         : ('failed' as const),
+    ...(deps.buyWithFillers && !r.dryRun && r.status === 'completed'
+      ? { viaFiller: true as const }
+      : {}),
     purchasedCount: r.placedQuantity,
     orderId: r.orderId,
     placedPrice: r.placedPrice,
@@ -385,6 +683,86 @@ async function handleVerifyJob(
           orderId: targetOrderId,
         })
         .catch(() => undefined);
+
+      // Filler-mode cleanup: cancel filler-only orders we couldn't
+      // cancel during buy, and strip fillers out of the target's
+      // order. Runs AFTER the attempt has been marked verified so a
+      // cleanup failure doesn't knock the verified status back — the
+      // order is successfully placed regardless, we just logged what
+      // went wrong with the cancellations.
+      if (job.viaFiller) {
+        // Load the attempt we just updated to pull the stashed filler
+        // context from buy time. List the attempts via jobAttempts —
+        // the store exposes update; we read through a plain lookup.
+        const buyAttemptId = job.buyJobId
+          ? makeAttemptId(job.buyJobId, profile.email)
+          : activeAttemptId;
+        const attemptForContext = await deps.jobAttempts
+          .update(buyAttemptId, {})
+          .catch(() => null);
+        const fillerOrderIds = attemptForContext?.fillerOrderIds ?? [];
+        const productTitle = attemptForContext?.productTitle ?? null;
+        const targetAsin = parseAsinFromUrl(job.productUrl);
+        logger.info(
+          'job.verify.filler.cleanup.start',
+          {
+            jobId: job.id,
+            targetOrderId,
+            fillerOrderIdCount: fillerOrderIds.length,
+            hasProductTitle: productTitle !== null,
+            targetAsin,
+          },
+          cid,
+        );
+        const cleanup = await runVerifyFillerCleanup(
+          page,
+          targetOrderId,
+          fillerOrderIds,
+          { asin: targetAsin, title: productTitle },
+          cid,
+        );
+        logger.info(
+          'job.verify.filler.cleanup.done',
+          {
+            jobId: job.id,
+            targetOrderId,
+            fillerOrdersCancelled: cleanup.fillerOrdersCancelled.length,
+            fillerOrdersFailed: cleanup.fillerOrdersFailed.length,
+            targetOrderCleaned: cleanup.targetOrderCleaned,
+            targetCleanError: cleanup.targetCleanError,
+          },
+          cid,
+        );
+        // Persist any remaining uncancelled filler orders on the
+        // attempt so a future sweep (or a human) can see which
+        // orders slipped through — rather than losing that info.
+        if (
+          cleanup.fillerOrdersFailed.length > 0 ||
+          !cleanup.targetOrderCleaned
+        ) {
+          const errorParts: string[] = [];
+          if (cleanup.fillerOrdersFailed.length > 0) {
+            errorParts.push(
+              `${cleanup.fillerOrdersFailed.length} filler order(s) still uncancelled: ${cleanup.fillerOrdersFailed.join(', ')}`,
+            );
+          }
+          if (!cleanup.targetOrderCleaned && cleanup.targetCleanError) {
+            errorParts.push(`target-order clean failed: ${cleanup.targetCleanError}`);
+          }
+          await deps.jobAttempts
+            .update(activeAttemptId, {
+              fillerOrderIds: cleanup.fillerOrdersFailed,
+              error: errorParts.join(' | '),
+            })
+            .catch(() => undefined);
+        } else {
+          // All clean — empty the persisted list.
+          await deps.jobAttempts
+            .update(activeAttemptId, { fillerOrderIds: [] })
+            .catch(() => undefined);
+        }
+      }
+
       await reportSafe(
         deps,
         job.id,
@@ -395,22 +773,6 @@ async function handleVerifyJob(
         },
         cid,
       );
-      // NOTE: viaFiller orders should run cancelFillerItems here (remove
-      // the 10 padding items so only the target ASIN ships). Not yet
-      // implemented — for now we report active and leave fillers in the
-      // order. BG flags `viaFiller` so they can manually cancel for now.
-      if (job.viaFiller) {
-        logger.warn(
-          'job.verify.filler.skipped',
-          {
-            jobId: job.id,
-            profile: profile.email,
-            orderId: targetOrderId,
-            note: 'cancelFillerItems not yet implemented in AmazonG — fillers remain in this order',
-          },
-          cid,
-        );
-      }
       return;
     }
 
@@ -775,6 +1137,8 @@ async function resolveFetchTrackingAttemptRow(
       buyMode: 'single',
       dryRun: false,
       trackingIds: null,
+      fillerOrderIds: null,
+      productTitle: null,
     })
     .catch(() => undefined);
   return attemptId;
@@ -831,6 +1195,8 @@ async function resolveVerifyAttemptRow(
       buyMode: 'single',
       dryRun: false,
       trackingIds: null,
+      fillerOrderIds: null,
+      productTitle: null,
     })
     .catch(() => undefined);
   return verifyAttemptId;
@@ -966,15 +1332,30 @@ async function runForProfile(
     }
     logger.info('step.verify.ok', { jobId: job.id, profile }, cid);
 
-    // Drive a real (or dry-run) Amazon checkout on the SAME tab.
-    const buy: BuyResult = await buyNow(page, {
-      dryRun: deps.buyDryRun,
-      minCashbackPct: deps.minCashbackPct,
-      maxPrice: job.maxPrice,
-      allowedAddressPrefixes: deps.allowedAddressPrefixes,
-      correlationId: cid,
-      debugDir: deps.debugDir,
-    });
+    // Drive a real (or dry-run) Amazon checkout on the SAME tab. Branch
+    // on the global filler switch: filler mode replaces the entire
+    // product-page → Buy Now → /spc path with the cart-based flow (Buy
+    // Now as add-to-cart → 10 filler items → Proceed to Checkout → SPC
+    // tail). Both paths return a BuyResult-shaped value for the
+    // downstream logging/attempt-update code to consume.
+    let buy: BuyResult;
+    let fillerOrderIds: string[] = [];
+    let productTitle: string | null = null;
+    if (deps.buyWithFillers) {
+      const r = await runFillerBuyWithRetries(page, deps, job, cid);
+      buy = r.buy;
+      fillerOrderIds = r.fillerOrderIds;
+      productTitle = r.productTitle;
+    } else {
+      buy = await buyNow(page, {
+        dryRun: deps.buyDryRun,
+        minCashbackPct: deps.minCashbackPct,
+        maxPrice: job.maxPrice,
+        allowedAddressPrefixes: deps.allowedAddressPrefixes,
+        correlationId: cid,
+        debugDir: deps.debugDir,
+      });
+    }
 
     if (!buy.ok) {
       const error = buy.reason;
@@ -1064,6 +1445,11 @@ async function runForProfile(
         // quantity that was stored at fan-out time (always 1 for now).
         quantity: buy.quantity,
         error: null,
+        // Filler-mode context for the verify phase to pick up ~10 min
+        // later. Empty arrays / null on non-filler buys.
+        ...(deps.buyWithFillers
+          ? { fillerOrderIds, productTitle }
+          : {}),
       })
       .catch(() => undefined);
     return {
