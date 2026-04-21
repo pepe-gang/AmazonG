@@ -2,6 +2,7 @@ import type { BrowserContext, Page } from 'playwright';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { NavigationError } from '../shared/errors.js';
+import { logger } from '../shared/logger.js';
 
 export type DriverSession = {
   readonly profile: string;
@@ -119,14 +120,41 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
       // runBeforeUnload=false pre-step so the dialogs are bypassed,
       // then race the final context.close() against a hard timeout so
       // a wedged Chromium can't hang the whole shutdown sequence.
-      const CLOSE_TIMEOUT_MS = 5_000;
+      //
+      // Headed Chromium on macOS can take 8-15s to fully exit after
+      // a full buy flow (lots of tabs, cookie flush, window animations)
+      // — 5s was too aggressive and left windows lingering. Bumped to
+      // 20s; when the timeout does fire we log a warning so the
+      // leftover window is traceable to a specific profile.
+      const CLOSE_TIMEOUT_MS = 20_000;
       await Promise.allSettled(
         context.pages().map((p) => p.close({ runBeforeUnload: false })),
       );
+      let timedOut = false;
+      const t0 = Date.now();
       await Promise.race([
-        context.close(),
-        new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS)),
+        context.close().catch((err) => {
+          logger.warn('session.close.context.error', {
+            profile,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }),
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            timedOut = true;
+            resolve();
+          }, CLOSE_TIMEOUT_MS),
+        ),
       ]);
+      if (timedOut) {
+        logger.warn('session.close.timeout', {
+          profile,
+          waitedMs: Date.now() - t0,
+          note: 'context.close() did not complete within budget; window may linger',
+        });
+      } else {
+        logger.info('session.close.ok', { profile, durationMs: Date.now() - t0 });
+      }
     },
   };
 }
