@@ -73,6 +73,24 @@ describe('verifyProductDetailed', () => {
     expect(report.reason).toBe('price_too_high');
   });
 
+  it('applies NO tolerance when cap is below $100 (strict comparison)', () => {
+    // $50.99 vs $50 cap — for cheap items we want strict, no slack.
+    const report = verifyProductDetailed(
+      info({ price: 50.99, priceText: '$50.99' }),
+      { ...defaults, maxPrice: 50 },
+    );
+    expect(report.ok).toBe(false);
+    expect(report.reason).toBe('price_too_high');
+  });
+
+  it('exact-match on sub-$100 caps still passes', () => {
+    const report = verifyProductDetailed(
+      info({ price: 50, priceText: '$50.00' }),
+      { ...defaults, maxPrice: 50 },
+    );
+    expect(report.ok).toBe(true);
+  });
+
   it('records observed vs expected on a price fail', () => {
     const report = verifyProductDetailed(info({ price: 500, priceText: '$500.00' }), {
       ...defaults,

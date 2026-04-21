@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { logger } from '../shared/logger.js';
 import { findCashbackPct, parsePrice } from '../parsers/amazonProduct.js';
 import { parseOrderConfirmation } from '../parsers/amazonCheckout.js';
+import { effectivePriceTolerance } from '../parsers/productConstraints.js';
 import type { BuyResult } from '../shared/types.js';
 
 type BuyOptions = {
@@ -15,6 +16,14 @@ type BuyOptions = {
   correlationId?: string;
   /** Directory for debug screenshots captured on silent checkout failures. */
   debugDir?: string;
+  /**
+   * Called immediately before the Place Order click ('placing') and
+   * after Amazon's confirmation page parses (null). The worker uses
+   * this to flag the narrow critical window where a stop / crash
+   * can't be safely auto-retried (the click may or may not have been
+   * accepted). Optional — tests and other callers can omit it.
+   */
+  onStage?: (stage: 'placing' | null) => void | Promise<void>;
 };
 
 /**
@@ -245,11 +254,16 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     step('step.buy.place.settle', { waitMs: 1_000 });
     await page.waitForTimeout(1_000);
 
-    // 10. Click Place Order.
+    // 10. Click Place Order. Mark the attempt `stage: 'placing'` just
+    //     before the click so a stop / crash across this boundary is
+    //     flagged as "unknown outcome" (the click may or may not have
+    //     been accepted by Amazon). Cleared back to null once the
+    //     confirmation page parses below.
     const placeLocator = await findPlaceOrderLocator(page);
     if (!placeLocator) {
       return fail('place_order', 'no Place Order button selector matched');
     }
+    await opts.onStage?.('placing');
     try {
       await placeLocator.click({ timeout: 10_000 });
     } catch (err) {
@@ -272,6 +286,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       }
       return fail('confirm_parse', confirmWait.reason);
     }
+    await opts.onStage?.(null);
     // Optional: parse the confirmation page for the final price (the
     // orderId pulled from it is unreliable — recommendation sections and
     // "items you may like" carousels can contain stale order ids that
@@ -884,12 +899,16 @@ async function verifyCheckoutPrice(page: Page, cap: number): Promise<PriceCheckR
     };
   }
   const price = result.chosen.n;
-  if (price > cap) {
+  const tol = effectivePriceTolerance(cap);
+  if (price > cap + tol) {
     return {
       ok: false,
       priceText: result.chosen.raw,
       price,
-      reason: `checkout price $${price.toFixed(2)} exceeds retail cap $${cap.toFixed(2)}`,
+      reason:
+        tol > 0
+          ? `checkout price $${price.toFixed(2)} exceeds retail cap $${cap.toFixed(2)} (+$${tol.toFixed(2)} tolerance)`
+          : `checkout price $${price.toFixed(2)} exceeds retail cap $${cap.toFixed(2)}`,
     };
   }
   return { ok: true, priceText: result.chosen.raw, price };
@@ -1492,7 +1511,7 @@ export async function findPlaceOrderLocator(page: Page) {
  * and click it when it's better than the currently selected option.
  * Mirrors old AutoG's checkout[1.5].
  */
-async function pickBestCashbackDelivery(
+export async function pickBestCashbackDelivery(
   page: Page,
   minCashbackPct: number,
 ): Promise<{ changes: { picked: string; pct: number }[] }> {

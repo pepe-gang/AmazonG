@@ -65,6 +65,13 @@ export type BGClient = {
     trackingIds: string[],
     purchasedCount?: number,
   ): Promise<void>;
+  /**
+   * Put an in_progress job back into the queue so the next claim poll
+   * picks it up immediately (without waiting the 10-min stale-claim
+   * timeout). Called from the worker's stop-sweep for attempts that
+   * were safely mid-flow (pre-Place-Order).
+   */
+  requeueJob(jobId: string): Promise<void>;
 };
 
 /**
@@ -170,6 +177,13 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         method: 'POST',
         body: JSON.stringify(body),
       });
+    },
+
+    async requeueJob(jobId) {
+      await request<{ ok: true }>(
+        `/api/autog/jobs/${encodeURIComponent(jobId)}/requeue`,
+        { method: 'POST', body: JSON.stringify({}) },
+      );
     },
   };
 }

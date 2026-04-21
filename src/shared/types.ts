@@ -238,6 +238,16 @@ export type JobAttempt = {
    * Chewbacca /spc hides ASINs, so title match is our primary lookup.
    */
   productTitle: string | null;
+  /**
+   * Fine-grained stage flag for the narrow critical window between
+   * dispatching the Place Order click and confirming its outcome. Set
+   * to 'placing' immediately before the click; cleared back to null
+   * once Amazon's confirmation page is parsed. Any stop / crash while
+   * `stage === 'placing'` is an "unknown-outcome" case (the click may
+   * or may not have been accepted by Amazon), so recovery code treats
+   * those rows as needs-manual-review instead of safe-to-retry.
+   */
+  stage: 'placing' | null;
   createdAt: string;
   updatedAt: string;
 };

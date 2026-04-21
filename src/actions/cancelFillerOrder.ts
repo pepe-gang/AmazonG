@@ -212,9 +212,25 @@ export async function cancelFillerOrder(
   }
 
   // Amazon may either navigate to a confirmation page or re-render the
-  // same page with a success banner. Wait a beat and probe both.
+  // same page with a success/refusal banner. Poll the body text until
+  // we see a resolving signal — a bare 2.5s sleep wasn't enough: the
+  // confirmation widget is often still spinning when we probe, and we'd
+  // return "no confirmation detected" while the page was actively
+  // succeeding. Poll up to 15s, return early as soon as either outcome
+  // becomes detectable.
   await page.waitForLoadState('domcontentloaded').catch(() => undefined);
-  await page.waitForTimeout(2_500);
+  await page
+    .waitForFunction(
+      () => {
+        const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
+        const refused = /unable to cancel (?:the\s+)?(?:requested|selected|these)?\s*items?/i;
+        const ok = /cancellation (?:has been )?(?:requested|submitted|received|successful)|your cancellation request|item(?:s)? (?:has|have) been cancelled|order (?:was|has been) cancelled/i;
+        return refused.test(body) || ok.test(body);
+      },
+      undefined,
+      { timeout: 15_000, polling: 500 },
+    )
+    .catch(() => undefined);
 
   // First: did Amazon tell us the order can't be cancelled? That's a
   // terminal state ("Unable to cancel requested items. We apologize

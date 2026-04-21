@@ -58,13 +58,17 @@ export const DEFAULT_CONSTRAINTS: Omit<Constraints, 'maxPrice'> = {
 };
 
 /**
- * Small dollar slack on maxPrice comparisons. BG typically sends a
- * whole-dollar cap (e.g. $399.00) and Amazon prices almost always end
- * in .99 / .95 — a strict `price <= cap` would reject a $399.99 buy
- * against a $399 cap over 99 cents. We allow up to $1 over to close
- * that gap without introducing percentage-based drift for cheap items.
+ * Dollar slack on maxPrice comparisons. Only applied when the cap is
+ * ≥ $100 — BG typically sends whole-dollar caps (e.g. $399.00) and
+ * Amazon prices end in .99 / .95, so a strict `price <= cap` would
+ * reject a $399.99 buy against a $399 cap over 99 cents. For cheap
+ * items (cap < $100) we keep strict comparison — a $1 gap is a
+ * meaningful percentage of a $20 item and usually a signal the deal
+ * is mispriced or stale.
  */
-export const PRICE_TOLERANCE = 1.0;
+export function effectivePriceTolerance(cap: number): number {
+  return cap >= 100 ? 1.0 : 0;
+}
 
 /**
  * Runs every configured check in order and returns a full report of each
@@ -140,17 +144,25 @@ export function verifyProductDetailed(
       steps.push(step);
       return { ok: false, reason: step.reason, detail: step.detail, steps };
     }
-    const pass = info.price <= cap + PRICE_TOLERANCE;
+    const tol = effectivePriceTolerance(cap);
+    const pass = info.price <= cap + tol;
+    const expected =
+      tol > 0
+        ? `≤ $${cap.toFixed(2)} (+$${tol.toFixed(2)} tol)`
+        : `≤ $${cap.toFixed(2)}`;
     const step: CheckStep = {
       name: 'price',
       pass,
       observed: info.priceText ?? `$${info.price}`,
-      expected: `≤ $${cap.toFixed(2)} (+$${PRICE_TOLERANCE.toFixed(2)} tol)`,
+      expected,
       ...(pass
         ? {}
         : {
             reason: 'price_too_high' as VerifyReason,
-            detail: `${info.priceText ?? `$${info.price}`} exceeds max $${cap.toFixed(2)} (+$${PRICE_TOLERANCE.toFixed(2)} tolerance)`,
+            detail:
+              tol > 0
+                ? `${info.priceText ?? `$${info.price}`} exceeds max $${cap.toFixed(2)} (+$${tol.toFixed(2)} tolerance)`
+                : `${info.priceText ?? `$${info.price}`} exceeds max $${cap.toFixed(2)}`,
           }),
     };
     steps.push(step);
@@ -295,11 +307,15 @@ export function checkProductConstraints(
     if (info.price === null) {
       return { ok: false, reason: 'price_unknown', detail: 'Out of stock' };
     }
-    if (info.price > c.maxPrice + PRICE_TOLERANCE) {
+    const tol = effectivePriceTolerance(c.maxPrice);
+    if (info.price > c.maxPrice + tol) {
       return {
         ok: false,
         reason: 'price_too_high',
-        detail: `${info.priceText ?? `$${info.price}`} exceeds max $${c.maxPrice.toFixed(2)} (+$${PRICE_TOLERANCE.toFixed(2)} tolerance)`,
+        detail:
+          tol > 0
+            ? `${info.priceText ?? `$${info.price}`} exceeds max $${c.maxPrice.toFixed(2)} (+$${tol.toFixed(2)} tolerance)`
+            : `${info.priceText ?? `$${info.price}`} exceeds max $${c.maxPrice.toFixed(2)}`,
       };
     }
   }

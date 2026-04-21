@@ -113,7 +113,20 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
       return await page.content();
     },
     async close() {
-      await context.close();
+      // Headed Chromium can stall context.close() when a beforeunload
+      // dialog is showing, a download is mid-flight, or a credentials
+      // prompt is blocking the renderer. Close each page with its own
+      // runBeforeUnload=false pre-step so the dialogs are bypassed,
+      // then race the final context.close() against a hard timeout so
+      // a wedged Chromium can't hang the whole shutdown sequence.
+      const CLOSE_TIMEOUT_MS = 5_000;
+      await Promise.allSettled(
+        context.pages().map((p) => p.close({ runBeforeUnload: false })),
+      );
+      await Promise.race([
+        context.close(),
+        new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS)),
+      ]);
     },
   };
 }

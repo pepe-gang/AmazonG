@@ -536,9 +536,7 @@ function resolveColumnOrder(saved: string[]): JobColumnId[] {
 /**
  * Parse a formatted price string like "$399.99" (or "USD 399.99", or
  * "$1,299.95") into a number. Returns null for anything that doesn't
- * parse cleanly. Used for the Retail / Total Retail columns, which
- * read from `JobAttempt.cost` — the actual Amazon /spc price we
- * captured at buy time — rather than BG's dealer cap.
+ * parse cleanly.
  */
 function parseCost(cost: string | null): number | null {
   if (!cost) return null;
@@ -546,6 +544,20 @@ function parseCost(cost: string | null): number | null {
   if (!cleaned) return null;
   const n = parseFloat(cleaned);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Effective retail price for a row: the actual Amazon /spc price we
+ * captured at buy time (`cost`) when available, otherwise BG's retail
+ * cap (`maxPrice`) as a fallback. Legacy rows placed before we started
+ * capturing `cost` have no /spc price on file — falling back to BG's
+ * cap is close enough for the Profit calc and avoids leaving the
+ * column blank on every old row.
+ */
+function retailPrice(a: JobAttempt): number | null {
+  const actual = parseCost(a.cost);
+  if (actual !== null) return actual;
+  return typeof a.maxPrice === 'number' && a.maxPrice > 0 ? a.maxPrice : null;
 }
 
 /**
@@ -569,7 +581,7 @@ function parseCost(cost: string | null): number | null {
  */
 function computeProfit(a: JobAttempt): number | null {
   if (a.status !== 'verified') return null;
-  const retail = parseCost(a.cost);
+  const retail = retailPrice(a);
   const payout = typeof a.price === 'number' ? a.price : null;
   const qty = typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : null;
   const cb = typeof a.cashbackPct === 'number' ? a.cashbackPct : null;
@@ -642,11 +654,11 @@ function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
     case 'buyMode': return a.buyMode === 'filler' ? 'Filler' : 'Single';
     case 'qty':     return typeof a.quantity === 'number' ? a.quantity : '';
     case 'retail': {
-      const n = parseCost(a.cost);
+      const n = retailPrice(a);
       return n !== null ? n.toFixed(2) : '';
     }
     case 'totalRetail': {
-      const n = parseCost(a.cost);
+      const n = retailPrice(a);
       if (n === null || typeof a.quantity !== 'number' || a.quantity <= 0) {
         return '';
       }
@@ -879,8 +891,8 @@ function JobsTable({
         case 'buyMode':
           return (a.buyMode ?? 'single').localeCompare(b.buyMode ?? 'single');
         case 'retail': {
-          const an = parseCost(a.cost);
-          const bn = parseCost(b.cost);
+          const an = retailPrice(a);
+          const bn = retailPrice(b);
           if (an === null && bn === null) return 0;
           if (an === null) return 1;
           if (bn === null) return -1;
@@ -888,7 +900,7 @@ function JobsTable({
         }
         case 'totalRetail': {
           const totalRetail = (x: JobAttempt) => {
-            const unit = parseCost(x.cost);
+            const unit = retailPrice(x);
             return unit !== null && typeof x.quantity === 'number' && x.quantity > 0
               ? unit * x.quantity
               : null;
@@ -1599,7 +1611,7 @@ function JobsCell({
         </td>
       );
     case 'retail': {
-      const n = parseCost(a.cost);
+      const n = retailPrice(a);
       return (
         <td className="cell-retail">
           {n !== null ? `$${n.toFixed(2)}` : <span className="muted">—</span>}
@@ -1607,7 +1619,7 @@ function JobsCell({
       );
     }
     case 'totalRetail': {
-      const unit = parseCost(a.cost);
+      const unit = retailPrice(a);
       const ok = unit !== null && typeof a.quantity === 'number' && a.quantity > 0;
       return (
         <td className="cell-retail">
@@ -1640,7 +1652,7 @@ function JobsCell({
           ) : (
             <span
               className={p >= 0 ? 'profit-good' : 'profit-bad'}
-              title={`payout ${a.price} − retail ${parseCost(a.cost) ?? '?'} × (1 − ${a.cashbackPct}% cb) × qty ${a.quantity}`}
+              title={`payout ${a.price} − retail ${retailPrice(a) ?? '?'} × (1 − ${a.cashbackPct}% cb) × qty ${a.quantity}`}
             >
               {p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(2)}
             </span>

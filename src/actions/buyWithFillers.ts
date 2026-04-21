@@ -7,6 +7,7 @@ import { scrapeProduct } from './scrapeProduct.js';
 import {
   ensureAddress,
   findPlaceOrderLocator,
+  pickBestCashbackDelivery,
   setMaxQuantity,
   toggleBGNameAndRetry,
   waitForCheckout,
@@ -14,6 +15,7 @@ import {
 } from './buyNow.js';
 import {
   DEFAULT_CONSTRAINTS,
+  effectivePriceTolerance,
   verifyProductDetailed,
 } from '../parsers/productConstraints.js';
 import { parseOrderConfirmation } from '../parsers/amazonCheckout.js';
@@ -47,6 +49,13 @@ type BuyWithFillersOptions = {
    */
   dryRun: boolean;
   correlationId?: string;
+  /**
+   * Called immediately before the Place Order click ('placing') and
+   * after Amazon's confirmation page parses (null). Used by the
+   * worker to flag the narrow critical window where a stop / crash
+   * can't be safely auto-retried.
+   */
+  onStage?: (stage: 'placing' | null) => void | Promise<void>;
 };
 
 /**
@@ -446,7 +455,12 @@ export async function buyWithFillers(
   //    row specifically. Skipped when we can't identify the target or
   //    the deal has no cap — the product-page verify already ran.
   if (opts.maxPrice !== null && targetAsin) {
-    const priceCheck = await verifyTargetLineItemPrice(page, targetAsin, opts.maxPrice);
+    const priceCheck = await verifyTargetLineItemPrice(
+      page,
+      targetAsin,
+      info.title,
+      opts.maxPrice,
+    );
     if (!priceCheck.ok) {
       logger.warn(
         'step.fillerBuy.spc.price.fail',
@@ -511,6 +525,32 @@ export async function buyWithFillers(
     logger.info('step.fillerBuy.spc.address.skip', { reason: 'no_prefixes' }, cid);
   }
 
+  // 9.5. Pick the best-cashback delivery option on every radio group.
+  //      When Chewbacca ships 3 radios like [Standard, Fewer trips (6%
+  //      back), Standard Thursday] and defaults to a no-cashback one,
+  //      the target's row reads the WRONG pct and our gate fails even
+  //      though a 6% option is one click away. This walks every non-
+  //      address/non-payment radio group and clicks the highest "N%
+  //      back" option (≥ minCashbackPct) when it's better than the
+  //      currently-selected one.
+  const delivery = await pickBestCashbackDelivery(page, opts.minCashbackPct);
+  if (delivery.changes.length > 0) {
+    logger.info(
+      'step.fillerBuy.spc.delivery.picked',
+      { changes: delivery.changes },
+      cid,
+    );
+    // Let the page settle — Amazon re-renders totals + cashback banner
+    // after a delivery radio click.
+    await page.waitForTimeout(1_500);
+  } else {
+    logger.info(
+      'step.fillerBuy.spc.delivery.nochange',
+      { note: 'default delivery already optimal (or no options found)' },
+      cid,
+    );
+  }
+
   // 10. Verify the TARGET line item's cashback — not the page-wide max,
   //     because fillers can surface unrelated "N% back" offers (and the
   //     credit-card promo banner often reads as 5% across the whole
@@ -537,6 +577,7 @@ export async function buyWithFillers(
           minRequired: opts.minCashbackPct,
           reason: cb.reason,
           detail: cb.detail,
+          diag: 'diag' in cb ? cb.diag : undefined,
         },
         cid,
       );
@@ -577,10 +618,25 @@ export async function buyWithFillers(
         cid,
       );
 
-      // Re-verify target cashback on the newly-rendered /spc. The toggle
-      // helper has already waited for /spc to re-render; target row is
-      // fresh. We ignore toggled.cashbackPct because it's a page-wide
-      // read — we want target-specific.
+      // After the toggle, /spc re-renders from scratch — the delivery
+      // radios we picked at step 9.5 are reset to Amazon's defaults,
+      // which often means "Standard (no cashback)" instead of "Fewer
+      // trips (6%)". Re-run the delivery picker on the new page
+      // before we re-check cashback, otherwise we'd fail even when a
+      // 6% option is one click away.
+      const redelivery = await pickBestCashbackDelivery(page, opts.minCashbackPct);
+      if (redelivery.changes.length > 0) {
+        logger.info(
+          'step.fillerBuy.spc.delivery.picked.afterToggle',
+          { changes: redelivery.changes },
+          cid,
+        );
+        await page.waitForTimeout(1_500);
+      }
+
+      // Re-verify target cashback on the newly-rendered /spc. We ignore
+      // toggled.cashbackPct because it's a page-wide read — we want
+      // target-specific.
       cb = await verifyTargetCashback(page, targetAsin, info.title, opts.minCashbackPct);
       if (!cb.ok) {
         // TODO(cashback-fallback): if you capture a real checkout where
@@ -598,6 +654,7 @@ export async function buyWithFillers(
             minRequired: opts.minCashbackPct,
             reason: cb.reason,
             detail: cb.detail,
+            diag: 'diag' in cb ? cb.diag : undefined,
           },
           cid,
         );
@@ -616,6 +673,7 @@ export async function buyWithFillers(
           from: initialPct,
           to: cb.pct,
           minRequired: opts.minCashbackPct,
+          diag: cb.diag,
         },
         cid,
       );
@@ -623,7 +681,12 @@ export async function buyWithFillers(
       targetCashbackPct = cb.pct;
       logger.info(
         'step.fillerBuy.spc.cashback.ok',
-        { targetAsin, pct: cb.pct, minRequired: opts.minCashbackPct },
+        {
+          targetAsin,
+          pct: cb.pct,
+          minRequired: opts.minCashbackPct,
+          diag: cb.diag,
+        },
         cid,
       );
     }
@@ -699,6 +762,12 @@ export async function buyWithFillers(
       detail: `url=${page.url()}`,
     };
   }
+  // Mark the attempt `stage: 'placing'` across the click → confirmation
+  // window. A stop / crash inside this window is an unknown-outcome
+  // case (Amazon may or may not have accepted the click) and the
+  // recovery sweep routes those rows to manual review instead of
+  // retrying automatically.
+  await opts.onStage?.('placing');
   try {
     await placeLocator.click({ timeout: 10_000 });
   } catch (err) {
@@ -726,6 +795,7 @@ export async function buyWithFillers(
       detail: `url=${page.url()}`,
     };
   }
+  await opts.onStage?.(null);
 
   // Parse the confirmation page for `finalPrice` + `finalPriceText`.
   // NOTE: we intentionally ignore the orderId parsed here — Amazon's
@@ -817,7 +887,13 @@ export async function buyWithFillers(
         cid,
       );
       if (isTerminal(r.reason)) break;
-      if (tryN < MAX_CANCEL_TRIES) await page.waitForTimeout(2_500);
+      // Longer inter-attempt backoff — Amazon's cancel endpoint is
+      // eventually-consistent: a "no confirmation detected" result
+      // often means the cancellation IS processing server-side but
+      // the page hasn't caught up. Give it real time to settle
+      // before re-submitting or the retry races the same pending
+      // request and fails the same way.
+      if (tryN < MAX_CANCEL_TRIES) await page.waitForTimeout(8_000);
     }
     if (cancelled) sweepCancelled++;
     else sweepFailed++;
@@ -1132,9 +1208,34 @@ async function readTargetQuantity(
     .catch(() => null);
 }
 
+/** Diagnostic fields collected on every cashback check (pass or fail).
+ *  Lets us see exactly what scope was walked and which "N% back" matches
+ *  were present in both the scope and the wider body — essential when a
+ *  user reports "I see 6% on the page but the gate failed." */
+type CashbackDiag = {
+  /** Whether our walk found an ancestor with "Arriving" / "% back". */
+  groupFound: boolean;
+  /** How many levels up we walked. */
+  walkDepth: number;
+  /** Character count of the scope's innerText — useful to catch "we
+   *  picked the wrong level and got just the line item (~200ch)" vs
+   *  "we climbed up to the group (~4000ch)". */
+  scopeChars: number;
+  /** All "N% back" matches in the scope we evaluated. */
+  scopeMatches: string[];
+  /** All "N% back" matches anywhere on the page. If scopeMatches is
+   *  empty but bodyMatches shows "6%", the 6% is in a DIFFERENT group
+   *  from target — this is the classic "user sees 6% on the page but
+   *  it doesn't apply to our target" case. */
+  bodyMatches: string[];
+  /** First 200 chars of the scope text — helps confirm we're in the
+   *  right group (should start with "Arriving <date>" for target). */
+  scopeStart: string;
+};
+
 type TargetCashbackResult =
-  | { ok: true; pct: number }
-  | { ok: false; reason: string; detail?: string; pct: number | null };
+  | { ok: true; pct: number; diag: CashbackDiag }
+  | { ok: false; reason: string; detail?: string; pct: number | null; diag?: CashbackDiag };
 
 /**
  * Read "N% back" text scoped to the target ASIN's /spc line item row
@@ -1231,40 +1332,51 @@ async function verifyTargetCashback(
           };
         }
 
-        // Step 2: walk up to the enclosing SHIPPING GROUP — the
-        // container that holds the delivery-option radios for this
-        // group of items. 6% back is group-level (attached to a specific
-        // delivery speed's label), NOT line-item-level, so we have to
-        // look at least one shipping-group up from the item row.
+        // Step 2: walk up to the enclosing SHIPPING GROUP wrapper.
+        // Chewbacca renders each group as a two-column section: items
+        // on the left, delivery-option radios (where "Get N% back with
+        // your Prime Visa" lives) on the right. These columns are
+        // SIBLINGS, so the first ancestor containing "Arriving" is
+        // typically the items-only column — we'd see the target but
+        // miss the cashback text.
         //
-        // Heuristics (checked in order):
-        //   * Ancestor contains the text "Arriving" (shipping-date
-        //     header that only appears at the group level).
-        //   * Ancestor contains the text "% back" itself (either for
-        //     this group or the previous one — we'll verify below).
-        //   * Ancestor innerText is between 200 and 8000 chars (too
-        //     small = just the line item; too big = whole page).
+        // Correct scope is the ancestor that contains BOTH:
+        //   * the items list (find "Arriving" header)
+        //   * the delivery radios with cashback text ("% back")
         //
-        // Fall back to the line-item row + its parent if no group
-        // wrapper is recognizable.
+        // Walk up until we find an ancestor with BOTH, bounded by
+        // MAX_SCOPE_CHARS so we don't swallow the whole page. Fall
+        // back to the first "Arriving"-only ancestor if no such scope
+        // exists (means the group genuinely has no cashback option).
+        const MAX_SCOPE_CHARS = 15000;
         let group: Element | null = null;
+        let fallbackGroup: Element | null = null;
         let el: Element | null = anchor.parentElement;
         let depth = 0;
-        while (el && el !== document.body && depth < 15) {
+        while (el && el !== document.body && depth < 20) {
           const text =
             (el as HTMLElement).innerText ?? el.textContent ?? '';
-          if (text.length > 8000) break;
+          if (text.length > MAX_SCOPE_CHARS) break;
           if (text.length > 200) {
-            if (/\bArriving\b/i.test(text) || /%\s*back\b/i.test(text)) {
+            const hasArriving = /\bArriving\b/i.test(text);
+            const hasPctBack = /%\s*back\b/i.test(text);
+            if (hasArriving && hasPctBack) {
+              // Ideal scope — item + delivery panel together.
               group = el;
               break;
+            }
+            if (hasArriving && !fallbackGroup) {
+              // Found items section but delivery panel is a sibling
+              // outside this scope. Remember this level and keep
+              // climbing to find the parent that wraps both.
+              fallbackGroup = el;
             }
           }
           el = el.parentElement;
           depth++;
         }
         const scope: Element =
-          group ?? (anchor.parentElement as Element) ?? anchor;
+          group ?? fallbackGroup ?? (anchor.parentElement as Element) ?? anchor;
 
         // Step 3: scan scope for "N% back" matches. Return max.
         const text =
@@ -1308,25 +1420,27 @@ async function verifyTargetCashback(
       detail: 'diag' in hit ? JSON.stringify(hit.diag).slice(0, 600) : undefined,
     };
   }
-  const diagSummary = ((): string => {
-    const parts: string[] = [];
-    if ('groupFound' in hit) parts.push(`group=${hit.groupFound}`);
-    if ('walkDepth' in hit) parts.push(`depth=${hit.walkDepth}`);
-    if ('scopeChars' in hit) parts.push(`scope=${hit.scopeChars}ch`);
-    if ('bodyMatches' in hit)
-      parts.push(`body=[${(hit.bodyMatches ?? []).join(',')}]`);
-    if ('scopeMatches' in hit)
-      parts.push(`inScope=[${(hit.scopeMatches ?? []).join(',')}]`);
-    if ('scopeStart' in hit)
-      parts.push(`head="${(hit.scopeStart ?? '').slice(0, 60)}"`);
-    return parts.join(' · ');
-  })();
+  const diag: CashbackDiag = {
+    groupFound: hit.groupFound,
+    walkDepth: hit.walkDepth,
+    scopeChars: hit.scopeChars,
+    scopeMatches: hit.scopeMatches,
+    bodyMatches: hit.bodyMatches,
+    scopeStart: hit.scopeStart,
+  };
+  const diagSummary =
+    `group=${diag.groupFound} · depth=${diag.walkDepth} · ` +
+    `scope=${diag.scopeChars}ch · ` +
+    `body=[${diag.bodyMatches.join(',')}] · ` +
+    `inScope=[${diag.scopeMatches.join(',')}] · ` +
+    `head="${diag.scopeStart.slice(0, 80)}"`;
   if (hit.pct === null) {
     return {
       ok: false,
       reason: `no "N% back" shown on target ${targetAsin} line item`,
       pct: null,
       detail: diagSummary,
+      diag,
     };
   }
   if (hit.pct < minPct) {
@@ -1335,9 +1449,10 @@ async function verifyTargetCashback(
       reason: `target cashback ${hit.pct}% below threshold ${minPct}%`,
       pct: hit.pct,
       detail: diagSummary,
+      diag,
     };
   }
-  return { ok: true, pct: hit.pct };
+  return { ok: true, pct: hit.pct, diag };
 }
 
 type TargetPriceResult =
@@ -1359,10 +1474,11 @@ type TargetPriceResult =
 async function verifyTargetLineItemPrice(
   page: Page,
   targetAsin: string,
+  targetTitle: string | null,
   cap: number,
 ): Promise<TargetPriceResult> {
-  // Scroll the iPad (often rendered at the bottom of a multi-shipment
-  // Chewbacca cart) into view so its line item is in the DOM.
+  // Scroll the target into view so its line item is in the DOM
+  // (Chewbacca virtualizes long lists — target may be lazy-rendered).
   await page
     .locator(`a[href*="${targetAsin}"]`)
     .first()
@@ -1375,40 +1491,63 @@ async function verifyTargetLineItemPrice(
     )
     .catch(() => undefined);
 
+  // Chewbacca /spc doesn't expose ASINs in the DOM, so fall back to
+  // title-prefix text-node match when no /dp/<asin> link is present.
+  // Same strategy as verifyTargetCashback + readTargetQuantity.
+  const titlePrefix =
+    targetTitle !== null
+      ? targetTitle.replace(/\s+/g, ' ').trim().slice(0, 40).replace(/["'\\]/g, '')
+      : null;
+
   const hit = await page
     .evaluate(
-      ({ asin, containerSelectors }) => {
-        const containers = Array.from(
-          document.querySelectorAll(containerSelectors.join(',')),
+      ({ asin, title }) => {
+        // Step 1: try ASIN-based locators (classic /spc).
+        let link: Element | null = document.querySelector(
+          `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"]`,
         );
 
-        const matchesAsin = (el: Element): boolean => {
-          if (el.querySelector(`a[href*="/dp/${asin}"]`)) return true;
-          if (el.querySelector(`a[href*="/gp/product/${asin}"]`)) return true;
-          const attr = el.getAttribute('data-asin');
-          if (attr && attr === asin) return true;
-          if (el.querySelector(`[data-asin="${asin}"]`)) return true;
-          return false;
-        };
-
-        let target: Element | null = null;
-        for (const c of containers) {
-          if (matchesAsin(c)) {
-            target = c;
-            break;
+        // Step 2: Chewbacca fallback — match the product title as a
+        // text node, take its parent as the target anchor.
+        if (!link && title && title.length > 5) {
+          const needle = title.toLowerCase();
+          const walker = document.createTreeWalker(
+            document.body,
+            NodeFilter.SHOW_TEXT,
+            null,
+          );
+          let n: Node | null;
+          // eslint-disable-next-line no-cond-assign
+          while ((n = walker.nextNode())) {
+            const txt = ((n as Text).textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLowerCase();
+            if (txt.length > 5 && txt.startsWith(needle)) {
+              link = n.parentElement;
+              break;
+            }
           }
         }
-        // data-asin might live on an ancestor the container-selector didn't
-        // catch — walk up from any matching link.
+        if (!link) return { found: false as const };
+
+        // Walk up to the enclosing line-item container — try known
+        // classes first, then fall back to nearest ancestor with a
+        // price element inside.
+        let target: Element | null =
+          link.closest(
+            '.lineitem-container, [data-feature-id*="line-item"], .order-summary-line-item',
+          ) ?? null;
         if (!target) {
-          const link = document.querySelector(
-            `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"]`,
-          );
-          if (link) {
-            target =
-              link.closest(
-                '.lineitem-container, [data-feature-id*="line-item"], .order-summary-line-item',
-              ) ?? link.closest('[data-asin]') ?? null;
+          let el: Element | null = link.parentElement;
+          let depth = 0;
+          while (el && el !== document.body && depth < 10) {
+            if (el.querySelector('.a-price, .lineitem-price-text, .a-color-price')) {
+              target = el;
+              break;
+            }
+            el = el.parentElement;
+            depth++;
           }
         }
         if (!target) return { found: false as const };
@@ -1421,14 +1560,7 @@ async function verifyTargetLineItemPrice(
         const text = priceEl ? (priceEl.textContent ?? '').trim() : '';
         return { found: true as const, text };
       },
-      {
-        asin: targetAsin,
-        containerSelectors: [
-          '.lineitem-container',
-          '[data-feature-id*="line-item"]',
-          '.order-summary-line-item',
-        ],
-      },
+      { asin: targetAsin, title: titlePrefix },
     )
     .catch(() => ({ found: false as const }));
 
@@ -1452,10 +1584,14 @@ async function verifyTargetLineItemPrice(
       reason: `could not parse target price from "${hit.text}"`,
     };
   }
-  if (n > cap) {
+  const tol = effectivePriceTolerance(cap);
+  if (n > cap + tol) {
     return {
       ok: false,
-      reason: `target price $${n.toFixed(2)} exceeds cap $${cap.toFixed(2)}`,
+      reason:
+        tol > 0
+          ? `target price $${n.toFixed(2)} exceeds cap $${cap.toFixed(2)} (+$${tol.toFixed(2)} tolerance)`
+          : `target price $${n.toFixed(2)} exceeds cap $${cap.toFixed(2)}`,
       detail: hit.text,
     };
   }

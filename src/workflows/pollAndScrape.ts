@@ -59,6 +59,17 @@ type Deps = {
   listEligibleProfiles: () => Promise<AmazonProfile[]>;
   /** Persistence for the jobs table — created on fan-out, updated as profiles run. */
   jobAttempts: JobAttemptStore;
+  /**
+   * Optional: look up a session for this profile that lives OUTSIDE
+   * the worker's own sessions map — e.g. a "View Order" window the
+   * user opened from the Jobs table. Chromium holds a per-profile
+   * SingletonLock on the userDataDir, so if such a window exists and
+   * we blindly call openSession() we'll fail with "profile in use".
+   * Reusing the existing context (new tab inside it) is always safe.
+   *
+   * Return null when nothing is open for this profile.
+   */
+  findExistingSession?: (email: string) => DriverSession | null;
 };
 
 export type WorkerHandle = {
@@ -179,7 +190,7 @@ async function runVerifyFillerCleanup(
         terminalRefusal = true;
         break;
       }
-      if (tryN < MAX_TRIES) await page.waitForTimeout(2_500);
+      if (tryN < MAX_TRIES) await page.waitForTimeout(8_000);
     }
     if (cancelled) fillerOrdersCancelled.push(fillerOrderId);
     else {
@@ -255,6 +266,7 @@ async function runFillerBuyWithRetries(
   deps: Deps,
   job: AutoGJob,
   cid: string,
+  onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
   let lastRaw: BuyWithFillersResult = {
     ok: false,
@@ -276,6 +288,7 @@ async function runFillerBuyWithRetries(
       minCashbackPct: deps.minCashbackPct,
       dryRun: deps.buyDryRun,
       correlationId: `${cid}/attempt-${attempt}`,
+      onStage,
     });
     if (lastRaw.ok) {
       if (attempt > 1) {
@@ -407,20 +420,26 @@ export function startWorker(deps: Deps): WorkerHandle {
         backoffMs = Math.min(backoffMs * 2, 60_000);
       }
     }
-    for (const [email, s] of sessions) {
-      try {
-        await s.close();
-      } catch (err) {
-        logger.warn('session.close.error', { email, error: String(err) });
-      }
-    }
+    await closeAllSessions(sessions);
     logger.info('worker.stop');
   })();
 
   return {
     async stop() {
+      // Flip the running flag so the polling loop stops claiming new
+      // jobs, then proactively close every open session. Closing the
+      // BrowserContexts makes any in-flight Playwright op throw
+      // immediately (page.click, page.goto, waitForSelector, etc.),
+      // which the loop catches + logs, iterates once, then exits via
+      // the `while (running)` gate. That means pressing Stop aborts
+      // the current buy within a second or two instead of waiting
+      // for the 60–300 s filler flow to finish on its own.
+      //
+      // We don't await `loop` — the renderer's Stop click should
+      // return immediately so the UI unblocks. The loop drains its
+      // in-flight work in the background.
       running = false;
-      await loop;
+      await closeAllSessions(sessions);
     },
     async openProfileTab(email, url) {
       const session = sessions.get(email);
@@ -495,6 +514,7 @@ async function handleJob(
         trackingIds: null,
         fillerOrderIds: null,
         productTitle: null,
+        stage: null,
       }),
     ),
   );
@@ -1312,22 +1332,22 @@ async function runForProfile(
           cashbackPct: info.cashbackPct,
         })
         .catch(() => undefined);
-      // Close the window for terminal/conclusive failure reasons — nothing
-      // for the user to debug visually. Other reasons (e.g. price_too_high,
-      // not_prime) leave the window open in case the user wants to inspect.
-      if (report.reason === 'quantity_limit') {
-        logger.info(
-          'job.profile.fail.cleanup',
-          {
-            jobId: job.id,
-            profile,
-            reason: report.reason,
-            message: 'Closing browser window — quantity limit is terminal for this account/seller',
-          },
-          cid,
-        );
-        await closeAndForgetSession(sessions, profile);
-      }
+      // Close the window on every verify failure. Multi-profile runs
+      // stack up a headed Chromium per account that never ran the buy
+      // flow, which is visually noisy and eats memory. The failure
+      // reason is captured in the attempt row + snapshot, so nothing
+      // is lost by closing.
+      logger.info(
+        'job.profile.fail.cleanup',
+        {
+          jobId: job.id,
+          profile,
+          reason: report.reason,
+          message: `Closing browser window after verify failure (${report.reason})`,
+        },
+        cid,
+      );
+      await closeAndForgetSession(sessions, profile);
       return failed(profile, error);
     }
     logger.info('step.verify.ok', { jobId: job.id, profile }, cid);
@@ -1341,8 +1361,14 @@ async function runForProfile(
     let buy: BuyResult;
     let fillerOrderIds: string[] = [];
     let productTitle: string | null = null;
+    // Persist the Place-Order stage on the attempt so the recovery
+    // sweep can tell "stopped in a safe re-runnable phase" from
+    // "stopped mid-Place-Order" (which Amazon may or may not have
+    // accepted and must not be auto-retried).
+    const onStage = (stage: 'placing' | null): Promise<void> =>
+      deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
     if (deps.buyWithFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;
@@ -1354,6 +1380,7 @@ async function runForProfile(
         allowedAddressPrefixes: deps.allowedAddressPrefixes,
         correlationId: cid,
         debugDir: deps.debugDir,
+        onStage,
       });
     }
 
@@ -1373,6 +1400,17 @@ async function runForProfile(
           cashbackPct: info.cashbackPct,
         })
         .catch(() => undefined);
+      logger.info(
+        'job.profile.fail.cleanup',
+        {
+          jobId: job.id,
+          profile,
+          stage: buy.stage,
+          message: `Closing browser window after buy failure (${buy.stage})`,
+        },
+        cid,
+      );
+      await closeAndForgetSession(sessions, profile);
       return failed(profile, error);
     }
 
@@ -1435,10 +1473,16 @@ async function runForProfile(
     const finalStatus: JobAttemptStatus = buy.dryRun
       ? 'dry_run_success'
       : 'awaiting_verification';
+    // Retail price source: Amazon's confirmation page first (reflects any
+    // mid-flow delivery-price bumps), PDP scrape as fallback when the
+    // confirmation parser doesn't find a price element. Used for BOTH
+    // the local attempt row AND the /status report to BG — keeping them
+    // in sync means the server copy can repopulate a fresh install.
+    const retailPriceText = buy.finalPriceText ?? info.priceText;
     await deps.jobAttempts
       .update(attemptId, {
         status: finalStatus,
-        cost: buy.finalPriceText ?? info.priceText,
+        cost: retailPriceText,
         cashbackPct: buy.cashbackPct,
         orderId: buy.orderId,
         // Actual quantity picked at /spc — replaces the BG-requested
@@ -1456,7 +1500,7 @@ async function runForProfile(
       email: profile,
       status: 'completed',
       orderId: buy.orderId,
-      placedPrice: buy.finalPriceText,
+      placedPrice: retailPriceText,
       placedCashbackPct: buy.cashbackPct,
       placedAt,
       placedQuantity: buy.quantity,
@@ -1471,6 +1515,7 @@ async function runForProfile(
     await deps.jobAttempts
       .update(attemptId, { status: 'failed', error: message })
       .catch(() => undefined);
+    await closeAndForgetSession(sessions, profile);
     return failed(profile, message);
   } finally {
     // Do NOT close the page — it's the session's only tab and closing it
@@ -1520,6 +1565,14 @@ function friendlyJobError(raw: string, profile: string): string {
   return raw;
 }
 
+/**
+ * Sessions we borrowed from outside the worker (e.g. a user-opened
+ * "View Order" window). These are tracked separately so the worker's
+ * own close paths never shut down a context another part of the app
+ * still depends on — we just drop our reference to it.
+ */
+const borrowedSessions = new WeakSet<DriverSession>();
+
 async function getSession(
   deps: Deps,
   sessions: Map<string, DriverSession>,
@@ -1528,6 +1581,19 @@ async function getSession(
 ): Promise<DriverSession> {
   const existing = sessions.get(profile);
   if (existing) return existing;
+  // Before launching a fresh persistent context, see if another part
+  // of the app already has one open for this profile (e.g. a "View
+  // Order" window the user clicked open). Chromium's SingletonLock
+  // only allows one process per userDataDir, so a blind openSession
+  // call would fail with "profile in use by another open window"
+  // — which is exactly what happens on manual force-verify when the
+  // user still has an order tab open. Reuse the existing context.
+  const external = deps.findExistingSession?.(profile) ?? null;
+  if (external) {
+    borrowedSessions.add(external);
+    sessions.set(profile, external);
+    return external;
+  }
   // Per-profile value wins over the global fallback. Undefined (caller
   // didn't pass) means no per-profile preference known → use global.
   const headless = headlessOverride ?? deps.headless;
@@ -1546,11 +1612,37 @@ async function closeAndForgetSession(
   const s = sessions.get(profile);
   if (!s) return;
   sessions.delete(profile);
+  // Borrowed sessions are owned elsewhere — dropping our map entry
+  // is enough. Calling close() would kill the user's "View Order"
+  // window (or whatever external thing opened the context).
+  if (borrowedSessions.has(s)) return;
   try {
     await s.close();
   } catch {
     // already closed / browser exited
   }
+}
+
+/**
+ * Close every session in the map in parallel. Swallows individual
+ * close errors (a context that's already gone throws, but we want to
+ * keep draining the rest of the map). Borrowed sessions (from
+ * elsewhere in the app) are dropped but not actually closed — they
+ * live past the worker's lifetime.
+ */
+async function closeAllSessions(sessions: Map<string, DriverSession>): Promise<void> {
+  const snapshot = Array.from(sessions.entries());
+  sessions.clear();
+  await Promise.allSettled(
+    snapshot.map(async ([email, s]) => {
+      if (borrowedSessions.has(s)) return;
+      try {
+        await s.close();
+      } catch (err) {
+        logger.warn('session.close.error', { email, error: String(err) });
+      }
+    }),
+  );
 }
 
 /** Concurrency-limited Promise.all. Preserves input order in results. */

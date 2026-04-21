@@ -247,8 +247,23 @@ export async function cancelNonTargetItems(
     };
   }
 
+  // Poll for success/refusal banner rather than sleeping a fixed
+  // interval — Amazon's confirmation widget often spins for 5-10s
+  // after submit before rendering, and a bare sleep was too short.
+  // Returns early as soon as either outcome becomes detectable.
   await page.waitForLoadState('domcontentloaded').catch(() => undefined);
-  await page.waitForTimeout(2_500);
+  await page
+    .waitForFunction(
+      () => {
+        const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
+        const refused = /unable to cancel (?:the\s+)?(?:requested|selected|these)?\s*items?/i;
+        const ok = /cancellation (?:has been )?(?:requested|submitted|received|successful)|your cancellation request|item(?:s)? (?:has|have) been cancelled|order (?:was|has been) cancelled/i;
+        return refused.test(body) || ok.test(body);
+      },
+      undefined,
+      { timeout: 15_000, polling: 500 },
+    )
+    .catch(() => undefined);
 
   // Same terminal-error detection as cancelFillerOrder.
   const notCancellable = await page
