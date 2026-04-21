@@ -137,6 +137,8 @@ function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
     buyMode: 'single',
     dryRun: false,
     trackingIds: s.trackingIds ?? null,
+    fillerOrderIds: null,
+    productTitle: null,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
@@ -194,6 +196,18 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
         attemptId: l.attemptId,
         dryRun: l.dryRun,
         trackingIds: serverHasCodes ? existing.trackingIds : l.trackingIds,
+        // Keep a locally-captured retail price visible even if the
+        // /status POST never persisted it on BG (older rows, transient
+        // sync failure, or a buy whose confirmation parser didn't find
+        // a final price — local still has the PDP fallback).
+        cost: existing.cost ?? l.cost,
+        // BG doesn't track filler-mode on AutoBuyPurchase, so the server
+        // row is always 'single'. The local attempt knows whether the
+        // buy actually ran through buyWithFillers — prefer it for the
+        // Buy Mode column + the filler-only context fields.
+        buyMode: l.buyMode,
+        fillerOrderIds: l.fillerOrderIds,
+        productTitle: l.productTitle,
       });
     } else {
       merged.set(k, l);
@@ -203,6 +217,133 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
   return Array.from(merged.values()).sort((a, b) =>
     b.createdAt.localeCompare(a.createdAt),
   );
+}
+
+/**
+ * Resolve every local attempt that was actively executing (`in_progress`)
+ * when the worker stopped or crashed. Routes each one based on the
+ * `stage` flag the worker writes around the Place Order click:
+ *
+ *   - stage === 'placing' → "unknown outcome" zone. Amazon may or
+ *     may not have accepted the click, so auto-retry would risk a
+ *     duplicate order. Flip to `failed` with a manual-review error
+ *     and POST per-purchase failure to BG so the dashboard shows it.
+ *
+ *   - stage !== 'placing' → safe to retry from scratch. Reset the
+ *     local row to `queued` and call BG's /requeue so the job goes
+ *     back into the claim queue immediately (bypasses BG's 10-min
+ *     stale-claim timeout). Worker picks it up on next poll.
+ *
+ * `queued` attempts are intentionally untouched — the corresponding
+ * BG job was never claimed by this run, so the natural claim cycle
+ * will re-issue it on restart.
+ *
+ * Called from every stop path: the Stop button, app close / before-quit,
+ * disconnect, and startup (to recover crash casualties). Idempotent.
+ *
+ * We don't await the in-flight worker loop before running this sweep.
+ * Any natural failure write that lands afterwards (e.g. a Playwright
+ * "Target closed" error caught by runForProfile) will overwrite our
+ * entry with the true reason — "latest update wins" is correct.
+ */
+async function abortPendingAttempts(reason: string): Promise<void> {
+  const all = await storeListAttempts();
+  const running = all.filter((a) => a.status === 'in_progress');
+  if (running.length === 0) return;
+
+  const unsafe = running.filter((a) => a.stage === 'placing');
+  const safe = running.filter((a) => a.stage !== 'placing');
+  logger.info('abort.pending.sweep.start', {
+    count: running.length,
+    unsafe: unsafe.length,
+    safe: safe.length,
+    reason,
+  });
+
+  const manualReviewMsg = `${reason} — stopped mid-Place-Order; Amazon may or may not have accepted the order, manual review required`;
+
+  for (const a of unsafe) {
+    await storeUpdateAttempt(a.attemptId, {
+      status: 'failed',
+      error: manualReviewMsg,
+    }).catch(() => undefined);
+  }
+  for (const a of safe) {
+    // Reset cleanly so the next claim produces a fresh attempt in
+    // the same row. Clear cost/cashback/orderId too — those came
+    // from the abandoned run and don't apply to a fresh retry.
+    await storeUpdateAttempt(a.attemptId, {
+      status: 'queued',
+      error: null,
+      stage: null,
+      cost: null,
+      cashbackPct: null,
+      orderId: null,
+    }).catch(() => undefined);
+  }
+
+  if (apiKey) {
+    const settings = await loadSettings();
+    const bg = createBGClient(settings.bgBaseUrl, apiKey);
+
+    // Unsafe rows: report failure to BG so the dashboard flags them.
+    const unsafeByJob = new Map<string, JobAttempt[]>();
+    for (const a of unsafe) {
+      const arr = unsafeByJob.get(a.jobId) ?? [];
+      arr.push(a);
+      unsafeByJob.set(a.jobId, arr);
+    }
+    const queuedJobIds = new Set(
+      all.filter((a) => a.status === 'queued').map((a) => a.jobId),
+    );
+    for (const [jobId, items] of unsafeByJob) {
+      const phase = items[0]!.phase;
+      const jobStatus = queuedJobIds.has(jobId) ? ('partial' as const) : ('failed' as const);
+      const body =
+        phase === 'buy'
+          ? {
+              status: jobStatus,
+              error: manualReviewMsg,
+              purchases: items.map((a) => ({
+                amazonEmail: a.amazonEmail,
+                status: 'failed' as const,
+                error: manualReviewMsg,
+              })),
+            }
+          : { status: jobStatus, error: manualReviewMsg };
+      try {
+        await bg.reportStatus(jobId, body);
+      } catch (err) {
+        logger.warn('abort.bg.report.error', {
+          jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Safe rows: requeue on BG so the worker can re-claim without
+    // waiting the 10-minute stale-claim timeout. One requeue per
+    // unique jobId — multiple profiles on the same job share one job
+    // row on BG, so one call unblocks all of them.
+    const safeJobIds = new Set(safe.map((a) => a.jobId));
+    for (const jobId of safeJobIds) {
+      try {
+        await bg.requeueJob(jobId);
+      } catch (err) {
+        logger.warn('abort.bg.requeue.error', {
+          jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  scheduleBroadcastJobs();
+  logger.info('abort.pending.sweep.done', {
+    count: running.length,
+    unsafe: unsafe.length,
+    safe: safe.length,
+  });
 }
 
 function profileDir(): string {
@@ -283,12 +424,21 @@ async function startWorkerNow(): Promise<void> {
     snapshotGroups: settings.snapshotGroups,
     headless: settings.headless,
     buyDryRun: settings.buyDryRun,
+    buyWithFillers: settings.buyWithFillers,
     minCashbackPct: settings.minCashbackPct,
     allowedAddressPrefixes: settings.allowedAddressPrefixes,
     listEligibleProfiles: async () => {
       const list = await loadProfiles();
       return list.filter((p) => p.enabled && p.loggedIn);
     },
+    // Lets the worker see Chromium contexts opened elsewhere in the
+    // app (currently just the "View Order" click). Without this, a
+    // manual force-verify while the user still has an order tab open
+    // fails with "profile in use by another open window" — Chromium's
+    // SingletonLock on the userDataDir only permits one process per
+    // profile. Reusing the existing context avoids that lock entirely.
+    findExistingSession: (email) =>
+      openOrderSessions.get(email)?.session ?? null,
     jobAttempts: {
       async create(partial) {
         const a = await storeCreateAttempt(partial);
@@ -335,6 +485,14 @@ app.whenReady().then(async () => {
   createWindow();
   broadcastStatus();
 
+  // Anything still queued / in_progress at launch is a crash casualty
+  // from a previous session — the worker isn't running yet, nothing is
+  // going to finish those attempts on its own. Mark them failed so the
+  // Jobs table doesn't show stale "Pending" rows forever.
+  await abortPendingAttempts('AmazonG exited mid-run (recovered at startup)').catch(
+    (err) => logger.warn('abort.startup.error', { error: String(err) }),
+  );
+
   // Auto-start the worker if the setting is on AND we have a connected
   // identity. Wrap in try/catch so a missing-identity case (e.g. the user
   // disconnected, then enabled auto-start, then relaunched) doesn't crash
@@ -376,6 +534,7 @@ app.on('window-all-closed', async () => {
  * (openOrderSessions), and any other long-lived sessions we spawn.
  */
 async function closeAllChromiumSessions(): Promise<void> {
+  const hadWorker = worker !== null;
   if (worker) {
     try {
       await worker.stop();
@@ -384,9 +543,14 @@ async function closeAllChromiumSessions(): Promise<void> {
     }
     worker = null;
   }
+  if (hadWorker) {
+    await abortPendingAttempts('AmazonG closed mid-run').catch((err) => {
+      logger.warn('abort.pending.error', { error: String(err) });
+    });
+  }
   const orderSessions = Array.from(openOrderSessions.values());
   openOrderSessions.clear();
-  await Promise.all(
+  await Promise.allSettled(
     orderSessions.map(async ({ session }) => {
       try {
         await session.close();
@@ -439,6 +603,7 @@ function registerIpcHandlers(): void {
     if (worker) {
       await worker.stop();
       worker = null;
+      await abortPendingAttempts('stopped by user (disconnect)');
     }
     identity = null;
     apiKey = null;
@@ -453,6 +618,7 @@ function registerIpcHandlers(): void {
     if (!worker) return;
     await worker.stop();
     worker = null;
+    await abortPendingAttempts('stopped by user');
     broadcastStatus();
   });
 
@@ -523,6 +689,15 @@ function registerIpcHandlers(): void {
     IPC.profilesSetHeadless,
     async (_e, email: string, headless: boolean) => {
       const list = await updateProfile(email, { headless });
+      await broadcastProfiles(list);
+      return list;
+    },
+  );
+
+  ipcMain.handle(
+    IPC.profilesSetBuyWithFillers,
+    async (_e, email: string, buyWithFillers: boolean) => {
+      const list = await updateProfile(email, { buyWithFillers });
       await broadcastProfiles(list);
       return list;
     },

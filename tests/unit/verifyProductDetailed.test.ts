@@ -54,6 +54,43 @@ describe('verifyProductDetailed', () => {
     expect(report.steps.map((s) => s.name)).toEqual(['inStock']);
   });
 
+  it('allows price up to $1 over the cap (Amazon .99 pricing pattern)', () => {
+    const report = verifyProductDetailed(
+      info({ price: 399.99, priceText: '$399.99' }),
+      { ...defaults, maxPrice: 399 },
+    );
+    expect(report.ok).toBe(true);
+    const priceStep = report.steps.find((s) => s.name === 'price');
+    expect(priceStep?.pass).toBe(true);
+  });
+
+  it('rejects price more than $1 over the cap', () => {
+    const report = verifyProductDetailed(
+      info({ price: 400.01, priceText: '$400.01' }),
+      { ...defaults, maxPrice: 399 },
+    );
+    expect(report.ok).toBe(false);
+    expect(report.reason).toBe('price_too_high');
+  });
+
+  it('applies NO tolerance when cap is below $100 (strict comparison)', () => {
+    // $50.99 vs $50 cap — for cheap items we want strict, no slack.
+    const report = verifyProductDetailed(
+      info({ price: 50.99, priceText: '$50.99' }),
+      { ...defaults, maxPrice: 50 },
+    );
+    expect(report.ok).toBe(false);
+    expect(report.reason).toBe('price_too_high');
+  });
+
+  it('exact-match on sub-$100 caps still passes', () => {
+    const report = verifyProductDetailed(
+      info({ price: 50, priceText: '$50.00' }),
+      { ...defaults, maxPrice: 50 },
+    );
+    expect(report.ok).toBe(true);
+  });
+
   it('records observed vs expected on a price fail', () => {
     const report = verifyProductDetailed(info({ price: 500, priceText: '$500.00' }), {
       ...defaults,
@@ -63,7 +100,7 @@ describe('verifyProductDetailed', () => {
     expect(priceStep).toMatchObject({
       pass: false,
       observed: '$500.00',
-      expected: '≤ $400.00',
+      expected: '≤ $400.00 (+$1.00 tol)',
       reason: 'price_too_high',
     });
   });

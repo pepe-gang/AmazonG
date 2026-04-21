@@ -20,6 +20,7 @@ const DEFAULTS: Settings = {
   jobsStatusFilter: [],
   snapshotOnFailure: false,
   snapshotGroups: [],
+  buyWithFillers: false,
 };
 
 function filePath(): string {

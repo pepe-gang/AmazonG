@@ -58,6 +58,19 @@ export const DEFAULT_CONSTRAINTS: Omit<Constraints, 'maxPrice'> = {
 };
 
 /**
+ * Dollar slack on maxPrice comparisons. Only applied when the cap is
+ * ≥ $100 — BG typically sends whole-dollar caps (e.g. $399.00) and
+ * Amazon prices end in .99 / .95, so a strict `price <= cap` would
+ * reject a $399.99 buy against a $399 cap over 99 cents. For cheap
+ * items (cap < $100) we keep strict comparison — a $1 gap is a
+ * meaningful percentage of a $20 item and usually a signal the deal
+ * is mispriced or stale.
+ */
+export function effectivePriceTolerance(cap: number): number {
+  return cap >= 100 ? 1.0 : 0;
+}
+
+/**
  * Runs every configured check in order and returns a full report of each
  * step's outcome (pass/fail/skipped). Use this when you want granular
  * logging of "which checks ran and which fired a failure" — the workflow
@@ -131,17 +144,25 @@ export function verifyProductDetailed(
       steps.push(step);
       return { ok: false, reason: step.reason, detail: step.detail, steps };
     }
-    const pass = info.price <= cap;
+    const tol = effectivePriceTolerance(cap);
+    const pass = info.price <= cap + tol;
+    const expected =
+      tol > 0
+        ? `≤ $${cap.toFixed(2)} (+$${tol.toFixed(2)} tol)`
+        : `≤ $${cap.toFixed(2)}`;
     const step: CheckStep = {
       name: 'price',
       pass,
       observed: info.priceText ?? `$${info.price}`,
-      expected: `≤ $${cap.toFixed(2)}`,
+      expected,
       ...(pass
         ? {}
         : {
             reason: 'price_too_high' as VerifyReason,
-            detail: `${info.priceText ?? `$${info.price}`} exceeds max $${cap.toFixed(2)}`,
+            detail:
+              tol > 0
+                ? `${info.priceText ?? `$${info.price}`} exceeds max $${cap.toFixed(2)} (+$${tol.toFixed(2)} tolerance)`
+                : `${info.priceText ?? `$${info.price}`} exceeds max $${cap.toFixed(2)}`,
           }),
     };
     steps.push(step);
@@ -286,11 +307,15 @@ export function checkProductConstraints(
     if (info.price === null) {
       return { ok: false, reason: 'price_unknown', detail: 'Out of stock' };
     }
-    if (info.price > c.maxPrice) {
+    const tol = effectivePriceTolerance(c.maxPrice);
+    if (info.price > c.maxPrice + tol) {
       return {
         ok: false,
         reason: 'price_too_high',
-        detail: `${info.priceText ?? `$${info.price}`} exceeds max $${c.maxPrice.toFixed(2)}`,
+        detail:
+          tol > 0
+            ? `${info.priceText ?? `$${info.price}`} exceeds max $${c.maxPrice.toFixed(2)} (+$${tol.toFixed(2)} tolerance)`
+            : `${info.priceText ?? `$${info.price}`} exceeds max $${c.maxPrice.toFixed(2)}`,
       };
     }
   }

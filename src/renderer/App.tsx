@@ -534,10 +534,42 @@ function resolveColumnOrder(saved: string[]): JobColumnId[] {
 }
 
 /**
+ * Parse a formatted price string like "$399.99" (or "USD 399.99", or
+ * "$1,299.95") into a number. Returns null for anything that doesn't
+ * parse cleanly.
+ */
+function parseCost(cost: string | null): number | null {
+  if (!cost) return null;
+  const cleaned = cost.replace(/[^0-9.]/g, '');
+  if (!cleaned) return null;
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Effective retail price for a row: the actual Amazon /spc price we
+ * captured at buy time (`cost`) when available, otherwise BG's retail
+ * cap (`maxPrice`) as a fallback. Legacy rows placed before we started
+ * capturing `cost` have no /spc price on file — falling back to BG's
+ * cap is close enough for the Profit calc and avoids leaving the
+ * column blank on every old row.
+ */
+function retailPrice(a: JobAttempt): number | null {
+  const actual = parseCost(a.cost);
+  if (actual !== null) return actual;
+  return typeof a.maxPrice === 'number' && a.maxPrice > 0 ? a.maxPrice : null;
+}
+
+/**
  * Per-row profit: BG pays us `payout` per unit, we pay Amazon `retail`,
  * and Amazon refunds `cashbackPct` of retail. So per unit:
  *   profit = payout - retail × (1 - cashback%)
  * Multiplied by quantity (units we ordered).
+ *
+ * Retail is the ACTUAL Amazon price we paid (`a.cost`, captured from
+ * /spc at buy time), not BG's max-pay cap (`a.maxPrice`). If cost is
+ * unset we skip the calc — we don't want to show a profit number
+ * built on the cap when the true price might have been different.
  *
  * Only computes for verified ("Success") orders — that's the one status
  * where we know:
@@ -549,7 +581,7 @@ function resolveColumnOrder(saved: string[]): JobColumnId[] {
  */
 function computeProfit(a: JobAttempt): number | null {
   if (a.status !== 'verified') return null;
-  const retail = typeof a.maxPrice === 'number' ? a.maxPrice : null;
+  const retail = retailPrice(a);
   const payout = typeof a.price === 'number' ? a.price : null;
   const qty = typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : null;
   const cb = typeof a.cashbackPct === 'number' ? a.cashbackPct : null;
@@ -621,12 +653,16 @@ function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
     case 'account': return a.amazonEmail;
     case 'buyMode': return a.buyMode === 'filler' ? 'Filler' : 'Single';
     case 'qty':     return typeof a.quantity === 'number' ? a.quantity : '';
-    case 'retail':  return typeof a.maxPrice === 'number' ? a.maxPrice.toFixed(2) : '';
+    case 'retail': {
+      const n = retailPrice(a);
+      return n !== null ? n.toFixed(2) : '';
+    }
     case 'totalRetail': {
-      if (typeof a.maxPrice !== 'number' || typeof a.quantity !== 'number' || a.quantity <= 0) {
+      const n = retailPrice(a);
+      if (n === null || typeof a.quantity !== 'number' || a.quantity <= 0) {
         return '';
       }
-      return (a.maxPrice * a.quantity).toFixed(2);
+      return (n * a.quantity).toFixed(2);
     }
     case 'payout':  return typeof a.price === 'number' ? a.price.toFixed(2) : '';
     case 'cb':      return typeof a.cashbackPct === 'number' ? a.cashbackPct : '';
@@ -855,18 +891,20 @@ function JobsTable({
         case 'buyMode':
           return (a.buyMode ?? 'single').localeCompare(b.buyMode ?? 'single');
         case 'retail': {
-          const an = typeof a.maxPrice === 'number' ? a.maxPrice : null;
-          const bn = typeof b.maxPrice === 'number' ? b.maxPrice : null;
+          const an = retailPrice(a);
+          const bn = retailPrice(b);
           if (an === null && bn === null) return 0;
           if (an === null) return 1;
           if (bn === null) return -1;
           return an - bn;
         }
         case 'totalRetail': {
-          const totalRetail = (x: JobAttempt) =>
-            typeof x.maxPrice === 'number' && typeof x.quantity === 'number' && x.quantity > 0
-              ? x.maxPrice * x.quantity
+          const totalRetail = (x: JobAttempt) => {
+            const unit = retailPrice(x);
+            return unit !== null && typeof x.quantity === 'number' && x.quantity > 0
+              ? unit * x.quantity
               : null;
+          };
           const an = totalRetail(a);
           const bn = totalRetail(b);
           if (an === null && bn === null) return 0;
@@ -1572,17 +1610,20 @@ function JobsCell({
           {typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : <span className="muted">—</span>}
         </td>
       );
-    case 'retail':
+    case 'retail': {
+      const n = retailPrice(a);
       return (
         <td className="cell-retail">
-          {typeof a.maxPrice === 'number' ? `$${a.maxPrice.toFixed(2)}` : <span className="muted">—</span>}
+          {n !== null ? `$${n.toFixed(2)}` : <span className="muted">—</span>}
         </td>
       );
+    }
     case 'totalRetail': {
-      const ok = typeof a.maxPrice === 'number' && typeof a.quantity === 'number' && a.quantity > 0;
+      const unit = retailPrice(a);
+      const ok = unit !== null && typeof a.quantity === 'number' && a.quantity > 0;
       return (
         <td className="cell-retail">
-          {ok ? `$${(a.maxPrice! * a.quantity!).toFixed(2)}` : <span className="muted">—</span>}
+          {ok ? `$${(unit! * a.quantity!).toFixed(2)}` : <span className="muted">—</span>}
         </td>
       );
     }
@@ -1611,7 +1652,7 @@ function JobsCell({
           ) : (
             <span
               className={p >= 0 ? 'profit-good' : 'profit-bad'}
-              title={`payout ${a.price} − retail ${a.maxPrice} × (1 − ${a.cashbackPct}% cb) × qty ${a.quantity}`}
+              title={`payout ${a.price} − retail ${retailPrice(a) ?? '?'} × (1 − ${a.cashbackPct}% cb) × qty ${a.quantity}`}
             >
               {p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(2)}
             </span>
@@ -1963,7 +2004,7 @@ function AccountsView({
         <AllowedPrefixesPanel />
         <HeadlessTogglePanel profiles={profiles} />
         <AutoStartWorkerPanel />
-        <FillerModePanel />
+        <BuyWithFillersPanel />
         <SnapshotSettingsPanel />
         <AccountsList profiles={profiles} />
       </div>
@@ -2016,25 +2057,34 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function FillerModePanel() {
+function BuyWithFillersPanel() {
+  const { settings, busy, update } = useSettings();
+  if (!settings) return null;
+  const on = settings.buyWithFillers;
   return (
-    <div className="prefix-panel filler-panel-locked">
+    <div className="prefix-panel">
       <div className="prefix-head">
         <div>
-          <div className="prefix-title">
-            Buy with Fillers
-            <span className="coming-soon-badge">Coming soon</span>
-          </div>
+          <div className="prefix-title">Buy with Fillers</div>
           <div className="prefix-sub">
-            When enabled, AmazonG checks out the target item alongside multiple filler items to
-            meet minimum order thresholds. Filler items are automatically cancelled after the order
-            is verified. This mode shows as &quot;Filler&quot; in the Buy Mode column.
+            When on, every account&apos;s buy phase places the target item alongside ~10 random
+            Prime fillers, then cancels the fillers once the order is verified. Applies globally
+            to all enabled accounts. Caps worker concurrency to 1 account at a time. Shows as
+            &quot;Filler&quot; in the Buy Mode column. Takes effect on the next worker Start.
           </div>
         </div>
-        <label className="toggle off" title="Coming soon — this feature is not yet available">
-          <input type="checkbox" checked={false} disabled />
+        <label
+          className={`toggle ${on ? 'on' : 'off'}`}
+          title={on ? 'Filler mode enabled — all accounts' : 'Filler mode disabled'}
+        >
+          <input
+            type="checkbox"
+            checked={on}
+            onChange={(e) => void update({ buyWithFillers: e.target.checked })}
+            disabled={busy}
+          />
           <span className="toggle-slider" />
-          <span className="toggle-label">Off</span>
+          <span className="toggle-label">{on ? 'On' : 'Off'}</span>
         </label>
       </div>
     </div>
@@ -2670,6 +2720,14 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                       />
                       <span className="toggle-slider" />
                       <span className="toggle-label">Headless</span>
+                    </label>
+                    <label
+                      className="toggle off"
+                      title="Buy with Fillers — coming soon"
+                    >
+                      <input type="checkbox" checked={false} disabled readOnly />
+                      <span className="toggle-slider" />
+                      <span className="toggle-label">Fillers</span>
                     </label>
                     {!p.loggedIn && (
                       <button
