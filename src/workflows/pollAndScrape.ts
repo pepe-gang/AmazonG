@@ -474,16 +474,37 @@ async function handleJob(
     await handleFetchTrackingJob(deps, sessions, job, cid, eligible);
     return;
   }
-  // Caller (worker loop) already enforces the eligibility gate, so we
-  // trust `eligible` is non-empty here.
-  const concurrency = fanoutConcurrency(deps);
+  // Rebuy path: when BG scopes a buy-phase job to a single Amazon account
+  // (placedEmail set — e.g. the user clicked Re-buy on a cancelled row),
+  // skip fan-out and run only for that account. viaFiller on a buy-phase
+  // job is a per-job override of the global toggle so a rebuy always goes
+  // through the filler flow even if buyWithFillers is off globally.
+  if (job.placedEmail) {
+    const target = job.placedEmail.toLowerCase();
+    const match = eligible.find((p) => p.email.toLowerCase() === target);
+    if (!match) {
+      const error = `rebuy target ${job.placedEmail} is not an enabled + signed-in Amazon account`;
+      logger.error('job.rebuy.no_profile', { jobId: job.id, target: job.placedEmail }, cid);
+      await deps.bg
+        .reportStatus(job.id, { status: 'failed', error })
+        .catch(() => undefined);
+      return;
+    }
+    eligible = [match];
+  }
+  const useFillers = deps.buyWithFillers || job.viaFiller;
+  const localDeps: Deps = useFillers === deps.buyWithFillers
+    ? deps
+    : { ...deps, buyWithFillers: useFillers };
+  const concurrency = fanoutConcurrency(localDeps);
   logger.info(
     'job.fanout.start',
     {
       jobId: job.id,
       profiles: eligible.map((p) => p.email),
       concurrency: Math.min(concurrency, eligible.length),
-      buyWithFillers: deps.buyWithFillers,
+      buyWithFillers: localDeps.buyWithFillers,
+      rebuy: !!job.placedEmail,
     },
     cid,
   );
@@ -509,8 +530,8 @@ async function handleJob(
         orderId: null,
         status: 'queued',
         error: null,
-        buyMode: deps.buyWithFillers ? 'filler' : 'single',
-        dryRun: deps.buyDryRun,
+        buyMode: localDeps.buyWithFillers ? 'filler' : 'single',
+        dryRun: localDeps.buyDryRun,
         trackingIds: null,
         fillerOrderIds: null,
         productTitle: null,
@@ -520,7 +541,7 @@ async function handleJob(
   );
 
   const results = await pMap(eligible, concurrency, (profile) =>
-    runForProfile(deps, sessions, job, profile, cid),
+    runForProfile(localDeps, sessions, job, profile, cid),
   );
 
   // Aggregate.
@@ -598,7 +619,7 @@ async function handleJob(
       : r.status === 'completed'
         ? ('awaiting_verification' as const)
         : ('failed' as const),
-    ...(deps.buyWithFillers && !r.dryRun && r.status === 'completed'
+    ...(localDeps.buyWithFillers && !r.dryRun && r.status === 'completed'
       ? { viaFiller: true as const }
       : {}),
     purchasedCount: r.placedQuantity,

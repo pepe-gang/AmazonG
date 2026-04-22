@@ -1278,6 +1278,15 @@ function JobsTable({
                     />
                   ))}
                   <td className="cell-actions">
+                    {a.status === 'cancelled_by_amazon' && (
+                      <RebuyButton
+                        attempt={a}
+                        onToast={(msg) => {
+                          setOrderToast(msg);
+                          setTimeout(() => setOrderToast(null), 5000);
+                        }}
+                      />
+                    )}
                     <ViewLogButton onViewLogs={() => onViewLogs(a)} />
                   </td>
                 </tr>
@@ -1721,6 +1730,48 @@ function ViewLogButton({ onViewLogs }: { onViewLogs: () => void }) {
       title="View logs for this row"
     >
       View Log
+    </button>
+  );
+}
+
+/**
+ * Per-row Re-buy action for cancelled_by_amazon attempts. Queues a new
+ * buy-phase job on BG scoped to this row's Amazon account, forced through
+ * buyWithFillers. Server-side idempotency covers button mashing — a second
+ * click returns the already-queued job.
+ */
+function RebuyButton({
+  attempt,
+  onToast,
+}: {
+  attempt: JobAttempt;
+  onToast: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const r = await window.autog.jobsRebuy(attempt.attemptId);
+      if (r.kind === 'error') {
+        onToast(`Re-buy failed: ${r.message}`);
+        return;
+      }
+      onToast(r.deduped ? 'Re-buy already queued for this account.' : 'Re-buy queued.');
+    } catch (err) {
+      onToast(`Re-buy failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      className="ghost-btn"
+      onClick={run}
+      disabled={busy}
+      title="Queue a new buy for this account, using buyWithFillers."
+    >
+      {busy ? 'Queuing…' : 'Re-buy'}
     </button>
   );
 }

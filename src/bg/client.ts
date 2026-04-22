@@ -72,6 +72,13 @@ export type BGClient = {
    * were safely mid-flow (pre-Place-Order).
    */
   requeueJob(jobId: string): Promise<void>;
+  /**
+   * Queue a rebuy for (parent buy job, amazonEmail) — always buys with
+   * fillers, scoped to the one account that got cancelled. Idempotent
+   * server-side: returns `{ deduped: true }` if a rebuy for the same
+   * pair is already queued or in-progress.
+   */
+  rebuy(buyJobId: string, amazonEmail: string): Promise<{ jobId: string; deduped: boolean }>;
 };
 
 /**
@@ -184,6 +191,18 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         `/api/autog/jobs/${encodeURIComponent(jobId)}/requeue`,
         { method: 'POST', body: JSON.stringify({}) },
       );
+    },
+
+    async rebuy(buyJobId, amazonEmail) {
+      const r = await request<{ ok: true; jobId: string; deduped?: boolean }>(
+        '/api/autog/jobs/rebuy',
+        {
+          method: 'POST',
+          body: JSON.stringify({ buyJobId, amazonEmail }),
+        },
+      );
+      if (!r) throw new BGApiError(500, '/api/autog/jobs/rebuy', 'empty response');
+      return { jobId: r.jobId, deduped: !!r.deduped };
     },
   };
 }

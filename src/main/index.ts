@@ -952,6 +952,55 @@ function registerIpcHandlers(): void {
     },
   );
 
+  // Manual Re-buy — user clicked Re-buy on a cancelled_by_amazon row.
+  // Pushes a new phase=buy job onto BG's queue scoped to this Amazon
+  // account (via placedEmail) and forced through buyWithFillers. The
+  // worker polls BG and picks it up on the next 5s claim cycle.
+  // Idempotent server-side: a second click while a rebuy is already
+  // queued/in-progress returns the existing job.
+  ipcMain.handle(
+    IPC.jobsRebuy,
+    async (_e, attemptId: string) => {
+      if (!apiKey) {
+        return { kind: 'error' as const, message: 'not connected to BG' };
+      }
+      let a = (await storeListAttempts()).find((x) => x.attemptId === attemptId);
+      if (!a) {
+        a = (await listMergedAttempts()).find((x) => x.attemptId === attemptId);
+      }
+      if (!a) return { kind: 'error' as const, message: 'attempt not found' };
+      if (a.status !== 'cancelled_by_amazon') {
+        return {
+          kind: 'error' as const,
+          message: `row is ${a.status}, not cancelled`,
+        };
+      }
+
+      try {
+        const settings = await loadSettings();
+        const bg = createBGClient(settings.bgBaseUrl, apiKey);
+        const r = await bg.rebuy(a.jobId, a.amazonEmail);
+        logger.info('jobs.rebuy.queued', {
+          attemptId,
+          jobId: a.jobId,
+          email: a.amazonEmail,
+          newJobId: r.jobId,
+          deduped: r.deduped,
+        });
+        scheduleBroadcastJobs();
+        return {
+          kind: 'queued' as const,
+          jobId: r.jobId,
+          deduped: r.deduped,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn('jobs.rebuy.error', { attemptId, error: message });
+        return { kind: 'error' as const, message };
+      }
+    },
+  );
+
   async function openOrderPageInProfile(email: string, url: string): Promise<void> {
     // If the worker is currently running AND has a live session for this
     // profile, ask it to open the URL in a new tab inside its own Chromium.
