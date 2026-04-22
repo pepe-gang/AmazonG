@@ -91,7 +91,7 @@ export type ProductInfo = {
 
 /** Payload shape accepted by POST /api/autog/jobs/[id]/status */
 export type JobStatusReport = {
-  status: 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'completed_with_filler_items' | 'partial' | 'failed' | 'cancelled';
+  status: 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'partial' | 'failed' | 'cancelled';
   error?: string | null;
   placedAt?: string | null;
   placedQuantity?: number | null;
@@ -104,14 +104,13 @@ export type JobStatusReport = {
   trackingIds?: string[] | null;
   purchases?: {
     amazonEmail: string;
-    status: 'queued' | 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'completed_with_filler_items' | 'failed' | 'cancelled';
+    status: 'queued' | 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'failed' | 'cancelled';
     /**
      * When true, this purchase used the "Buy with Fillers" flow (cart
-     * padded with random items). BG reads this flag (instead of or in
-     * addition to a `completed_with_filler_items` status string) to
-     * decide whether to set `viaFiller=true` on the scheduled verify
-     * job — which triggers AmazonG's filler-cancellation cleanup on
-     * the verify-phase run.
+     * padded with random items). BG reads this flag to decide whether
+     * to set `viaFiller=true` on the scheduled verify job — which
+     * triggers AmazonG's filler-cancellation cleanup on the verify-
+     * phase run.
      */
     viaFiller?: boolean;
     purchasedCount?: number;
