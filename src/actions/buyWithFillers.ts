@@ -558,7 +558,20 @@ export async function buyWithFillers(
   //     no target ASIN is parseable, skip — the deal must be configured
   //     without cashback enforcement in that case.
   let targetCashbackPct: number | null = null;
-  if (targetAsin) {
+  if (!targetAsin) {
+    // Fail-closed: without a target ASIN we can't scope the cashback
+    // check to the target's shipping group, and a page-wide scan would
+    // happily pass on a filler's 6% while the target sits at 0%.
+    // Better to abort the buy than place at unknown cashback.
+    return {
+      ok: false,
+      stage: 'cashback_gate',
+      reason: 'cannot verify target cashback: productUrl has no parseable ASIN',
+      detail: `productUrl=${opts.productUrl}`,
+    };
+  }
+  {
+    // Below: targetAsin is narrowed to string (non-null) by the early return above.
     let cb = await verifyTargetCashback(page, targetAsin, info.title, opts.minCashbackPct);
     if (!cb.ok) {
       // 11. BG1/BG2 name-toggle retry. Some BG warehouse addresses
@@ -690,12 +703,6 @@ export async function buyWithFillers(
         cid,
       );
     }
-  } else {
-    logger.info(
-      'step.fillerBuy.spc.cashback.skip',
-      { reason: 'no_target_asin' },
-      cid,
-    );
   }
 
   // 11.5. Read the target's /spc line-item quantity. Source of truth
@@ -992,79 +999,106 @@ async function fetchOrderIdsForAsins(
   }
 
   // Read once, non-retrying — we've already waited above.
-  const matches = await page
+  //
+  // Algorithm (document-order, nesting-agnostic):
+  //   1. Walk the full DOM in document order. For each element,
+  //      record whether its text introduces an order-id and whether
+  //      it's an /dp/ product link.
+  //   2. Stream through the two interleaved streams. Every /dp/
+  //      link is attributed to the most recently SEEN order-id.
+  //
+  // This avoids all the ancestor-walker pitfalls of the prior
+  // implementation: Amazon's order-history page nests multiple order
+  // cards under shared containers, and any "walk up until the
+  // ancestor has a /dp/ link" strategy can cross-pollute ASIN matches
+  // across sibling cards — causing filler-only orders to be tagged
+  // with the target ASIN (from a sibling card's link) and therefore
+  // excluded from the cancellation sweep. The fix is to use linear
+  // document order: a link belongs to whichever order id it most
+  // recently appeared AFTER.
+  const raw = await page
     .evaluate(
       ({ asinList, maxCards }) => {
-        const orderIdRe = /\b(\d{3}-\d{7}-\d{7})\b/g;
-        // Heuristic: an "order card" is any ancestor of a dated order-
-        // id text node whose innerText is bounded (< 10000 chars) and
-        // contains at least one /dp/ link. We scan the top maxCards
-        // order-id occurrences to avoid older-history noise.
-        const bodyText =
-          (document.body as HTMLElement).innerText ?? document.body.textContent ?? '';
-        const ids: string[] = [];
-        let m: RegExpExecArray | null;
-        while ((m = orderIdRe.exec(bodyText)) !== null) {
-          const id = m[1];
-          if (id && !ids.includes(id)) ids.push(id);
-          if (ids.length >= maxCards) break;
+        const ORDER_ID_RE = /\b(\d{3}-\d{7}-\d{7})\b/;
+
+        // Walk every element + text node in document order, collecting
+        // "order-id encountered at position N" and "dp link with ASIN
+        // encountered at position N" events into a single stream.
+        type Event =
+          | { kind: 'id'; id: string }
+          | { kind: 'link'; asin: string };
+        const events: Event[] = [];
+
+        // Collect /dp/ links with their ASINs, in document order.
+        const linkNodes = Array.from(
+          document.querySelectorAll<HTMLAnchorElement>('a[href*="/dp/"], a[href*="/gp/product/"]'),
+        );
+        const linkAsin = (href: string): string | null => {
+          const m = href.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i);
+          return m?.[1] ?? null;
+        };
+        // Build a map from link → asin for quick lookup during the walk.
+        const linkToAsin = new Map<HTMLAnchorElement, string>();
+        for (const a of linkNodes) {
+          const asin = linkAsin(a.getAttribute('href') || '');
+          if (asin) linkToAsin.set(a, asin);
         }
-        if (ids.length === 0) return [];
 
-        // For each orderId, find the DOM region that represents it —
-        // the enclosing card. Start from any text node containing the
-        // id literal, walk up to the nearest ancestor whose text is
-        // bounded, then check which of our ASINs have /dp/ links
-        // inside that ancestor.
+        // Single walk over text + element nodes in document order. We
+        // use a TreeWalker that shows both types so the ordering is
+        // preserved across the DOM tree (each text node appears in
+        // its correct position relative to siblings).
+        const walker = document.createTreeWalker(
+          document.body,
+          NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+        );
+        const seenIds = new Set<string>();
+        let n: Node | null = walker.currentNode;
+        // Advance past document.body itself — currentNode starts at root.
+        n = walker.nextNode();
+        while (n) {
+          if (n.nodeType === Node.TEXT_NODE) {
+            const text = (n.textContent ?? '').trim();
+            if (text) {
+              // Scan for ALL id occurrences in this single text node
+              // (rare but possible — e.g. an <a> with the id as text).
+              const allRe = /\b(\d{3}-\d{7}-\d{7})\b/g;
+              let mm: RegExpExecArray | null;
+              while ((mm = allRe.exec(text)) !== null) {
+                const id = mm[1]!;
+                if (!seenIds.has(id) && seenIds.size < maxCards) {
+                  seenIds.add(id);
+                  events.push({ kind: 'id', id });
+                }
+              }
+            }
+          } else if (n.nodeType === Node.ELEMENT_NODE) {
+            const asin = linkToAsin.get(n as HTMLAnchorElement);
+            if (asin) events.push({ kind: 'link', asin });
+          }
+          n = walker.nextNode();
+        }
+
+        // Attribute each /dp/ link to the most recently seen order-id.
+        // Links that appear BEFORE any order-id (unusual — page
+        // header carousels) are ignored.
+        const matchedByOrder = new Map<string, Set<string>>();
+        let currentId: string | null = null;
+        for (const ev of events) {
+          if (ev.kind === 'id') {
+            currentId = ev.id;
+            if (!matchedByOrder.has(currentId)) {
+              matchedByOrder.set(currentId, new Set<string>());
+            }
+          } else if (currentId && asinList.includes(ev.asin)) {
+            matchedByOrder.get(currentId)!.add(ev.asin);
+          }
+        }
+
         const out: { orderId: string; matchedAsins: string[] }[] = [];
-        for (const id of ids) {
-          // Find a text node containing this order id.
-          const walker = document.createTreeWalker(
-            document.body,
-            NodeFilter.SHOW_TEXT,
-            null,
-          );
-          let node: Node | null;
-          let holder: Element | null = null;
-          // eslint-disable-next-line no-cond-assign
-          while ((node = walker.nextNode())) {
-            if ((node.textContent ?? '').includes(id)) {
-              holder = node.parentElement;
-              break;
-            }
-          }
-          if (!holder) continue;
-
-          // Walk up until we have an ancestor big enough to include
-          // the item links (usually 2000–6000 chars of text) but not
-          // so big it's the whole page.
-          let card: Element | null = holder;
-          let depth = 0;
-          while (card && card !== document.body && depth < 20) {
-            const text =
-              (card as HTMLElement).innerText ?? card.textContent ?? '';
-            if (text.length > 200 && text.length < 10_000) {
-              // Check if this scope contains any /dp/ product link.
-              if (card.querySelector('a[href*="/dp/"]')) break;
-            }
-            card = card.parentElement;
-            depth++;
-          }
-          if (!card || card === document.body) continue;
-
-          const matched: string[] = [];
-          for (const asin of asinList) {
-            if (
-              card.querySelector(
-                `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"]`,
-              )
-            ) {
-              matched.push(asin);
-            }
-          }
-          if (matched.length > 0) {
-            out.push({ orderId: id, matchedAsins: matched });
-          }
+        for (const id of seenIds) {
+          const asins = Array.from(matchedByOrder.get(id) ?? []);
+          out.push({ orderId: id, matchedAsins: asins });
         }
         return out;
       },
@@ -1072,7 +1106,20 @@ async function fetchOrderIdsForAsins(
     )
     .catch(() => [] as OrderMatch[]);
 
-  return matches;
+  // Surface empty-match orders as a warning so "filler order showed up
+  // in history but got zero ASIN matches" is diagnosable.
+  for (const r of raw) {
+    if (r.matchedAsins.length === 0) {
+      logger.warn('step.fillerBuy.history.order.no_asins', {
+        orderId: r.orderId,
+        note: 'order id found in history but no cart ASINs attributed — may indicate DOM layout Amazon changed',
+      });
+    }
+  }
+
+  // Return only orders with at least one ASIN match (the caller uses
+  // matchedAsins to classify target vs filler orders).
+  return raw.filter((r) => r.matchedAsins.length > 0);
 }
 
 /**
@@ -1231,6 +1278,15 @@ type CashbackDiag = {
   /** First 200 chars of the scope text — helps confirm we're in the
    *  right group (should start with "Arriving <date>" for target). */
   scopeStart: string;
+  /** How many :checked delivery radios we found inside the scope.
+   *  Zero = no group was picked (rare — usually means we mis-located
+   *  the scope); 1 = typical; 2+ = scope is too wide (we picked up
+   *  sibling groups). */
+  checkedRadioCount: number;
+  /** Label text of the selected radio, trimmed to 120 chars. Shows
+   *  which option Amazon will actually submit — not just what options
+   *  are visible in the group. */
+  selectedLabel: string | null;
 };
 
 type TargetCashbackResult =
@@ -1378,27 +1434,69 @@ async function verifyTargetCashback(
         const scope: Element =
           group ?? fallbackGroup ?? (anchor.parentElement as Element) ?? anchor;
 
-        // Step 3: scan scope for "N% back" matches. Return max.
+        // Step 3 — primary check: the CURRENTLY SELECTED delivery
+        // radio inside the target's scope. Reading any "% back" text
+        // in the scope was too loose: Amazon shows "6% back" as a
+        // label on an UNSELECTED option (the default is 0% back), and
+        // the page-wide scan would pass while the actual placed order
+        // gets the default cashback. What matters is what the user
+        // would actually get at Place Order time → the checked radio.
+        //
+        // We scan checked radios INSIDE the scope, skipping unrelated
+        // groups (address/payment) by name. For the matched radio, we
+        // read its enclosing label/card text and extract "N% back".
+        const checkedRadios = Array.from(
+          scope.querySelectorAll<HTMLInputElement>('input[type="radio"]:checked'),
+        ).filter(
+          (r) =>
+            !/destinationSubmissionUrl|paymentMethodForUrl|paymentMethod|ship-to-this|addressRadio/i.test(
+              r.name || r.id || '',
+            ),
+        );
+        let selectedPct: number | null = null;
+        let selectedLabel: string | null = null;
+        for (const r of checkedRadios) {
+          const card =
+            r.closest('label, .a-radio, [role="radio"]') ??
+            (r.parentElement as Element | null);
+          const label = ((card as HTMLElement | null)?.innerText ?? '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const m = label.match(/(\d{1,2})\s*%\s*back/i);
+          if (m) {
+            const n = Number(m[1]);
+            if (Number.isFinite(n) && n >= 0 && n <= 99) {
+              // Take the max across multiple plausible matches (rare — usually one radio per group matches).
+              if (selectedPct === null || n > selectedPct) {
+                selectedPct = n;
+                selectedLabel = label.slice(0, 120);
+              }
+            }
+          } else if (selectedLabel === null) {
+            // Selected radio found but no "% back" in its label — it's
+            // the default (no-cashback) option. Record the label for
+            // diag so failures are traceable.
+            selectedLabel = label.slice(0, 120);
+          }
+        }
+
+        // Step 4 — diagnostics only: all "% back" text in scope (used
+        // to be the primary signal; kept for the diag payload so we
+        // can tell "no cashback option available on target's group"
+        // from "radio not clicked" when triaging failures).
         const text =
           (scope as HTMLElement).innerText ?? scope.textContent ?? '';
-        const pcts: number[] = [];
-        const re = /(\d{1,2})\s*%\s*back/gi;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(text)) !== null) {
-          const n = Number(m[1]);
-          if (Number.isFinite(n) && n >= 0 && n <= 99) pcts.push(n);
-        }
-        // Count "% back" occurrences in full body vs our scope so we
-        // can tell whether the scope is too narrow (we missed a group-
-        // level 6% back) or whether the page doesn't have any cashback.
         const bodyText = (document.body?.innerText ?? '')
           .replace(/\s+/g, ' ')
           .trim();
         const bodyMatches = bodyText.match(/\d{1,2}\s*%\s*back/gi) ?? [];
         const scopeMatches = text.match(/\d{1,2}\s*%\s*back/gi) ?? [];
+
         return {
           found: true as const,
-          pct: pcts.length > 0 ? Math.max(...pcts) : null,
+          pct: selectedPct,
+          selectedLabel,
+          checkedRadioCount: checkedRadios.length,
           groupFound: group !== null,
           walkDepth: depth,
           scopeChars: text.length,
@@ -1427,17 +1525,27 @@ async function verifyTargetCashback(
     scopeMatches: hit.scopeMatches,
     bodyMatches: hit.bodyMatches,
     scopeStart: hit.scopeStart,
+    checkedRadioCount: hit.checkedRadioCount,
+    selectedLabel: hit.selectedLabel,
   };
   const diagSummary =
     `group=${diag.groupFound} · depth=${diag.walkDepth} · ` +
     `scope=${diag.scopeChars}ch · ` +
+    `checkedRadios=${diag.checkedRadioCount} · ` +
+    `selected="${(diag.selectedLabel ?? '').slice(0, 80)}" · ` +
     `body=[${diag.bodyMatches.join(',')}] · ` +
     `inScope=[${diag.scopeMatches.join(',')}] · ` +
     `head="${diag.scopeStart.slice(0, 80)}"`;
   if (hit.pct === null) {
     return {
       ok: false,
-      reason: `no "N% back" shown on target ${targetAsin} line item`,
+      // Be specific: is there no cashback option at all on this group,
+      // or is there one but the default radio (non-cashback) is still
+      // selected? The scopeMatches array disambiguates.
+      reason:
+        hit.scopeMatches.length > 0
+          ? `target ${targetAsin}'s selected delivery option has no "% back" label (group offers ${hit.scopeMatches.join(', ')} but a non-cashback radio is checked)`
+          : `no "% back" shown on target ${targetAsin}'s shipping group`,
       pct: null,
       detail: diagSummary,
       diag,
@@ -1446,7 +1554,7 @@ async function verifyTargetCashback(
   if (hit.pct < minPct) {
     return {
       ok: false,
-      reason: `target cashback ${hit.pct}% below threshold ${minPct}%`,
+      reason: `target cashback ${hit.pct}% below threshold ${minPct}% (from selected radio "${diag.selectedLabel ?? '(no label)'}")`,
       pct: hit.pct,
       detail: diagSummary,
       diag,
