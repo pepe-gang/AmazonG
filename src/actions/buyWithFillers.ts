@@ -1123,6 +1123,36 @@ async function fetchOrderIdsForAsins(
 }
 
 /**
+ * Chewbacca's /spc doesn't expose the ASIN anywhere in the DOM (anti-
+ * scraping), so every target-line-item lookup falls back to matching the
+ * product title. First ~40 chars is usually unique; strip quotes/
+ * backslashes so the substring is safe to embed as a literal in a
+ * CSS attribute selector or regex.
+ */
+function buildTitlePrefix(targetTitle: string | null): string | null {
+  return targetTitle !== null
+    ? targetTitle.replace(/\s+/g, ' ').trim().slice(0, 40).replace(/["'\\]/g, '')
+    : null;
+}
+
+/**
+ * Scroll the target's /dp/ link into view so Chewbacca's virtualized
+ * list renders the row before we probe it. Best-effort — the caller
+ * tolerates a failure (subsequent locators do their own search).
+ */
+async function scrollTargetIntoView(
+  page: Page,
+  targetAsin: string,
+  timeoutMs: number,
+): Promise<void> {
+  await page
+    .locator(`a[href*="${targetAsin}"]`)
+    .first()
+    .scrollIntoViewIfNeeded({ timeout: timeoutMs })
+    .catch(() => undefined);
+}
+
+/**
  * Read the target ASIN's quantity from its /spc line item. Tries several
  * layouts in order of reliability:
  *
@@ -1141,21 +1171,8 @@ async function readTargetQuantity(
   targetAsin: string,
   targetTitle: string | null,
 ): Promise<number | null> {
-  // Chewbacca's /spc doesn't expose the ASIN anywhere in the DOM (anti-
-  // scraping). Match by product title (first ~40 chars) when ASIN lookup
-  // misses. Same strategy as verifyTargetCashback.
-  const titlePrefix =
-    targetTitle !== null
-      ? targetTitle.replace(/\s+/g, ' ').trim().slice(0, 40).replace(/["'\\]/g, '')
-      : null;
-  // Scroll the target into view first — Chewbacca virtualizes long lists
-  // and the iPad may be lazy-rendered below the viewport with 12+ fillers
-  // on the page.
-  await page
-    .locator(`a[href*="${targetAsin}"]`)
-    .first()
-    .scrollIntoViewIfNeeded({ timeout: 2_000 })
-    .catch(() => undefined);
+  const titlePrefix = buildTitlePrefix(targetTitle);
+  await scrollTargetIntoView(page, targetAsin, 2_000);
   return page
     .evaluate(
       ({ asin, title }) => {
@@ -1311,15 +1328,10 @@ async function verifyTargetCashback(
   minPct: number,
 ): Promise<TargetCashbackResult> {
   // Chewbacca /spc virtualizes long item lists — an iPad buried below 12
-  // fillers may not be rendered until scrolled into view. Force Playwright
-  // to scroll the target link into the viewport so the DOM is populated
-  // before we read it. Best-effort; we ignore failures and let the
-  // in-browser locator below do its own search.
-  await page
-    .locator(`a[href*="${targetAsin}"]`)
-    .first()
-    .scrollIntoViewIfNeeded({ timeout: 5_000 })
-    .catch(() => undefined);
+  // fillers may not be rendered until scrolled into view. Best-effort;
+  // we ignore failures and let the in-browser locator below do its own
+  // search.
+  await scrollTargetIntoView(page, targetAsin, 5_000);
   await page
     .waitForSelector(
       '.lineitem-container, [data-feature-id*="line-item"], .order-summary-line-item',
@@ -1327,15 +1339,7 @@ async function verifyTargetCashback(
     )
     .catch(() => undefined);
 
-  // Build a short, high-signal title prefix. Amazon titles are long and
-  // contain descriptive phrases, but the first ~40 chars are near-always
-  // unique (e.g. "Apple iPad 11-inch: A16 chip, 11-inch"). We strip
-  // quotes/newlines so the substring is safe to embed in a CSS attribute
-  // selector string.
-  const titlePrefix =
-    targetTitle !== null
-      ? targetTitle.replace(/\s+/g, ' ').trim().slice(0, 40).replace(/["'\\]/g, '')
-      : null;
+  const titlePrefix = buildTitlePrefix(targetTitle);
 
   const hit = await page
     .evaluate(
@@ -1587,11 +1591,7 @@ async function verifyTargetLineItemPrice(
 ): Promise<TargetPriceResult> {
   // Scroll the target into view so its line item is in the DOM
   // (Chewbacca virtualizes long lists — target may be lazy-rendered).
-  await page
-    .locator(`a[href*="${targetAsin}"]`)
-    .first()
-    .scrollIntoViewIfNeeded({ timeout: 5_000 })
-    .catch(() => undefined);
+  await scrollTargetIntoView(page, targetAsin, 5_000);
   await page
     .waitForSelector(
       '.lineitem-container, [data-feature-id*="line-item"], .order-summary-line-item',
@@ -1599,13 +1599,7 @@ async function verifyTargetLineItemPrice(
     )
     .catch(() => undefined);
 
-  // Chewbacca /spc doesn't expose ASINs in the DOM, so fall back to
-  // title-prefix text-node match when no /dp/<asin> link is present.
-  // Same strategy as verifyTargetCashback + readTargetQuantity.
-  const titlePrefix =
-    targetTitle !== null
-      ? targetTitle.replace(/\s+/g, ' ').trim().slice(0, 40).replace(/["'\\]/g, '')
-      : null;
+  const titlePrefix = buildTitlePrefix(targetTitle);
 
   const hit = await page
     .evaluate(

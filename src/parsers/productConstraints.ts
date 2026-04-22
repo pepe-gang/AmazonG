@@ -287,73 +287,11 @@ export function checkProductConstraints(
   info: ProductInfo,
   c: Constraints,
 ): VerifyResult {
-  // A known, specific buy-blocker (e.g. "Quantity limit met for this seller")
-  // should report its real reason instead of a generic oos — the item is
-  // physically in stock, the account just can't buy more.
-  const blocker = info.buyBlocker?.trim() ?? null;
-  if (blocker && /quantity\s+limit/i.test(blocker)) {
-    return { ok: false, reason: 'quantity_limit', detail: blocker };
-  }
-
-  if (c.requireInStock && !info.inStock) {
-    return {
-      ok: false,
-      reason: 'oos',
-      detail: info.availabilityText ?? 'Out of stock',
-    };
-  }
-
-  if (c.maxPrice !== null) {
-    if (info.price === null) {
-      return { ok: false, reason: 'price_unknown', detail: 'Out of stock' };
-    }
-    const tol = effectivePriceTolerance(c.maxPrice);
-    if (info.price > c.maxPrice + tol) {
-      return {
-        ok: false,
-        reason: 'price_too_high',
-        detail:
-          tol > 0
-            ? `${info.priceText ?? `$${info.price}`} exceeds max $${c.maxPrice.toFixed(2)} (+$${tol.toFixed(2)} tolerance)`
-            : `${info.priceText ?? `$${info.price}`} exceeds max $${c.maxPrice.toFixed(2)}`,
-      };
-    }
-  }
-
-  if (c.requireNew) {
-    if (info.condition === 'used') {
-      return { ok: false, reason: 'used_condition', detail: 'listing is Used' };
-    }
-    if (info.condition === 'renewed') {
-      return { ok: false, reason: 'renewed_condition', detail: 'listing is Amazon Renewed' };
-    }
-    // null or 'new' → pass (null = no negative signal detected)
-  }
-
-  if (c.requireShipping && info.shipsToAddress === false) {
-    return {
-      ok: false,
-      reason: 'wont_ship',
-      detail: 'item cannot ship to the account address',
-    };
-  }
-
-  if (c.requirePrime && info.isPrime === false) {
-    return {
-      ok: false,
-      reason: 'not_prime',
-      detail: 'item is not Prime-eligible',
-    };
-  }
-
-  if (c.requireBuyNow && info.hasBuyNow === false) {
-    return {
-      ok: false,
-      reason: 'no_buy_now',
-      detail:
-        blocker ?? 'Buy Now button is not available (variation required or unavailable)',
-    };
-  }
-
-  return { ok: true };
+  const r = verifyProductDetailed(info, c);
+  if (r.ok) return { ok: true };
+  return {
+    ok: false,
+    reason: r.reason!,
+    detail: r.detail ?? '',
+  };
 }

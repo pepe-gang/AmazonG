@@ -139,6 +139,7 @@ function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
     trackingIds: s.trackingIds ?? null,
     fillerOrderIds: null,
     productTitle: null,
+    stage: null,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };

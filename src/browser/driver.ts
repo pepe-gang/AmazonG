@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { NavigationError } from '../shared/errors.js';
 import { logger } from '../shared/logger.js';
+import { sanitizeProfileKey } from '../shared/sanitize.js';
 
 export type DriverSession = {
   readonly profile: string;
@@ -19,7 +20,7 @@ export type DriverOptions = {
 };
 
 export async function openSession(profile: string, opts: DriverOptions): Promise<DriverSession> {
-  const userDataDir = join(opts.userDataRoot, sanitizeProfile(profile));
+  const userDataDir = join(opts.userDataRoot, sanitizeProfileKey(profile));
   await mkdir(userDataDir, { recursive: true });
 
   // Dynamic import so playwright reads PLAYWRIGHT_BROWSERS_PATH at launch
@@ -157,8 +158,4 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
       }
     },
   };
-}
-
-function sanitizeProfile(p: string): string {
-  return p.replace(/[^a-zA-Z0-9@._-]/g, '_');
 }

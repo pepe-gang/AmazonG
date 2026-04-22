@@ -1,8 +1,13 @@
 import type { Page } from 'playwright';
 import { logger } from '../shared/logger.js';
-
-const CANCEL_URL = (orderId: string) =>
-  `https://www.amazon.com/progress-tracker/package/preship/cancel-items?orderID=${orderId}`;
+import {
+  bodySample,
+  clickRequestCancellation,
+  isCancelConfirmed,
+  isCancelRefused,
+  openCancelPage,
+  waitForCancelOutcome,
+} from './cancelForm.js';
 
 export type CancelOrderResult =
   | { ok: true; itemsChecked: number }
@@ -26,32 +31,11 @@ export async function cancelFillerOrder(
   const cid = opts.correlationId;
   logger.info('step.cancelFillerOrder.start', { orderId }, cid);
 
-  try {
-    await page.goto(CANCEL_URL(orderId), {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    });
-  } catch (err) {
-    return {
-      ok: false,
-      reason: 'failed to load cancel page',
-      detail: err instanceof Error ? err.message : String(err),
-    };
+  const opened = await openCancelPage(page, orderId);
+  if (!opened.ok) {
+    return { ok: false, reason: opened.reason, ...(opened.detail ? { detail: opened.detail } : {}) };
   }
-
-  // Give the cancel form's React/a-declarative bits time to hydrate.
-  await page.waitForTimeout(1_500);
-
-  // If Amazon redirected us (order already cancelled / shipped / other
-  // not-cancellable state), the URL won't contain the preship path.
   const here = page.url();
-  if (!/cancel-items/i.test(here)) {
-    return {
-      ok: false,
-      reason: 'not on cancel-items page after navigation — order likely already cancelled or shipped',
-      detail: `url=${here}`,
-    };
-  }
 
   // Tick every item checkbox in the form. Amazon's form ships each
   // item as an <input type="checkbox" name="itemId[…]"> or similar;
@@ -156,53 +140,7 @@ export async function cancelFillerOrder(
     await page.waitForTimeout(500);
   }
 
-  // Click the "Request cancellation" submit button. Amazon has used
-  // several labels over the years ("Cancel items", "Request
-  // cancellation", "Cancel selected items"). Try id/name selectors
-  // first, then a text-match fallback.
-  const submitted = await page
-    .evaluate(() => {
-      const selectorCandidates = [
-        'input[name="cancelAll"]',
-        'input[name="cancelItems"]',
-        'input[name*="cancel" i][type="submit"]',
-        'button[name*="cancel" i]',
-        'input[id*="cancel" i][type="submit"]',
-        'button[id*="cancel" i]',
-      ];
-      for (const sel of selectorCandidates) {
-        const el = document.querySelector<HTMLElement>(sel);
-        if (el && el.offsetParent !== null && !(el as HTMLButtonElement).disabled) {
-          el.click();
-          return { clicked: true, via: sel };
-        }
-      }
-      // Text-label fallback — accept multiple variants Amazon has
-      // shipped.
-      const labelRe = /^(request cancellation|cancel items?|cancel selected items?|confirm cancellation)$/i;
-      const buttons = Array.from(
-        document.querySelectorAll<HTMLElement>(
-          'button, input[type="submit"], input[type="button"], a[role="button"], .a-button-input',
-        ),
-      );
-      for (const btn of buttons) {
-        if (btn.offsetParent === null) continue;
-        if ((btn as HTMLButtonElement).disabled) continue;
-        const label = (
-          (btn as HTMLInputElement).value ||
-          btn.getAttribute('aria-label') ||
-          btn.textContent ||
-          ''
-        ).trim();
-        if (labelRe.test(label)) {
-          btn.click();
-          return { clicked: true, via: `text:${label}` };
-        }
-      }
-      return { clicked: false };
-    })
-    .catch(() => ({ clicked: false as const }));
-
+  const submitted = await clickRequestCancellation(page);
   if (!submitted.clicked) {
     return {
       ok: false,
@@ -212,25 +150,11 @@ export async function cancelFillerOrder(
   }
 
   // Amazon may either navigate to a confirmation page or re-render the
-  // same page with a success/refusal banner. Poll the body text until
-  // we see a resolving signal — a bare 2.5s sleep wasn't enough: the
-  // confirmation widget is often still spinning when we probe, and we'd
-  // return "no confirmation detected" while the page was actively
-  // succeeding. Poll up to 15s, return early as soon as either outcome
-  // becomes detectable.
-  await page.waitForLoadState('domcontentloaded').catch(() => undefined);
-  await page
-    .waitForFunction(
-      () => {
-        const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
-        const refused = /unable to cancel (?:the\s+)?(?:requested|selected|these)?\s*items?/i;
-        const ok = /cancellation (?:has been )?(?:requested|submitted|received|successful)|your cancellation request|item(?:s)? (?:has|have) been cancelled|order (?:was|has been) cancelled/i;
-        return refused.test(body) || ok.test(body);
-      },
-      undefined,
-      { timeout: 15_000, polling: 500 },
-    )
-    .catch(() => undefined);
+  // same page with a success/refusal banner. Poll up to 15s — a bare
+  // sleep wasn't enough: the confirmation widget is often still
+  // spinning when we probe, and we'd return "no confirmation detected"
+  // while the page was actively succeeding.
+  await waitForCancelOutcome(page);
 
   // First: did Amazon tell us the order can't be cancelled? That's a
   // terminal state ("Unable to cancel requested items. We apologize
@@ -239,47 +163,28 @@ export async function cancelFillerOrder(
   // started shipping or Amazon's algorithm locked them from pre-ship
   // cancellation. No amount of retrying will fix this; the caller
   // (verify phase) should handle via return/refund instead.
-  const notCancellable = await page
-    .evaluate(() => {
-      const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
-      return /unable to cancel (?:the\s+)?(?:requested|selected|these)?\s*items?/i.test(body);
-    })
-    .catch(() => false);
-  if (notCancellable) {
+  if (await isCancelRefused(page)) {
     return {
       ok: false,
-      reason: 'Amazon refused: unable to cancel requested items (already processing, shipped, or locked from pre-ship cancel)',
+      reason:
+        'Amazon refused: unable to cancel requested items (already processing, shipped, or locked from pre-ship cancel)',
       detail: `url=${page.url()}`,
     };
   }
 
-  const confirmed = await page
-    .evaluate(() => {
-      const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
-      const re =
-        /cancellation (?:has been )?(?:requested|submitted|received|successful)|your cancellation request|item(?:s)? (?:has|have) been cancelled|order (?:was|has been) cancelled/i;
-      return re.test(body);
-    })
-    .catch(() => false);
-
-  if (!confirmed) {
+  if (!(await isCancelConfirmed(page))) {
     // Capture a sample of the body so we can see what Amazon actually
     // rendered — a validation error ("please select a reason"), a
     // confirmation worded in a way our regex missed, or a modal we
     // didn't handle.
-    const bodySample = await page
-      .evaluate(() => {
-        const text = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim();
-        return text.slice(0, 500);
-      })
-      .catch(() => '');
+    const sample = await bodySample(page, 300);
     return {
       ok: false,
       reason: 'no cancellation confirmation detected after submit',
       detail:
         `url=${page.url()}, itemsChecked=${checkedCount}, ` +
-        `clickedVia=${submitted.clicked ? ('via' in submitted ? submitted.via : '?') : 'none'}, ` +
-        `bodySample="${bodySample.slice(0, 300)}"`,
+        `clickedVia=${submitted.clicked ? submitted.via : 'none'}, ` +
+        `bodySample="${sample}"`,
     };
   }
 

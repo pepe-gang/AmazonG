@@ -10,7 +10,7 @@ import {
 } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { JobAttempt, LogEvent } from '../shared/types.js';
-import { snapshotDir, snapshotsDir, clearAllSnapshots } from '../browser/snapshot.js';
+import { snapshotDir, clearAllSnapshots } from '../browser/snapshot.js';
 
 export { makeAttemptId, sanitizeProfileKey } from '../shared/sanitize.js';
 

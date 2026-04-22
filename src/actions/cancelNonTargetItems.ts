@@ -1,8 +1,13 @@
 import type { Page } from 'playwright';
 import { logger } from '../shared/logger.js';
-
-const CANCEL_URL = (orderId: string) =>
-  `https://www.amazon.com/progress-tracker/package/preship/cancel-items?orderID=${orderId}`;
+import {
+  bodySample,
+  clickRequestCancellation,
+  isCancelConfirmed,
+  isCancelRefused,
+  openCancelPage,
+  waitForCancelOutcome,
+} from './cancelForm.js';
 
 export type CancelNonTargetResult =
   | { ok: true; cancelled: number; kept: number }
@@ -38,28 +43,9 @@ export async function cancelNonTargetItems(
     cid,
   );
 
-  try {
-    await page.goto(CANCEL_URL(orderId), {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    });
-  } catch (err) {
-    return {
-      ok: false,
-      reason: 'failed to load cancel page',
-      detail: err instanceof Error ? err.message : String(err),
-    };
-  }
-
-  await page.waitForTimeout(1_500);
-
-  const here = page.url();
-  if (!/cancel-items/i.test(here)) {
-    return {
-      ok: false,
-      reason: 'not on cancel-items page after navigation — order likely already cancelled or shipped',
-      detail: `url=${here}`,
-    };
+  const opened = await openCancelPage(page, orderId);
+  if (!opened.ok) {
+    return { ok: false, reason: opened.reason, ...(opened.detail ? { detail: opened.detail } : {}) };
   }
 
   // Build a safe title prefix for the in-browser matcher. First ~40
@@ -197,48 +183,7 @@ export async function cancelNonTargetItems(
     .catch(() => undefined);
   await page.waitForTimeout(500);
 
-  // Click Request Cancellation (same strategy as cancelFillerOrder).
-  const submitted = await page
-    .evaluate(() => {
-      const selectorCandidates = [
-        'input[name="cancelAll"]',
-        'input[name="cancelItems"]',
-        'input[name*="cancel" i][type="submit"]',
-        'button[name*="cancel" i]',
-        'input[id*="cancel" i][type="submit"]',
-        'button[id*="cancel" i]',
-      ];
-      for (const sel of selectorCandidates) {
-        const el = document.querySelector<HTMLElement>(sel);
-        if (el && el.offsetParent !== null && !(el as HTMLButtonElement).disabled) {
-          el.click();
-          return { clicked: true, via: sel };
-        }
-      }
-      const labelRe = /^(request cancellation|cancel items?|cancel selected items?|confirm cancellation)$/i;
-      const buttons = Array.from(
-        document.querySelectorAll<HTMLElement>(
-          'button, input[type="submit"], input[type="button"], a[role="button"], .a-button-input',
-        ),
-      );
-      for (const btn of buttons) {
-        if (btn.offsetParent === null) continue;
-        if ((btn as HTMLButtonElement).disabled) continue;
-        const label = (
-          (btn as HTMLInputElement).value ||
-          btn.getAttribute('aria-label') ||
-          btn.textContent ||
-          ''
-        ).trim();
-        if (labelRe.test(label)) {
-          btn.click();
-          return { clicked: true, via: `text:${label}` };
-        }
-      }
-      return { clicked: false };
-    })
-    .catch(() => ({ clicked: false as const }));
-
+  const submitted = await clickRequestCancellation(page);
   if (!submitted.clicked) {
     return {
       ok: false,
@@ -250,56 +195,23 @@ export async function cancelNonTargetItems(
   // Poll for success/refusal banner rather than sleeping a fixed
   // interval — Amazon's confirmation widget often spins for 5-10s
   // after submit before rendering, and a bare sleep was too short.
-  // Returns early as soon as either outcome becomes detectable.
-  await page.waitForLoadState('domcontentloaded').catch(() => undefined);
-  await page
-    .waitForFunction(
-      () => {
-        const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
-        const refused = /unable to cancel (?:the\s+)?(?:requested|selected|these)?\s*items?/i;
-        const ok = /cancellation (?:has been )?(?:requested|submitted|received|successful)|your cancellation request|item(?:s)? (?:has|have) been cancelled|order (?:was|has been) cancelled/i;
-        return refused.test(body) || ok.test(body);
-      },
-      undefined,
-      { timeout: 15_000, polling: 500 },
-    )
-    .catch(() => undefined);
+  await waitForCancelOutcome(page);
 
-  // Same terminal-error detection as cancelFillerOrder.
-  const notCancellable = await page
-    .evaluate(() => {
-      const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
-      return /unable to cancel (?:the\s+)?(?:requested|selected|these)?\s*items?/i.test(body);
-    })
-    .catch(() => false);
-  if (notCancellable) {
+  if (await isCancelRefused(page)) {
     return {
       ok: false,
-      reason: 'Amazon refused: unable to cancel requested items (already processing, shipped, or locked)',
+      reason:
+        'Amazon refused: unable to cancel requested items (already processing, shipped, or locked)',
       detail: `url=${page.url()}, cancelled(prospective)=${counts.cancelled}, kept=${counts.kept}`,
     };
   }
 
-  const confirmed = await page
-    .evaluate(() => {
-      const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
-      const re =
-        /cancellation (?:has been )?(?:requested|submitted|received|successful)|your cancellation request|item(?:s)? (?:has|have) been cancelled|order (?:was|has been) cancelled/i;
-      return re.test(body);
-    })
-    .catch(() => false);
-
-  if (!confirmed) {
-    const bodySample = await page
-      .evaluate(() => {
-        const text = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim();
-        return text.slice(0, 300);
-      })
-      .catch(() => '');
+  if (!(await isCancelConfirmed(page))) {
+    const sample = await bodySample(page, 300);
     return {
       ok: false,
       reason: 'no cancellation confirmation detected after submit',
-      detail: `url=${page.url()}, cancelled(prospective)=${counts.cancelled}, kept=${counts.kept}, bodySample="${bodySample}"`,
+      detail: `url=${page.url()}, cancelled(prospective)=${counts.cancelled}, kept=${counts.kept}, bodySample="${sample}"`,
     };
   }
 

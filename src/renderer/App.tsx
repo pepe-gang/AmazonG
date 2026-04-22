@@ -1776,36 +1776,6 @@ function RebuyButton({
   );
 }
 
-function SortableTh({
-  label,
-  k,
-  sortKey,
-  sortDir,
-  onSort,
-  align,
-}: {
-  label: string;
-  k: SortKey;
-  sortKey: SortKey;
-  sortDir: SortDir;
-  onSort: (k: SortKey) => void;
-  align?: 'right' | 'center';
-}) {
-  const active = sortKey === k;
-  return (
-    <th className={align ? `th-${align}` : undefined}>
-      <button
-        type="button"
-        className={`th-sort ${active ? 'active' : ''}`}
-        onClick={() => onSort(k)}
-      >
-        {label}
-        <span className="th-arrow">{active ? (sortDir === 'asc' ? '▲' : '▼') : ''}</span>
-      </button>
-    </th>
-  );
-}
-
 function StatusBadge({ status }: { status: JobAttemptStatus }) {
   const group = STATUS_GROUP[status];
   return (
@@ -3044,10 +3014,6 @@ function relDate(iso: string): string {
   return `${Math.floor(ms / 86_400_000)}d ago`;
 }
 
-function shortId(id: string): string {
-  return id.length > 10 ? id.slice(0, 8) + '…' : id;
-}
-
 /* ============================================================
    Icons (inline SVG)
    ============================================================ */
@@ -3094,13 +3060,6 @@ function BoltIcon() {
   return (
     <svg {...svgProps}>
       <path d="M13 2 3 14h7l-1 8 10-12h-7z" />
-    </svg>
-  );
-}
-function ActivityIcon() {
-  return (
-    <svg {...svgProps}>
-      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
     </svg>
   );
 }

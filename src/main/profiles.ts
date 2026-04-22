@@ -2,6 +2,7 @@ import { app } from 'electron';
 import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AmazonProfile } from '../shared/types.js';
+import { sanitizeProfileKey } from '../shared/sanitize.js';
 
 type Stored = {
   profiles: AmazonProfile[];
@@ -12,11 +13,7 @@ function filePath(): string {
 }
 
 export function profileDataDir(email: string): string {
-  return join(app.getPath('userData'), 'amazon-profiles', sanitizeEmail(email));
-}
-
-function sanitizeEmail(e: string): string {
-  return e.replace(/[^a-zA-Z0-9@._-]/g, '_');
+  return join(app.getPath('userData'), 'amazon-profiles', sanitizeProfileKey(email));
 }
 
 export async function loadProfiles(): Promise<AmazonProfile[]> {

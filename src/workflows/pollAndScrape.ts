@@ -690,7 +690,7 @@ async function handleVerifyJob(
   // roll the original buy row forward (single lifecycle). Fallback: if the
   // buy row was cleared/pruned or buyJobId is missing, create a fresh
   // phase='verify' row so the user can see the job running immediately.
-  const activeAttemptId = await resolveVerifyAttemptRow(deps, job, profile.email);
+  const activeAttemptId = await resolveRolloverAttemptRow(deps, job, profile.email, 'verify');
 
   // Verify-phase logs include `attemptId` so the log sink routes them to
   // the (usually buy-phase) attempt row this run rolls forward onto —
@@ -950,7 +950,7 @@ async function handleFetchTrackingJob(
     return;
   }
 
-  const activeAttemptId = await resolveFetchTrackingAttemptRow(deps, job, profile.email);
+  const activeAttemptId = await resolveRolloverAttemptRow(deps, job, profile.email, 'fetch_tracking');
 
   // See handleVerifyJob — include attemptId so the log sink routes these
   // into the (usually buy-phase) attempt row the UI surfaces, not the
@@ -1140,15 +1140,24 @@ async function handleFetchTrackingJob(
 }
 
 /**
- * Roll the original buy attempt row forward (verified → in_progress) while
- * fetch_tracking runs, then back to verified/cancelled on completion. If
- * the buy row was cleared/pruned, create a fresh phase='fetch_tracking'
- * row so the user sees the job actually running in the Jobs table.
+ * Pick (and persist up-front) the attempt row a verify- or fetch-
+ * tracking-phase run will track.
+ *
+ * Preferred path: bump the original buy attempt row from
+ * 'awaiting_verification' → 'in_progress' so the single lifecycle stays
+ * intact. If that row was cleared (user hit "Clear All", pruned, etc.) or
+ * the job has no buyJobId linkage, create a fresh row for this phase in
+ * 'in_progress' immediately so the user sees the job actually running
+ * in the Jobs table instead of a silent no-op.
+ *
+ * Returns the attempt id that the caller should update with the final
+ * outcome.
  */
-async function resolveFetchTrackingAttemptRow(
+async function resolveRolloverAttemptRow(
   deps: Deps,
   job: AutoGJob,
   profileEmail: string,
+  phase: 'verify' | 'fetch_tracking',
 ): Promise<string> {
   const buyAttemptId = job.buyJobId
     ? makeAttemptId(job.buyJobId, profileEmail)
@@ -1167,7 +1176,7 @@ async function resolveFetchTrackingAttemptRow(
       attemptId,
       jobId: job.id,
       amazonEmail: profileEmail,
-      phase: 'fetch_tracking',
+      phase,
       dealKey: job.dealKey,
       dealId: job.dealId,
       dealTitle: job.dealTitle,
@@ -1185,67 +1194,10 @@ async function resolveFetchTrackingAttemptRow(
       trackingIds: null,
       fillerOrderIds: null,
       productTitle: null,
+      stage: null,
     })
     .catch(() => undefined);
   return attemptId;
-}
-
-/**
- * Pick (and persist up-front) the attempt row this verify run will track.
- *
- * Preferred path: bump the original buy attempt row from
- * 'awaiting_verification' → 'in_progress' so the single lifecycle stays
- * intact. If that row was cleared (user hit "Clear All", pruned, etc.) or
- * the verify job has no buyJobId linkage, create a fresh phase='verify'
- * row in 'in_progress' immediately so the user sees the verify actually
- * running in the Jobs table instead of a silent no-op.
- *
- * Returns the attempt id that the caller should update with the final
- * verify outcome.
- */
-async function resolveVerifyAttemptRow(
-  deps: Deps,
-  job: AutoGJob,
-  profileEmail: string,
-): Promise<string> {
-  const buyAttemptId = job.buyJobId
-    ? makeAttemptId(job.buyJobId, profileEmail)
-    : null;
-
-  if (buyAttemptId) {
-    const bumped = await deps.jobAttempts
-      .update(buyAttemptId, { status: 'in_progress', error: null })
-      .catch(() => null);
-    if (bumped) return buyAttemptId;
-  }
-
-  const verifyAttemptId = makeAttemptId(job.id, profileEmail);
-  await deps.jobAttempts
-    .create({
-      attemptId: verifyAttemptId,
-      jobId: job.id,
-      amazonEmail: profileEmail,
-      phase: 'verify',
-      dealKey: job.dealKey,
-      dealId: job.dealId,
-      dealTitle: job.dealTitle,
-      productUrl: job.productUrl,
-      maxPrice: job.maxPrice,
-      price: job.price,
-      quantity: job.quantity,
-      cost: null,
-      cashbackPct: null,
-      orderId: job.placedOrderId,
-      status: 'in_progress',
-      error: null,
-      buyMode: 'single',
-      dryRun: false,
-      trackingIds: null,
-      fillerOrderIds: null,
-      productTitle: null,
-    })
-    .catch(() => undefined);
-  return verifyAttemptId;
 }
 
 async function reportSafe(
