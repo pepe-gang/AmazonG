@@ -692,9 +692,16 @@ async function handleVerifyJob(
   // phase='verify' row so the user can see the job running immediately.
   const activeAttemptId = await resolveVerifyAttemptRow(deps, job, profile.email);
 
+  // Verify-phase logs include `attemptId` so the log sink routes them to
+  // the (usually buy-phase) attempt row this run rolls forward onto —
+  // otherwise they'd land in a phantom <verifyJobId>__<email>.jsonl file
+  // that has no visible row in the Jobs table and "View Log" on the
+  // verified row would show buy logs only.
+  const logCtx = { jobId: job.id, profile: profile.email, attemptId: activeAttemptId };
+
   logger.info(
     'job.verify.start',
-    { jobId: job.id, profile: profile.email, orderId: targetOrderId, viaFiller: job.viaFiller },
+    { ...logCtx, orderId: targetOrderId, viaFiller: job.viaFiller },
     cid,
   );
 
@@ -709,8 +716,7 @@ async function handleVerifyJob(
       logger.info(
         'job.verify.active',
         {
-          jobId: job.id,
-          profile: profile.email,
+          ...logCtx,
           orderId: targetOrderId,
           viaFiller: job.viaFiller,
           message: `✓ Order ${targetOrderId} is still active on ${profile.email}`,
@@ -747,7 +753,7 @@ async function handleVerifyJob(
         logger.info(
           'job.verify.filler.cleanup.start',
           {
-            jobId: job.id,
+            ...logCtx,
             targetOrderId,
             fillerOrderIdCount: fillerOrderIds.length,
             hasProductTitle: productTitle !== null,
@@ -765,7 +771,7 @@ async function handleVerifyJob(
         logger.info(
           'job.verify.filler.cleanup.done',
           {
-            jobId: job.id,
+            ...logCtx,
             targetOrderId,
             fillerOrdersCancelled: cleanup.fillerOrdersCancelled.length,
             fillerOrdersFailed: cleanup.fillerOrdersFailed.length,
@@ -821,8 +827,7 @@ async function handleVerifyJob(
       logger.warn(
         'job.verify.cancelled',
         {
-          jobId: job.id,
-          profile: profile.email,
+          ...logCtx,
           orderId: targetOrderId,
           message: `✗ Order ${targetOrderId} was cancelled by Amazon`,
         },
@@ -855,10 +860,10 @@ async function handleVerifyJob(
       const error = `verify: unexpected order-details error — ${outcome.message}`;
       logger.error(
         'job.verify.error',
-        { jobId: job.id, profile: profile.email, orderId: targetOrderId, amazonMessage: outcome.message },
+        { ...logCtx, orderId: targetOrderId, amazonMessage: outcome.message },
         cid,
       );
-      await maybeSnapshot(error, page, activeAttemptId, session, deps, cid, { jobId: job.id, profile: profile.email });
+      await maybeSnapshot(error, page, activeAttemptId, session, deps, cid, { ...logCtx });
       await deps.jobAttempts
         .update(activeAttemptId, { status: 'failed', error })
         .catch(() => undefined);
@@ -872,7 +877,7 @@ async function handleVerifyJob(
     const error = `verify: timed out reading order-details for ${targetOrderId} (page never showed cancellation marker or order id)`;
     logger.error(
       'job.verify.timeout',
-      { jobId: job.id, profile: profile.email, orderId: targetOrderId },
+      { ...logCtx, orderId: targetOrderId },
       cid,
     );
     await deps.jobAttempts
@@ -884,7 +889,7 @@ async function handleVerifyJob(
     const error = friendlyJobError(raw, profile.email);
     logger.error(
       'job.verify.error',
-      { jobId: job.id, profile: profile.email, orderId: targetOrderId, error },
+      { ...logCtx, orderId: targetOrderId, error },
       cid,
     );
     await deps.jobAttempts
@@ -898,7 +903,7 @@ async function handleVerifyJob(
     // never needs to see the order-details page, only the outcome.
     logger.info(
       'job.verify.cleanup',
-      { jobId: job.id, profile: profile.email, message: 'Closing verify browser window' },
+      { ...logCtx, message: 'Closing verify browser window' },
       cid,
     );
     await closeAndForgetSession(sessions, profile.email);
@@ -947,9 +952,14 @@ async function handleFetchTrackingJob(
 
   const activeAttemptId = await resolveFetchTrackingAttemptRow(deps, job, profile.email);
 
+  // See handleVerifyJob — include attemptId so the log sink routes these
+  // into the (usually buy-phase) attempt row the UI surfaces, not the
+  // phantom <fetchTrackingJobId>__<email>.jsonl file.
+  const logCtx = { jobId: job.id, profile: profile.email, attemptId: activeAttemptId };
+
   logger.info(
     'job.fetchTracking.start',
-    { jobId: job.id, profile: profile.email, orderId: targetOrderId },
+    { ...logCtx, orderId: targetOrderId },
     cid,
   );
 
@@ -963,8 +973,7 @@ async function handleFetchTrackingJob(
       logger.info(
         'job.fetchTracking.tracked',
         {
-          jobId: job.id,
-          profile: profile.email,
+          ...logCtx,
           orderId: targetOrderId,
           trackingIds: outcome.trackingIds,
           message: `✓ Got ${outcome.trackingIds.length} tracking ID${outcome.trackingIds.length === 1 ? '' : 's'} for ${targetOrderId}`,
@@ -997,8 +1006,7 @@ async function handleFetchTrackingJob(
       logger.info(
         'job.fetchTracking.partial',
         {
-          jobId: job.id,
-          profile: profile.email,
+          ...logCtx,
           orderId: targetOrderId,
           trackingIds: outcome.trackingIds,
           message: `Partial tracking — ${outcome.trackingIds.length} code(s) so far, more shipments still pending`,
@@ -1031,8 +1039,7 @@ async function handleFetchTrackingJob(
       logger.info(
         'job.fetchTracking.not_shipped',
         {
-          jobId: job.id,
-          profile: profile.email,
+          ...logCtx,
           orderId: targetOrderId,
           message: 'Order active but not yet shipped — BG will reschedule in 6h',
         },
@@ -1058,8 +1065,7 @@ async function handleFetchTrackingJob(
       logger.warn(
         'job.fetchTracking.retry',
         {
-          jobId: job.id,
-          profile: profile.email,
+          ...logCtx,
           orderId: targetOrderId,
           reason: outcome.reason,
           message: 'Verify step failed transiently — BG will reschedule in 6h',
@@ -1086,8 +1092,7 @@ async function handleFetchTrackingJob(
     logger.warn(
       'job.fetchTracking.cancelled',
       {
-        jobId: job.id,
-        profile: profile.email,
+        ...logCtx,
         orderId: targetOrderId,
         reason: outcome.reason,
         message: `✗ Order ${targetOrderId} was cancelled by Amazon`,
@@ -1117,7 +1122,7 @@ async function handleFetchTrackingJob(
     const error = friendlyJobError(raw, profile.email);
     logger.error(
       'job.fetchTracking.error',
-      { jobId: job.id, profile: profile.email, orderId: targetOrderId, error },
+      { ...logCtx, orderId: targetOrderId, error },
       cid,
     );
     await deps.jobAttempts
@@ -1127,7 +1132,7 @@ async function handleFetchTrackingJob(
   } finally {
     logger.info(
       'job.fetchTracking.cleanup',
-      { jobId: job.id, profile: profile.email, message: 'Closing fetch_tracking browser window' },
+      { ...logCtx, message: 'Closing fetch_tracking browser window' },
       cid,
     );
     await closeAndForgetSession(sessions, profile.email);

@@ -463,8 +463,20 @@ app.whenReady().then(async () => {
   // Per-attempt log routing: any log carrying both `jobId` and `profile`
   // gets appended to that attempt's JSONL log file. The renderer fetches
   // these per-row via IPC.
+  //
+  // Verify/fetch_tracking phases roll the BUY attempt row forward (see
+  // resolveVerifyAttemptRow), so the buy row is what the user clicks
+  // "View Log" on. Those phases' AutoBuyJob.id is a different id, so a
+  // naive `makeAttemptId(data.jobId, profile)` would route their logs
+  // to a phantom file with no visible row. Callers can override by
+  // including `attemptId` directly — wins over computing from jobId.
   addLogSink((ev) => {
     const data = ev.data as Record<string, unknown> | undefined;
+    const explicit = typeof data?.attemptId === 'string' ? data.attemptId : null;
+    if (explicit) {
+      void storeAppendLog(explicit, ev).catch(() => undefined);
+      return;
+    }
     const jobId = typeof data?.jobId === 'string' ? data.jobId : null;
     const profile = typeof data?.profile === 'string' ? data.profile : null;
     if (!jobId || !profile) return;
