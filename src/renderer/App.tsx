@@ -8,6 +8,7 @@ import type {
 } from '@shared/types';
 import type { Settings } from '@shared/ipc';
 import { SNAPSHOT_ERROR_GROUPS } from '@shared/snapshotGroups';
+import { computeProfit, retailPrice } from '@shared/profit';
 import { parsePrice } from '@parsers/amazonProduct';
 
 const SETUP_GUIDE_URL = 'https://betterbg.vercel.app/dashboard/auto-buy';
@@ -531,63 +532,6 @@ function resolveColumnOrder(saved: string[]): JobColumnId[] {
     seen.add(id);
   });
   return out;
-}
-
-/**
- * Parse a formatted price string like "$399.99" (or "USD 399.99", or
- * "$1,299.95") into a number. Returns null for anything that doesn't
- * parse cleanly.
- */
-function parseCost(cost: string | null): number | null {
-  if (!cost) return null;
-  const cleaned = cost.replace(/[^0-9.]/g, '');
-  if (!cleaned) return null;
-  const n = parseFloat(cleaned);
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
-/**
- * Effective retail price for a row: the actual Amazon /spc price we
- * captured at buy time (`cost`) when available, otherwise BG's retail
- * cap (`maxPrice`) as a fallback. Legacy rows placed before we started
- * capturing `cost` have no /spc price on file — falling back to BG's
- * cap is close enough for the Profit calc and avoids leaving the
- * column blank on every old row.
- */
-function retailPrice(a: JobAttempt): number | null {
-  const actual = parseCost(a.cost);
-  if (actual !== null) return actual;
-  return typeof a.maxPrice === 'number' && a.maxPrice > 0 ? a.maxPrice : null;
-}
-
-/**
- * Per-row profit: BG pays us `payout` per unit, we pay Amazon `retail`,
- * and Amazon refunds `cashbackPct` of retail. So per unit:
- *   profit = payout - retail × (1 - cashback%)
- * Multiplied by quantity (units we ordered).
- *
- * Retail is the ACTUAL Amazon price we paid (`a.cost`, captured from
- * /spc at buy time), not BG's max-pay cap (`a.maxPrice`). If cost is
- * unset we skip the calc — we don't want to show a profit number
- * built on the cap when the true price might have been different.
- *
- * Only computes for verified ("Success") orders — that's the one status
- * where we know:
- *   - the buy actually placed (vs queued / in_progress / failed)
- *   - Amazon didn't auto-cancel (vs awaiting_verification / cancelled)
- *   - real money moved (vs dry_run_success)
- * For every other status the cell shows "—" so we don't pretend to know
- * profit for a row whose outcome isn't final.
- */
-function computeProfit(a: JobAttempt): number | null {
-  if (a.status !== 'verified') return null;
-  const retail = retailPrice(a);
-  const payout = typeof a.price === 'number' ? a.price : null;
-  const qty = typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : null;
-  const cb = typeof a.cashbackPct === 'number' ? a.cashbackPct : null;
-  if (retail === null || payout === null || qty === null || cb === null) return null;
-  const perUnit = payout - retail * (1 - cb / 100);
-  return perUnit * qty;
 }
 
 // Display label per raw status — collapses to one of 4 visible buckets.
@@ -2743,10 +2687,23 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                       <span className="toggle-label">Headless</span>
                     </label>
                     <label
-                      className="toggle off"
-                      title="Buy with Fillers — coming soon"
+                      className={`toggle ${p.buyWithFillers ? 'on' : 'off'}`}
+                      title={
+                        p.buyWithFillers
+                          ? 'Buy-with-Fillers ON for this account — places target alongside ~10 filler items, cancels fillers after verify'
+                          : 'Buy-with-Fillers OFF — this account follows the global setting (or plain Buy Now if global is off too)'
+                      }
                     >
-                      <input type="checkbox" checked={false} disabled readOnly />
+                      <input
+                        type="checkbox"
+                        checked={p.buyWithFillers}
+                        onChange={(e) =>
+                          void window.autog.profilesSetBuyWithFillers(
+                            p.email,
+                            e.target.checked,
+                          )
+                        }
+                      />
                       <span className="toggle-slider" />
                       <span className="toggle-label">Fillers</span>
                     </label>

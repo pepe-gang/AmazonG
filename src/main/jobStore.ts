@@ -11,6 +11,7 @@ import {
 import { join } from 'node:path';
 import type { JobAttempt, LogEvent } from '../shared/types.js';
 import { snapshotDir, clearAllSnapshots } from '../browser/snapshot.js';
+import { pickIdsToEvict } from './jobStoreRingBuffer.js';
 
 export { makeAttemptId, sanitizeProfileKey } from '../shared/sanitize.js';
 
@@ -94,16 +95,10 @@ function scheduleSave(): void {
 
 function evictOldestIfNeeded(): void {
   if (!cache) return;
-  const ids = Object.keys(cache.attempts);
-  if (ids.length <= MAX_ATTEMPTS) return;
-  const sorted = ids
-    .map((id) => ({ id, ts: cache!.attempts[id]!.createdAt }))
-    .sort((a, b) => a.ts.localeCompare(b.ts));
-  const toEvict = sorted.slice(0, ids.length - MAX_ATTEMPTS);
-  for (const e of toEvict) {
-    delete cache.attempts[e.id];
-    void unlink(logFile(e.id)).catch(() => undefined);
-    void removeSnapshot(e.id);
+  for (const id of pickIdsToEvict(cache.attempts, MAX_ATTEMPTS)) {
+    delete cache.attempts[id];
+    void unlink(logFile(id)).catch(() => undefined);
+    void removeSnapshot(id);
   }
 }
 
@@ -138,6 +133,11 @@ export async function updateAttempt(
   store.attempts[attemptId] = updated;
   scheduleSave();
   return updated;
+}
+
+export async function getAttempt(attemptId: string): Promise<JobAttempt | null> {
+  const store = await load();
+  return store.attempts[attemptId] ?? null;
 }
 
 export async function listAttempts(): Promise<JobAttempt[]> {

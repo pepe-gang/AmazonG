@@ -14,6 +14,7 @@ import { cancelNonTargetItems } from '../actions/cancelNonTargetItems.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
 import { fetchTracking } from '../actions/fetchTracking.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
+import { shouldUseFillers } from '../shared/fillerMode.js';
 import { logger } from '../shared/logger.js';
 import { captureFailureSnapshot, discardTracing, shouldCapture, startTracing } from '../browser/snapshot.js';
 import { makeAttemptId, parseAsinFromUrl } from '../shared/sanitize.js';
@@ -33,6 +34,7 @@ export type JobAttemptStore = {
     attemptId: string,
     patch: Partial<Omit<JobAttempt, 'attemptId' | 'jobId' | 'amazonEmail' | 'createdAt'>>,
   ): Promise<JobAttempt | null>;
+  get(attemptId: string): Promise<JobAttempt | null>;
 };
 
 type Deps = {
@@ -326,10 +328,11 @@ async function runFillerBuyWithRetries(
  * Effective fan-out concurrency. Filler mode spins up FILLER_WORKERS parallel tabs
  * inside each account's BrowserContext already; running more than one
  * account simultaneously layers on 5× extra tabs per account and is
- * the fastest way to get rate-limited. One at a time for filler mode.
+ * the fastest way to get rate-limited. Drop to one at a time whenever
+ * ANY profile in this fan-out is going to run in filler mode.
  */
-function fanoutConcurrency(deps: { buyWithFillers: boolean }): number {
-  return deps.buyWithFillers ? FANOUT_CONCURRENCY_FILLER : FANOUT_CONCURRENCY;
+function fanoutConcurrency(anyFiller: boolean): number {
+  return anyFiller ? FANOUT_CONCURRENCY_FILLER : FANOUT_CONCURRENCY;
 }
 
 /**
@@ -492,18 +495,22 @@ async function handleJob(
     }
     eligible = [match];
   }
-  const useFillers = deps.buyWithFillers || job.viaFiller;
-  const localDeps: Deps = useFillers === deps.buyWithFillers
-    ? deps
-    : { ...deps, buyWithFillers: useFillers };
-  const concurrency = fanoutConcurrency(localDeps);
+  // Per-profile filler decision. The returned map lets every downstream
+  // step (row create, BG report, runForProfile branch) agree on which
+  // accounts ran through the filler flow, without re-computing.
+  const fillerByEmail = new Map<string, boolean>(
+    eligible.map((p) => [p.email, shouldUseFillers(deps.buyWithFillers, p, job.viaFiller)]),
+  );
+  const anyFiller = Array.from(fillerByEmail.values()).some(Boolean);
+  const concurrency = fanoutConcurrency(anyFiller);
   logger.info(
     'job.fanout.start',
     {
       jobId: job.id,
       profiles: eligible.map((p) => p.email),
       concurrency: Math.min(concurrency, eligible.length),
-      buyWithFillers: localDeps.buyWithFillers,
+      buyWithFillers: deps.buyWithFillers,
+      anyFiller,
       rebuy: !!job.placedEmail,
     },
     cid,
@@ -530,8 +537,8 @@ async function handleJob(
         orderId: null,
         status: 'queued',
         error: null,
-        buyMode: localDeps.buyWithFillers ? 'filler' : 'single',
-        dryRun: localDeps.buyDryRun,
+        buyMode: fillerByEmail.get(p.email) ? 'filler' : 'single',
+        dryRun: deps.buyDryRun,
         trackingIds: null,
         fillerOrderIds: null,
         productTitle: null,
@@ -541,7 +548,7 @@ async function handleJob(
   );
 
   const results = await pMap(eligible, concurrency, (profile) =>
-    runForProfile(localDeps, sessions, job, profile, cid),
+    runForProfile(deps, sessions, job, profile, cid, fillerByEmail.get(profile.email) === true),
   );
 
   // Aggregate.
@@ -619,7 +626,7 @@ async function handleJob(
       : r.status === 'completed'
         ? ('awaiting_verification' as const)
         : ('failed' as const),
-    ...(localDeps.buyWithFillers && !r.dryRun && r.status === 'completed'
+    ...(fillerByEmail.get(r.email) && !r.dryRun && r.status === 'completed'
       ? { viaFiller: true as const }
       : {}),
     purchasedCount: r.placedQuantity,
@@ -738,14 +745,13 @@ async function handleVerifyJob(
       // order is successfully placed regardless, we just logged what
       // went wrong with the cancellations.
       if (job.viaFiller) {
-        // Load the attempt we just updated to pull the stashed filler
-        // context from buy time. List the attempts via jobAttempts —
-        // the store exposes update; we read through a plain lookup.
+        // Load the buy attempt to pull the stashed filler context
+        // (fillerOrderIds + productTitle) that was persisted at buy time.
         const buyAttemptId = job.buyJobId
           ? makeAttemptId(job.buyJobId, profile.email)
           : activeAttemptId;
         const attemptForContext = await deps.jobAttempts
-          .update(buyAttemptId, {})
+          .get(buyAttemptId)
           .catch(() => null);
         const fillerOrderIds = attemptForContext?.fillerOrderIds ?? [];
         const productTitle = attemptForContext?.productTitle ?? null;
@@ -1219,6 +1225,7 @@ async function runForProfile(
   job: AutoGJob,
   profileData: AmazonProfile,
   parentCid: string,
+  useFillers: boolean,
 ): Promise<ProfileResult> {
   const profile = profileData.email;
   // Per-profile correlation id so logs across the parallel runs are
@@ -1345,7 +1352,7 @@ async function runForProfile(
     // accepted and must not be auto-retried).
     const onStage = (stage: 'placing' | null): Promise<void> =>
       deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
-    if (deps.buyWithFillers) {
+    if (useFillers) {
       const r = await runFillerBuyWithRetries(page, deps, job, cid, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
@@ -1469,7 +1476,7 @@ async function runForProfile(
         error: null,
         // Filler-mode context for the verify phase to pick up ~10 min
         // later. Empty arrays / null on non-filler buys.
-        ...(deps.buyWithFillers
+        ...(useFillers
           ? { fillerOrderIds, productTitle }
           : {}),
       })

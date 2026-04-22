@@ -7,6 +7,7 @@ export default defineConfig({
       '@parsers': resolve('src/parsers'),
       '@shared': resolve('src/shared'),
       '@bg': resolve('src/bg'),
+      '@main': resolve('src/main'),
     },
   },
   test: {

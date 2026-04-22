@@ -12,6 +12,7 @@ import {
   clearFailed as storeClearFailed,
   createAttempt as storeCreateAttempt,
   deleteAttempt as storeDeleteAttempt,
+  getAttempt as storeGetAttempt,
   listAttempts as storeListAttempts,
   pruneOlderThan,
   readLogs as storeReadLogs,
@@ -451,6 +452,7 @@ async function startWorkerNow(): Promise<void> {
         scheduleBroadcastJobs();
         return a;
       },
+      get: storeGetAttempt,
     },
   });
   lastError = null;
