@@ -8,6 +8,9 @@ import {
   isBeforeYouGoInterstitial,
   parseOrderConfirmation,
   findCheckoutCashbackPct,
+  readTargetCashbackFromDom,
+  buildTitlePrefix,
+  computeCashbackRadioPlans,
 } from '@parsers/amazonCheckout';
 
 function docOf(html: string): Document {
@@ -146,5 +149,210 @@ describe('findCheckoutCashbackPct', () => {
   it('returns null when absent', () => {
     const doc = docOf('<html><body>no cashback here</body></html>');
     expect(findCheckoutCashbackPct(doc)).toBeNull();
+  });
+  it('reads 6% back from a real /spc fixture', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    expect(findCheckoutCashbackPct(doc)).toBe(6);
+  });
+});
+
+describe('buildTitlePrefix', () => {
+  it('returns the first 40 chars of a normalized title', () => {
+    const title =
+      'Apple 2025 MacBook Pro Laptop with Apple M5 chip with 10-core CPU';
+    expect(buildTitlePrefix(title)).toBe('Apple 2025 MacBook Pro Laptop with Apple');
+    expect(buildTitlePrefix(title)?.length).toBe(40);
+  });
+  it('strips quotes and backslashes for safe embedding', () => {
+    expect(buildTitlePrefix('Foo "bar" \\baz')).toBe('Foo bar baz');
+  });
+  it('returns null for null input', () => {
+    expect(buildTitlePrefix(null)).toBeNull();
+  });
+});
+
+/**
+ * Fixture: live Chewbacca /spc page captured 2026-04-23 for ASIN
+ * B0FWD726XF (Apple 2025 MacBook Pro Laptop).
+ *
+ * Layout:
+ *   - Target's shipping group has 3 delivery radios:
+ *       • Fastest (next-1dc)         — 0% back
+ *       • Standard (second)          — 0% back, currently CHECKED
+ *       • Amazon Day (second-nominated-day) — 6% back, NOT checked
+ *   - A second (non-target) shipping group with the same 6%-back option.
+ *   - The target's ASIN does NOT appear in any <a href="..."> — Chewbacca
+ *     strips it, so the title-prefix fallback is the only locator.
+ *
+ * The cashback gate's contract on this fixture is: "target found, but the
+ * currently-selected radio is not a 6% option → pct=null → block the
+ * order." `pickBestCashbackDelivery` must click Amazon Day first; only
+ * after that click should pct=6 be reported.
+ */
+describe('readTargetCashbackFromDom (MacBook /spc fixture)', () => {
+  const ASIN = 'B0FWD726XF';
+  const TITLE =
+    'Apple 2025 MacBook Pro Laptop with Apple M5 chip with 10-core CPU and 10-core GPU';
+
+  it('locates the MacBook row via title fallback (no ASIN in any href)', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    // Precondition: there genuinely is no /dp/<asin> anchor.
+    expect(doc.querySelector(`a[href*="${ASIN}"]`)).toBeNull();
+
+    const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
+    expect(hit.found).toBe(true);
+  });
+
+  it('walks up to the correct shipping-group scope (Arriving + % back)', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
+    if (!hit.found) throw new Error('target must be found');
+
+    expect(hit.groupFound).toBe(true);
+    // Scope must contain the target's own delivery options (3 radios in
+    // this fixture). If the scope is too narrow we'd see 0 checked radios.
+    expect(hit.checkedRadioCount).toBe(1);
+    // Scope is scoped to the target's group — NOT the whole page. The
+    // other shipping group's 6% option should NOT appear twice.
+    expect(hit.scopeMatches.length).toBeGreaterThan(0);
+    expect(hit.scopeMatches.some((m) => /6\s*%\s*back/i.test(m))).toBe(true);
+  });
+
+  it('detects that 6% is AVAILABLE in the target group (bodyMatches + scopeMatches)', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
+    if (!hit.found) throw new Error('target must be found');
+
+    expect(hit.bodyMatches.some((m) => /6\s*%\s*back/i.test(m))).toBe(true);
+    expect(hit.scopeMatches.some((m) => /6\s*%\s*back/i.test(m))).toBe(true);
+  });
+
+  it('BLOCKS the order: currently-checked radio is Standard (no % back), pct=null', () => {
+    // The whole point of the gate: even though the scope CONTAINS "6% back",
+    // the actually-selected delivery option does NOT earn cashback. Placing
+    // the order now would give 0%, not 6%. The caller treats pct=null as a
+    // hard failure, which is the safety invariant the user asked for.
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
+    if (!hit.found) throw new Error('target must be found');
+
+    expect(hit.pct).toBeNull();
+    expect(hit.selectedLabel).toMatch(/Standard/i);
+    expect(hit.selectedLabel ?? '').not.toMatch(/%\s*back/i);
+  });
+
+  it('reports pct=6 once the Amazon Day (6% back) radio is the checked one', () => {
+    // Simulate what pickBestCashbackDelivery does: flip the checked state
+    // from Standard → Amazon Day in the target's shipping group. After the
+    // click, the gate must pass with pct=6.
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const MACBOOK_GROUP =
+      'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-4769208-4621834:29c5bcd2-051b-4068-93c5-805128ac6872';
+    const groupRadios = Array.from(
+      doc.querySelectorAll(
+        `input[type="radio"][name="${MACBOOK_GROUP}"]`,
+      ),
+    ) as HTMLInputElement[];
+    expect(groupRadios).toHaveLength(3);
+    for (const r of groupRadios) {
+      r.checked = false;
+      r.removeAttribute('checked');
+    }
+    const amazonDay = groupRadios.find((r) => r.value === 'second-nominated-day');
+    if (!amazonDay) throw new Error('Amazon Day radio not found in MacBook group');
+    amazonDay.checked = true;
+    amazonDay.setAttribute('checked', '');
+
+    const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
+    if (!hit.found) throw new Error('target must be found');
+    expect(hit.pct).toBe(6);
+    expect(hit.selectedLabel).toMatch(/Amazon Day/i);
+    expect(hit.selectedLabel).toMatch(/6\s*%\s*back/i);
+  });
+
+  it('returns found=false with diagnostics when the target is nowhere on the page', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const hit = readTargetCashbackFromDom(doc, 'B0XXXXXXXX', 'Totally Fake Product Title Here XYZ');
+    if (hit.found) throw new Error('target should not be found');
+    expect(hit.diag.asinInBody).toBe(false);
+    expect(hit.diag.titleInBody).toBe(false);
+    expect(hit.diag.totalLinks).toBeGreaterThan(0);
+  });
+});
+
+describe('computeCashbackRadioPlans (MacBook /spc fixture)', () => {
+  const MACBOOK_GROUP =
+    'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-4769208-4621834:29c5bcd2-051b-4068-93c5-805128ac6872';
+  const OTHER_GROUP =
+    'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-4769208-4621834:0ec222d7-598a-4208-8a90-3e6f31448a7a';
+
+  it('plans a click on the 6% Amazon Day radio in the MacBook shipping group', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const plans = computeCashbackRadioPlans(doc, 6);
+
+    const macbookPlan = plans.find((p) => p.name === MACBOOK_GROUP);
+    expect(macbookPlan).toBeDefined();
+    expect(macbookPlan!.pickedPct).toBe(6);
+    expect(macbookPlan!.value).toBe('second-nominated-day');
+    expect(macbookPlan!.currentPct).toBe(0);
+    expect(macbookPlan!.currentValue).toBe('second');
+    expect(macbookPlan!.label).toMatch(/Amazon Day/i);
+    expect(macbookPlan!.label).toMatch(/6\s*%\s*back/i);
+  });
+
+  it('also plans a click in the other shipping group (both default to 0%)', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const plans = computeCashbackRadioPlans(doc, 6);
+
+    const otherPlan = plans.find((p) => p.name === OTHER_GROUP);
+    expect(otherPlan).toBeDefined();
+    expect(otherPlan!.pickedPct).toBe(6);
+    expect(otherPlan!.value).toBe('second-nominated-day');
+  });
+
+  it('returns exactly 2 plans (one per delivery-option group) on this fixture', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const plans = computeCashbackRadioPlans(doc, 6);
+    expect(plans.length).toBe(2);
+  });
+
+  it('plans nothing when the 6%-back radio is ALREADY checked in each group', () => {
+    // Flip BOTH groups so Amazon Day is already selected. Picker should
+    // be a no-op in that state — mirrors the post-click steady state.
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    for (const groupName of [MACBOOK_GROUP, OTHER_GROUP]) {
+      const group = Array.from(
+        doc.querySelectorAll(`input[type="radio"][name="${groupName}"]`),
+      ) as HTMLInputElement[];
+      for (const r of group) {
+        r.checked = false;
+        r.removeAttribute('checked');
+      }
+      const six = group.find((r) => r.value === 'second-nominated-day');
+      if (!six) throw new Error(`missing 6% radio in group ${groupName}`);
+      six.checked = true;
+      six.setAttribute('checked', '');
+    }
+    const plans = computeCashbackRadioPlans(doc, 6);
+    expect(plans).toEqual([]);
+  });
+
+  it('plans nothing when minPct is higher than any available option', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const plans = computeCashbackRadioPlans(doc, 10);
+    expect(plans).toEqual([]);
+  });
+
+  it('skips address/payment radio groups', () => {
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const plans = computeCashbackRadioPlans(doc, 6);
+    // None of the plans should target payment/address radios — their
+    // names match the exclusion regex.
+    const addrOrPay = plans.filter((p) =>
+      /destinationSubmissionUrl|paymentMethodForUrl|paymentMethod|ship-to-this|addressRadio/i.test(
+        p.name,
+      ),
+    );
+    expect(addrOrPay).toEqual([]);
   });
 });

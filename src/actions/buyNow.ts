@@ -4,7 +4,10 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../shared/logger.js';
 import { findCashbackPct, parsePrice } from '../parsers/amazonProduct.js';
-import { parseOrderConfirmation } from '../parsers/amazonCheckout.js';
+import {
+  computeCashbackRadioPlans,
+  parseOrderConfirmation,
+} from '../parsers/amazonCheckout.js';
 import { effectivePriceTolerance } from '../parsers/productConstraints.js';
 import type { BuyResult } from '../shared/types.js';
 
@@ -1505,51 +1508,76 @@ export async function findPlaceOrderLocator(page: Page) {
   return null;
 }
 
+/** Escape a string for use as the RHS of a CSS attribute selector with
+ *  double-quoted value. Only `\` and `"` need escaping inside the string. */
+function escCssAttr(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/** Sync each form control's live `.checked` PROPERTY into the `[checked]`
+ *  HTML attribute. `page.content()` serializes attributes, not properties —
+ *  without this, a radio that was clicked via JS would not show up as
+ *  :checked when the HTML is parsed by JSDOM. */
+async function syncCheckedAttribute(page: Page): Promise<void> {
+  await page
+    .evaluate(() => {
+      document
+        .querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]')
+        .forEach((el) => {
+          if (el.checked) el.setAttribute('checked', '');
+          else el.removeAttribute('checked');
+        });
+    })
+    .catch(() => undefined);
+}
+
 /**
  * Scan non-address / non-payment radio groups on /spc, find the option
  * whose label mentions the highest "N% back" (minimum = `minCashbackPct`),
  * and click it when it's better than the currently selected option.
  * Mirrors old AutoG's checkout[1.5].
+ *
+ * Implementation: iterative re-plan. Each iteration syncs .checked to
+ * [checked], snapshots HTML, computes plans via the pure parser, and
+ * clicks ONE radio via a Playwright locator (which re-queries the DOM,
+ * so stale refs from Amazon's re-render between clicks don't silently
+ * no-op). A set of already-clicked (name,value) pairs avoids infinite
+ * loops when a click doesn't stick.
  */
 export async function pickBestCashbackDelivery(
   page: Page,
   minCashbackPct: number,
 ): Promise<{ changes: { picked: string; pct: number }[] }> {
-  return page
-    .evaluate(async (minPct) => {
-      const radios = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]'))
-        .filter((r) => !/destinationSubmissionUrl|paymentMethodForUrl|paymentMethod/i.test(r.name || ''));
-      const byName = new Map<
-        string,
-        Array<{ radio: HTMLInputElement; text: string; pct: number; checked: boolean }>
-      >();
-      for (const r of radios) {
-        const key = r.name || '(anon)';
-        if (!byName.has(key)) byName.set(key, []);
-        const card = r.closest('label, .a-radio') ?? (r.parentElement as Element | null);
-        const text = ((card as HTMLElement)?.innerText ?? '').replace(/\s+/g, ' ').trim();
-        const m = text.match(/(\d{1,2})%\s*back/i);
-        byName.get(key)!.push({
-          radio: r,
-          text,
-          pct: m ? parseInt(m[1]!, 10) : 0,
-          checked: r.checked,
-        });
-      }
-      const changes: { picked: string; pct: number }[] = [];
-      for (const [, opts] of byName.entries()) {
-        if (opts.length < 2) continue;
-        const best = opts.reduce((a, b) => (b.pct > a.pct ? b : a));
-        const current = opts.find((o) => o.checked);
-        if (best.pct >= minPct && (!current || best.pct > current.pct)) {
-          best.radio.click();
-          changes.push({ picked: best.text.slice(0, 120), pct: best.pct });
-          await new Promise((r) => setTimeout(r, 400));
-        }
-      }
-      return { changes };
-    }, minCashbackPct)
-    .catch(() => ({ changes: [] as { picked: string; pct: number }[] }));
+  const MAX_ITERATIONS = 6;
+  const changes: { picked: string; pct: number }[] = [];
+  const clicked = new Set<string>();
+  for (let i = 0; i < MAX_ITERATIONS; i++) {
+    await syncCheckedAttribute(page);
+    const html = await page.content().catch(() => '');
+    if (!html) break;
+    const plans = computeCashbackRadioPlans(
+      new JSDOM(html).window.document,
+      minCashbackPct,
+    );
+    const plan = plans.find((p) => !clicked.has(`${p.name}::${p.value}`));
+    if (!plan) break;
+    clicked.add(`${plan.name}::${plan.value}`);
+    const sel = `input[type="radio"][name="${escCssAttr(plan.name)}"][value="${escCssAttr(plan.value)}"]`;
+    try {
+      await page.locator(sel).first().click({ timeout: 5_000 });
+      changes.push({ picked: plan.label, pct: plan.pickedPct });
+      // Settle: Amazon re-renders totals + cashback banner after each
+      // radio click. 500ms is generous but keeps us under the
+      // downstream cashback_gate's budget.
+      await page.waitForTimeout(500);
+    } catch {
+      // A single-radio failure isn't fatal — the cashback gate will
+      // catch it downstream. Break out so we don't spin on a
+      // radio we can't locate.
+      break;
+    }
+  }
+  return { changes };
 }
 
 /**

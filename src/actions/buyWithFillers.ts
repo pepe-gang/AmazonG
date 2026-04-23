@@ -22,7 +22,11 @@ import {
   BYG_BUTTON_SELECTOR,
   BYG_HEADER_SELECTOR,
   parseOrderConfirmation,
+  readTargetCashbackFromDom,
+  buildTitlePrefix,
+  type CashbackDiag,
 } from '../parsers/amazonCheckout.js';
+import { isTargetInActiveCart } from '../parsers/amazonCart.js';
 import { parsePrice } from '../parsers/amazonProduct.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import type { ProductInfo } from '../shared/types.js';
@@ -1126,19 +1130,6 @@ async function fetchOrderIdsForAsins(
 }
 
 /**
- * Chewbacca's /spc doesn't expose the ASIN anywhere in the DOM (anti-
- * scraping), so every target-line-item lookup falls back to matching the
- * product title. First ~40 chars is usually unique; strip quotes/
- * backslashes so the substring is safe to embed as a literal in a
- * CSS attribute selector or regex.
- */
-function buildTitlePrefix(targetTitle: string | null): string | null {
-  return targetTitle !== null
-    ? targetTitle.replace(/\s+/g, ' ').trim().slice(0, 40).replace(/["'\\]/g, '')
-    : null;
-}
-
-/**
  * Scroll the target's /dp/ link into view so Chewbacca's virtualized
  * list renders the row before we probe it. Best-effort — the caller
  * tolerates a failure (subsequent locators do their own search).
@@ -1275,40 +1266,6 @@ async function readTargetQuantity(
     .catch(() => null);
 }
 
-/** Diagnostic fields collected on every cashback check (pass or fail).
- *  Lets us see exactly what scope was walked and which "N% back" matches
- *  were present in both the scope and the wider body — essential when a
- *  user reports "I see 6% on the page but the gate failed." */
-type CashbackDiag = {
-  /** Whether our walk found an ancestor with "Arriving" / "% back". */
-  groupFound: boolean;
-  /** How many levels up we walked. */
-  walkDepth: number;
-  /** Character count of the scope's innerText — useful to catch "we
-   *  picked the wrong level and got just the line item (~200ch)" vs
-   *  "we climbed up to the group (~4000ch)". */
-  scopeChars: number;
-  /** All "N% back" matches in the scope we evaluated. */
-  scopeMatches: string[];
-  /** All "N% back" matches anywhere on the page. If scopeMatches is
-   *  empty but bodyMatches shows "6%", the 6% is in a DIFFERENT group
-   *  from target — this is the classic "user sees 6% on the page but
-   *  it doesn't apply to our target" case. */
-  bodyMatches: string[];
-  /** First 200 chars of the scope text — helps confirm we're in the
-   *  right group (should start with "Arriving <date>" for target). */
-  scopeStart: string;
-  /** How many :checked delivery radios we found inside the scope.
-   *  Zero = no group was picked (rare — usually means we mis-located
-   *  the scope); 1 = typical; 2+ = scope is too wide (we picked up
-   *  sibling groups). */
-  checkedRadioCount: number;
-  /** Label text of the selected radio, trimmed to 120 chars. Shows
-   *  which option Amazon will actually submit — not just what options
-   *  are visible in the group. */
-  selectedLabel: string | null;
-};
-
 type TargetCashbackResult =
   | { ok: true; pct: number; diag: CashbackDiag }
   | { ok: false; reason: string; detail?: string; pct: number | null; diag?: CashbackDiag };
@@ -1342,180 +1299,29 @@ async function verifyTargetCashback(
     )
     .catch(() => undefined);
 
-  const titlePrefix = buildTitlePrefix(targetTitle);
-
-  const hit = await page
-    .evaluate(
-      ({ asin, title }) => {
-        // Step 1: locate by ASIN in href / data attrs (classic /spc).
-        let link: Element | null = document.querySelector(`a[href*="${asin}"]`);
-
-        // Step 1b: Chewbacca omits ASINs from /spc DOM entirely. Fall
-        // back to matching the product title as a TEXT node, walking
-        // up to the enclosing line-item container. We compare the FIRST
-        // N characters so slight rewording (e.g. "| Wi-Fi" appended)
-        // doesn't miss.
-        let titleMatch: Element | null = null;
-        if (!link && title && title.length > 5) {
-          const needle = title.toLowerCase();
-          const walker = document.createTreeWalker(
-            document.body,
-            NodeFilter.SHOW_TEXT,
-            null,
-          );
-          let n: Node | null;
-          // eslint-disable-next-line no-cond-assign
-          while ((n = walker.nextNode())) {
-            const txt = ((n as Text).textContent || '')
-              .replace(/\s+/g, ' ')
-              .trim()
-              .toLowerCase();
-            if (txt.length > 5 && txt.startsWith(needle)) {
-              titleMatch = n.parentElement;
-              break;
-            }
-          }
-        }
-
-        const anchor = link ?? titleMatch;
-        if (!anchor) {
-          // Diagnostic: enumerate what we CAN see.
-          const bodyText = (document.body?.innerText ?? '')
-            .replace(/\s+/g, ' ')
-            .trim();
-          return {
-            found: false as const,
-            diag: {
-              totalLinks: document.querySelectorAll('a').length,
-              asinInBody: bodyText.includes(asin),
-              titleSearched: title ?? null,
-              titleInBody: title ? bodyText.toLowerCase().includes(title.toLowerCase()) : false,
-              url: location.href,
-            },
-          };
-        }
-
-        // Step 2: walk up to the enclosing SHIPPING GROUP wrapper.
-        // Chewbacca renders each group as a two-column section: items
-        // on the left, delivery-option radios (where "Get N% back with
-        // your Prime Visa" lives) on the right. These columns are
-        // SIBLINGS, so the first ancestor containing "Arriving" is
-        // typically the items-only column — we'd see the target but
-        // miss the cashback text.
-        //
-        // Correct scope is the ancestor that contains BOTH:
-        //   * the items list (find "Arriving" header)
-        //   * the delivery radios with cashback text ("% back")
-        //
-        // Walk up until we find an ancestor with BOTH, bounded by
-        // MAX_SCOPE_CHARS so we don't swallow the whole page. Fall
-        // back to the first "Arriving"-only ancestor if no such scope
-        // exists (means the group genuinely has no cashback option).
-        const MAX_SCOPE_CHARS = 15000;
-        let group: Element | null = null;
-        let fallbackGroup: Element | null = null;
-        let el: Element | null = anchor.parentElement;
-        let depth = 0;
-        while (el && el !== document.body && depth < 20) {
-          const text =
-            (el as HTMLElement).innerText ?? el.textContent ?? '';
-          if (text.length > MAX_SCOPE_CHARS) break;
-          if (text.length > 200) {
-            const hasArriving = /\bArriving\b/i.test(text);
-            const hasPctBack = /%\s*back\b/i.test(text);
-            if (hasArriving && hasPctBack) {
-              // Ideal scope — item + delivery panel together.
-              group = el;
-              break;
-            }
-            if (hasArriving && !fallbackGroup) {
-              // Found items section but delivery panel is a sibling
-              // outside this scope. Remember this level and keep
-              // climbing to find the parent that wraps both.
-              fallbackGroup = el;
-            }
-          }
-          el = el.parentElement;
-          depth++;
-        }
-        const scope: Element =
-          group ?? fallbackGroup ?? (anchor.parentElement as Element) ?? anchor;
-
-        // Step 3 — primary check: the CURRENTLY SELECTED delivery
-        // radio inside the target's scope. Reading any "% back" text
-        // in the scope was too loose: Amazon shows "6% back" as a
-        // label on an UNSELECTED option (the default is 0% back), and
-        // the page-wide scan would pass while the actual placed order
-        // gets the default cashback. What matters is what the user
-        // would actually get at Place Order time → the checked radio.
-        //
-        // We scan checked radios INSIDE the scope, skipping unrelated
-        // groups (address/payment) by name. For the matched radio, we
-        // read its enclosing label/card text and extract "N% back".
-        const checkedRadios = Array.from(
-          scope.querySelectorAll<HTMLInputElement>('input[type="radio"]:checked'),
-        ).filter(
-          (r) =>
-            !/destinationSubmissionUrl|paymentMethodForUrl|paymentMethod|ship-to-this|addressRadio/i.test(
-              r.name || r.id || '',
-            ),
-        );
-        let selectedPct: number | null = null;
-        let selectedLabel: string | null = null;
-        for (const r of checkedRadios) {
-          const card =
-            r.closest('label, .a-radio, [role="radio"]') ??
-            (r.parentElement as Element | null);
-          const label = ((card as HTMLElement | null)?.innerText ?? '')
-            .replace(/\s+/g, ' ')
-            .trim();
-          const m = label.match(/(\d{1,2})\s*%\s*back/i);
-          if (m) {
-            const n = Number(m[1]);
-            if (Number.isFinite(n) && n >= 0 && n <= 99) {
-              // Take the max across multiple plausible matches (rare — usually one radio per group matches).
-              if (selectedPct === null || n > selectedPct) {
-                selectedPct = n;
-                selectedLabel = label.slice(0, 120);
-              }
-            }
-          } else if (selectedLabel === null) {
-            // Selected radio found but no "% back" in its label — it's
-            // the default (no-cashback) option. Record the label for
-            // diag so failures are traceable.
-            selectedLabel = label.slice(0, 120);
-          }
-        }
-
-        // Step 4 — diagnostics only: all "% back" text in scope (used
-        // to be the primary signal; kept for the diag payload so we
-        // can tell "no cashback option available on target's group"
-        // from "radio not clicked" when triaging failures).
-        const text =
-          (scope as HTMLElement).innerText ?? scope.textContent ?? '';
-        const bodyText = (document.body?.innerText ?? '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        const bodyMatches = bodyText.match(/\d{1,2}\s*%\s*back/gi) ?? [];
-        const scopeMatches = text.match(/\d{1,2}\s*%\s*back/gi) ?? [];
-
-        return {
-          found: true as const,
-          pct: selectedPct,
-          selectedLabel,
-          checkedRadioCount: checkedRadios.length,
-          groupFound: group !== null,
-          walkDepth: depth,
-          scopeChars: text.length,
-          bodyMatches: bodyMatches.slice(0, 8),
-          scopeMatches: scopeMatches.slice(0, 8),
-          scopeStart: text.slice(0, 200),
-          scopeEnd: text.slice(Math.max(0, text.length - 200)),
-        };
-      },
-      { asin: targetAsin, title: titlePrefix },
-    )
-    .catch(() => ({ found: false as const }));
+  // The DOM reader is a pure function in parsers/amazonCheckout.ts —
+  // one source of truth shared with fixture tests. Two steps are done
+  // in-browser before handing off to the parser:
+  //   1) Sync `.checked` property → `[checked]` attribute. `page.content()`
+  //      serializes ATTRIBUTES, not live form-control properties; without
+  //      this step a radio clicked by `pickBestCashbackDelivery` would not
+  //      show as :checked in the JSDOM copy.
+  //   2) `page.content()` returns the current serialized HTML.
+  // Then JSDOM reconstructs the document and the pure parser reads it.
+  await page
+    .evaluate(() => {
+      document
+        .querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]')
+        .forEach((el) => {
+          if (el.checked) el.setAttribute('checked', '');
+          else el.removeAttribute('checked');
+        });
+    })
+    .catch(() => undefined);
+  const html = await page.content().catch(() => '');
+  const hit = html
+    ? readTargetCashbackFromDom(new JSDOM(html).window.document, targetAsin, targetTitle)
+    : ({ found: false as const, diag: { totalLinks: 0, asinInBody: false, titleSearched: null, titleInBody: false, url: page.url() } });
 
   if (!hit.found) {
     return {
@@ -2050,26 +1856,10 @@ async function clickProceedToCheckout(page: Page): Promise<boolean> {
 }
 
 async function hasTargetInCart(page: Page, asin: string | null): Promise<boolean> {
-  if (!asin) {
-    // Fallback when we can't extract an ASIN: treat any active-cart row as success.
-    const anyRow = await page
-      .locator('[data-name="Active Cart"] [data-asin]')
-      .count()
-      .catch(() => 0);
-    return anyRow > 0;
-  }
-  const rows = await page
-    .locator(`[data-name="Active Cart"] [data-asin="${asin}"]`)
-    .count()
-    .catch(() => 0);
-  if (rows > 0) return true;
-  // Some cart layouts don't stamp data-asin on the row — fall back to a
-  // link pointing at /dp/<asin> inside Active Cart.
-  const link = await page
-    .locator(
-      `[data-name="Active Cart"] a[href*="/dp/${asin}"], [data-name="Active Cart"] a[href*="/gp/product/${asin}"]`,
-    )
-    .count()
-    .catch(() => 0);
-  return link > 0;
+  // Delegate to the pure parser so runtime and fixture tests share the
+  // same selectors. `page.content()` captures the Active/Saved split as
+  // rendered; the parser scopes strictly to `[data-name="Active Cart"]`.
+  const html = await page.content().catch(() => '');
+  if (!html) return false;
+  return isTargetInActiveCart(new JSDOM(html).window.document, asin);
 }

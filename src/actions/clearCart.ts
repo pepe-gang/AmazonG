@@ -1,13 +1,9 @@
 import type { Page } from 'playwright';
 import { logger } from '../shared/logger.js';
 import { NavigationError } from '../shared/errors.js';
+import { ACTIVE_CART_DELETE_SELECTOR as ACTIVE_CART_DELETE } from '../parsers/amazonCart.js';
 
 const CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
-
-// Active Cart only — never touches Saved for Later. Amazon marks the active
-// section with data-name="Active Cart"; the Delete input inside each line
-// item submits an AJAX form that removes the row without a full reload.
-const ACTIVE_CART_DELETE = '[data-name="Active Cart"] input[value="Delete"]';
 
 const OVERALL_DEADLINE_MS = 60_000;
 const CLICK_TIMEOUT_MS = 10_000;
