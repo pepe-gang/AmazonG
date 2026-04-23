@@ -113,6 +113,26 @@ export function isBeforeYouGoInterstitial(doc: Document): boolean {
   return doc.querySelector(BYG_HEADER_SELECTOR) !== null;
 }
 
+/**
+ * Selector for Amazon's "Your delivery options have changed due to your
+ * updated purchase options. Please select a new delivery option to
+ * proceed." error banner. Rare post-Place-Order state: Amazon re-renders
+ * /spc, wipes the delivery radio we picked, and surfaces this message at
+ * `[data-messageid="selectDeliveryOptionMessage"]`. Amazon only emits the
+ * attribute when the message is actively displayed, so presence is a
+ * reliable signal (no visibility walk needed).
+ *
+ * Recovery contract: re-run the cashback-delivery picker, click Place
+ * Order again. Bounded to one retry at the runtime callsite.
+ */
+export const DELIVERY_OPTIONS_CHANGED_SELECTOR =
+  '[data-messageid="selectDeliveryOptionMessage"]';
+
+/** True iff /spc is showing the "delivery options changed" error banner. */
+export function isDeliveryOptionsChangedBanner(doc: Document): boolean {
+  return doc.querySelector(DELIVERY_OPTIONS_CHANGED_SELECTOR) !== null;
+}
+
 /** Shared title-prefix builder. Chewbacca's /spc strips ASINs from the DOM,
  *  so target-row lookups fall back to matching the product title. First
  *  ~40 chars is usually unique; strip quotes/backslashes so the substring
@@ -292,23 +312,47 @@ export function readTargetCashbackFromDom(
   // Step 1: locate by ASIN in href (classic /spc).
   let link: Element | null = doc.querySelector(`a[href*="${asin}"]`);
 
-  // Step 1b: Chewbacca fallback — match the product title as a TEXT node,
-  // take its parent element as the anchor.
+  // Step 1.5: hidden testid pin. Chewbacca /spc renders a hidden
+  // `<span data-testid="Item_asin_N_N_N" class="aok-hidden">ASIN</span>`
+  // inside each line-item card. It's the most reliable anchor we have
+  // because Amazon STRIPS /dp/<asin> hrefs on the checkout page AND
+  // short line-item titles don't match long PDP titles via the
+  // startsWith heuristic. Use it before falling back to the title
+  // walk — one exact-text match on a stable data-testid beats a
+  // fuzzy prefix search.
+  let testidMatch: Element | null = null;
+  if (!link) {
+    const spans = doc.querySelectorAll<HTMLElement>('[data-testid^="Item_asin_"]');
+    for (const s of spans) {
+      if ((s.textContent ?? '').trim() === asin) {
+        testidMatch = s;
+        break;
+      }
+    }
+  }
+
+  // Step 1b: title-prefix fallback. Used only when href + testid both
+  // miss. Bidirectional prefix match (shared prefix of shorter length)
+  // so PDP titles that are LONGER than the /spc line-item text still
+  // match — e.g. PDP says "Nintendo Switch 2 System Bundle with Mario
+  // Kart" but /spc line-item is truncated to "Nintendo Switch 2 System".
   let titleMatch: Element | null = null;
-  if (!link && titlePrefix && titlePrefix.length > 5) {
+  if (!link && !testidMatch && titlePrefix && titlePrefix.length > 5) {
     const needle = titlePrefix.toLowerCase();
     const walker = doc.createTreeWalker(doc.body, 4 /* SHOW_TEXT */, null);
     let n: Node | null;
     while ((n = walker.nextNode()) !== null) {
       const txt = ((n as Text).textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
-      if (txt.length > 5 && txt.startsWith(needle)) {
+      if (txt.length < 6) continue;
+      const k = Math.min(needle.length, txt.length);
+      if (k >= 6 && txt.slice(0, k) === needle.slice(0, k)) {
         titleMatch = (n as Text).parentElement;
         break;
       }
     }
   }
 
-  const anchor = link ?? titleMatch;
+  const anchor = link ?? testidMatch ?? titleMatch;
   if (!anchor) {
     const bodyText = visibleText(doc.body);
     return {
@@ -329,7 +373,19 @@ export function readTargetCashbackFromDom(
   // contains BOTH the items list ("Arriving …") AND the delivery radios
   // with cashback labels ("N% back"). A MAX_SCOPE_CHARS cap stops the
   // walk from swallowing the whole page.
-  const MAX_SCOPE_CHARS = 15000;
+  //
+  // Two invariants that bit us in the wild:
+  //   1) Large fillers carts (10+ items in one shared shipping group) can
+  //      push the delivery-group container well past 15k chars of visible
+  //      text. Cap must be generous enough to contain it.
+  //   2) The Amazon Day *description* subtree sitting next to the target
+  //      title also mentions "6% back" as promotional copy but contains
+  //      NO radio inputs. Walking only on "Arriving + % back" would stop
+  //      at that description and Step 3 would then find zero checked
+  //      radios → pct=null → false gate failure even though the correct
+  //      6% radio IS checked further up the tree. So the walk additionally
+  //      requires the ancestor to contain at least one radio.
+  const MAX_SCOPE_CHARS = 200_000;
   let group: Element | null = null;
   let fallbackGroup: Element | null = null;
   let el: Element | null = anchor.parentElement;
@@ -340,11 +396,12 @@ export function readTargetCashbackFromDom(
     if (text.length > 200) {
       const hasArriving = /\bArriving\b/i.test(text);
       const hasPctBack = /%\s*back\b/i.test(text);
-      if (hasArriving && hasPctBack) {
+      const hasRadio = el.querySelector('input[type="radio"]') !== null;
+      if (hasArriving && hasPctBack && hasRadio) {
         group = el;
         break;
       }
-      if (hasArriving && !fallbackGroup) fallbackGroup = el;
+      if (hasArriving && hasRadio && !fallbackGroup) fallbackGroup = el;
     }
     el = el.parentElement;
     depth++;

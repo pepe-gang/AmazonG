@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { logger } from '../shared/logger.js';
 import { findCashbackPct, parsePrice } from '../parsers/amazonProduct.js';
 import {
+  DELIVERY_OPTIONS_CHANGED_SELECTOR,
   computeCashbackRadioPlans,
   parseOrderConfirmation,
 } from '../parsers/amazonCheckout.js';
@@ -277,8 +278,19 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     // 11. Wait for confirmation. Amazon may show a "This is a pending
     //     order — you placed an order for these items recently. Do you want
     //     to place the same order again?" interstitial first; if so, click
-    //     "Place your order" once to confirm.
-    const confirmWait = await waitForConfirmationOrPending(page, step);
+    //     "Place your order" once to confirm. Amazon may ALSO re-render
+    //     /spc with "Your delivery options have changed…" and wipe our
+    //     radio pick — the callback re-picks the highest-% delivery radio
+    //     before the helper re-clicks Place Order (1 recovery attempt).
+    const confirmWait = await waitForConfirmationOrPending(page, step, {
+      onDeliveryOptionsChanged: async () => {
+        const re = await pickBestCashbackDelivery(page, opts.minCashbackPct);
+        step('step.buy.place.delivery_options_changed.repicked', {
+          changes: re.changes,
+        });
+        await page.waitForTimeout(1_000);
+      },
+    });
     if (!confirmWait.ok) {
       // Capture what's on screen — often Amazon stalled the redirect or
       // showed an unexpected interstitial we don't yet recognize. Path is
@@ -1302,19 +1314,37 @@ export async function toggleBGNameAndRetry(
  * Amazon's "This is a pending order" duplicate-order interstitial. On the
  * pending page, click "Place your order" again (up to 3 times) to confirm.
  *
+ * Also handles the rare "Your delivery options have changed due to your
+ * updated purchase options. Please select a new delivery option to
+ * proceed." banner that Amazon shows on /spc after Place Order when it
+ * silently wiped the previously-selected delivery radio. If the caller
+ * provides `onDeliveryOptionsChanged`, the helper invokes it to re-pick
+ * the radio and re-clicks Place Order (1 attempt by default) — without a
+ * callback, the banner is returned as a typed failure reason.
+ *
  * Returns ok when we land on a confirmation URL, fail otherwise.
  */
 export async function waitForConfirmationOrPending(
   page: Page,
   step: StepEmitter,
+  opts: {
+    /** Called when the delivery-options-changed banner appears. Should
+     *  re-pick the cashback delivery radio(s). The helper then clicks
+     *  Place Order again. */
+    onDeliveryOptionsChanged?: () => Promise<void>;
+    /** Hard cap on delivery-options-changed recoveries per call. */
+    maxDeliveryRecoveryAttempts?: number;
+  } = {},
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const deadline = Date.now() + 60_000;
   let pendingClicks = 0;
   const MAX_PENDING_CLICKS = 3;
+  let deliveryRecoveries = 0;
+  const MAX_DELIVERY_RECOVERIES = opts.maxDeliveryRecoveryAttempts ?? 1;
 
   while (Date.now() < deadline) {
     const state = await page
-      .evaluate(() => {
+      .evaluate((bannerSel: string) => {
         const url = location.href;
         if (
           /thankyou|orderconfirm|order-confirmation|\/gp\/buy\/spc\/handlers\/display|\/gp\/css\/order-details/i.test(
@@ -1322,6 +1352,14 @@ export async function waitForConfirmationOrPending(
           )
         ) {
           return { kind: 'confirmation' as const, url };
+        }
+        // Delivery-options-changed banner: Amazon re-rendered /spc, wiped
+        // the radio we picked, surfaced a purchase-level error. Check
+        // BEFORE the pending-order branch — the body text may also
+        // mention "order" in unrelated places and we want the more
+        // specific signal to win.
+        if (document.querySelector(bannerSel)) {
+          return { kind: 'delivery_options_changed' as const, url };
         }
         const body = (
           (document.body && document.body.innerText) ||
@@ -1362,11 +1400,78 @@ export async function waitForConfirmationOrPending(
           return { kind: 'pending' as const, viaText: !!placeBtn, found: !!placeBtn };
         }
         return { kind: 'none' as const, url };
-      })
+      }, DELIVERY_OPTIONS_CHANGED_SELECTOR)
       .catch(() => ({ kind: 'none' as const, url: '' }));
 
     if (state.kind === 'confirmation') {
       return { ok: true };
+    }
+
+    if (state.kind === 'delivery_options_changed') {
+      if (deliveryRecoveries >= MAX_DELIVERY_RECOVERIES) {
+        return {
+          ok: false,
+          reason: `delivery-options-changed banner persisted after ${MAX_DELIVERY_RECOVERIES} recovery attempt(s)`,
+        };
+      }
+      step('step.buy.place.delivery_options_changed', {
+        attempt: deliveryRecoveries + 1,
+      });
+      if (opts.onDeliveryOptionsChanged) {
+        try {
+          await opts.onDeliveryOptionsChanged();
+        } catch (err) {
+          return {
+            ok: false,
+            reason: `delivery-options-changed recovery failed: ${String(err)}`,
+          };
+        }
+      } else {
+        return { ok: false, reason: 'delivery-options-changed banner (no recovery callback)' };
+      }
+      const clicked = await page
+        .evaluate(() => {
+          const idCandidates = [
+            'input[name="placeYourOrder1"]',
+            '#placeYourOrder1 input[type="submit"]',
+            '#submitOrderButtonId input',
+            '#submitOrderButtonId button',
+            'input[data-testid="place-order-button"]',
+          ];
+          for (const sel of idCandidates) {
+            const el = document.querySelector<HTMLElement>(sel);
+            if (el && el.offsetParent !== null) {
+              el.click();
+              return true;
+            }
+          }
+          const all = Array.from(
+            document.querySelectorAll<HTMLElement>('span, button, input, a'),
+          );
+          const btn = all.find((el) => {
+            if (el.offsetParent === null) return false;
+            const label = (
+              (el as HTMLInputElement).value ||
+              el.textContent ||
+              ''
+            ).trim();
+            return /^place your order$/i.test(label);
+          });
+          if (!btn) return false;
+          btn.click();
+          return true;
+        })
+        .catch(() => false);
+      if (!clicked) {
+        return {
+          ok: false,
+          reason: 'delivery-options-changed: failed to re-click Place your order',
+        };
+      }
+      deliveryRecoveries += 1;
+      await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+      await page.waitForTimeout(2_500);
+      continue;
     }
 
     if (state.kind === 'pending') {

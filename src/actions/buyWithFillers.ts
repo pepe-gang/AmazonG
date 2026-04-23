@@ -796,10 +796,24 @@ export async function buyWithFillers(
 
   // 14. Wait for the confirmation page. Reuses the shared helper that
   //     also handles Amazon's "This is a pending order — place again?"
-  //     interstitial. 60s overall deadline inside the helper.
+  //     interstitial AND the "Your delivery options have changed…"
+  //     banner (which wipes our radio pick; the callback re-picks
+  //     before the helper re-clicks Place Order, 1 attempt).
+  //     60s overall deadline inside the helper.
   const confirmWait = await waitForConfirmationOrPending(
     page,
     (m, d) => logger.info(m, d, cid),
+    {
+      onDeliveryOptionsChanged: async () => {
+        const re = await pickBestCashbackDelivery(page, opts.minCashbackPct);
+        logger.info(
+          'step.fillerBuy.place.delivery_options_changed.repicked',
+          { changes: re.changes },
+          cid,
+        );
+        await page.waitForTimeout(1_000);
+      },
+    },
   );
   if (!confirmWait.ok) {
     return {
