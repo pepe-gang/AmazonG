@@ -97,3 +97,18 @@ function readFinalPriceText(doc: Document): string | null {
 export function findCheckoutCashbackPct(doc: Document): number | null {
   return findCashbackPct(doc);
 }
+
+/**
+ * Selectors for Amazon's "Before You Go" (BYG) upsell interstitial that
+ * sometimes appears between Proceed-to-Checkout and /spc. Title is
+ * "Need anything else?" with a "Continue to checkout" button that
+ * forwards to /spc when clicked. Exported as constants so the runtime
+ * locator and the parser test share one source of truth.
+ */
+export const BYG_HEADER_SELECTOR = '#before-you-go-header';
+export const BYG_BUTTON_SELECTOR = 'a[name="checkout-byg-ptc-button"]';
+
+/** True iff the page is the BYG "Need anything else?" interstitial. */
+export function isBeforeYouGoInterstitial(doc: Document): boolean {
+  return doc.querySelector(BYG_HEADER_SELECTOR) !== null;
+}

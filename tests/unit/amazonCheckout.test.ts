@@ -3,6 +3,9 @@ import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  BYG_BUTTON_SELECTOR,
+  BYG_HEADER_SELECTOR,
+  isBeforeYouGoInterstitial,
   parseOrderConfirmation,
   findCheckoutCashbackPct,
 } from '@parsers/amazonCheckout';
@@ -108,6 +111,30 @@ describe('parseOrderConfirmation', () => {
       'https://www.amazon.com/gp/buy/thankyou/handlers/display.html?purchaseId=106-9503967-6167453',
     );
     expect(r.quantity).toBe(5);
+  });
+});
+
+describe('isBeforeYouGoInterstitial', () => {
+  it('detects the BYG "Need anything else?" page in a real fixture', () => {
+    const doc = docOf(fixture('spc-byg-need-anything-else.html'));
+    expect(isBeforeYouGoInterstitial(doc)).toBe(true);
+  });
+
+  it('returns false on an unrelated page', () => {
+    const doc = docOf('<html><body>Place your order</body></html>');
+    expect(isBeforeYouGoInterstitial(doc)).toBe(false);
+  });
+
+  it('BYG_BUTTON_SELECTOR matches the Continue to checkout anchor in the fixture', () => {
+    const doc = docOf(fixture('spc-byg-need-anything-else.html'));
+    const btn = doc.querySelector(BYG_BUTTON_SELECTOR);
+    expect(btn).not.toBeNull();
+    expect((btn?.textContent ?? '').trim()).toBe('Continue to checkout');
+  });
+
+  it('BYG_HEADER_SELECTOR matches the page header container', () => {
+    const doc = docOf(fixture('spc-byg-need-anything-else.html'));
+    expect(doc.querySelector(BYG_HEADER_SELECTOR)).not.toBeNull();
   });
 });
 

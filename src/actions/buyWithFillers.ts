@@ -18,7 +18,11 @@ import {
   effectivePriceTolerance,
   verifyProductDetailed,
 } from '../parsers/productConstraints.js';
-import { parseOrderConfirmation } from '../parsers/amazonCheckout.js';
+import {
+  BYG_BUTTON_SELECTOR,
+  BYG_HEADER_SELECTOR,
+  parseOrderConfirmation,
+} from '../parsers/amazonCheckout.js';
 import { parsePrice } from '../parsers/amazonProduct.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import type { ProductInfo } from '../shared/types.js';
@@ -398,13 +402,12 @@ export async function buyWithFillers(
     };
   }
 
-  try {
-    await page.waitForURL(SPC_URL_MATCH, { timeout: 25_000 });
-  } catch {
+  const transition = await waitForSpcOrHandleByg(page, cid);
+  if (!transition.ok) {
     return {
       ok: false,
       stage: 'spc_wait',
-      reason: 'did not reach /spc after Proceed to Checkout',
+      reason: transition.reason,
       detail: `url=${page.url()}`,
     };
   }
@@ -1950,6 +1953,80 @@ async function runFillerWorker(
         cid,
       );
     }
+  }
+}
+
+/**
+ * Wait for /spc to load after Proceed to Checkout. Amazon occasionally
+ * parks the cart on a "Need anything else?" upsell interstitial (BYG —
+ * Before You Go) instead of going straight to /spc. When that happens,
+ * click the BYG "Continue to checkout" button and keep waiting.
+ *
+ * Races two signals each iteration:
+ *   1. URL transitions to /spc → done.
+ *   2. The BYG header becomes visible → click Continue, loop again.
+ * Total deadline is bounded so a stuck page still fails cleanly.
+ */
+async function waitForSpcOrHandleByg(
+  page: Page,
+  cid: string | undefined,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const TOTAL_DEADLINE_MS = 30_000;
+  const MAX_BYG_CLICKS = 2;
+  const start = Date.now();
+  let bygClicks = 0;
+
+  while (true) {
+    if (SPC_URL_MATCH.test(page.url())) return { ok: true };
+
+    const remaining = TOTAL_DEADLINE_MS - (Date.now() - start);
+    if (remaining <= 0) {
+      return { ok: false, reason: 'did not reach /spc after Proceed to Checkout' };
+    }
+
+    const winner = await Promise.race([
+      page
+        .waitForURL(SPC_URL_MATCH, { timeout: remaining })
+        .then(() => 'spc' as const)
+        .catch(() => 'timeout' as const),
+      page
+        .locator(BYG_HEADER_SELECTOR)
+        .first()
+        .waitFor({ state: 'visible', timeout: remaining })
+        .then(() => 'byg' as const)
+        .catch(() => 'timeout' as const),
+    ]);
+
+    if (winner === 'spc') return { ok: true };
+    if (winner === 'timeout') {
+      return { ok: false, reason: 'did not reach /spc after Proceed to Checkout' };
+    }
+
+    if (bygClicks >= MAX_BYG_CLICKS) {
+      return {
+        ok: false,
+        reason: 'BYG "Need anything else?" interstitial reappeared after Continue click',
+      };
+    }
+    logger.info(
+      'step.fillerBuy.spc.byg.detected',
+      { url: page.url(), priorClicks: bygClicks },
+      cid,
+    );
+    const clicked = await page
+      .locator(BYG_BUTTON_SELECTOR)
+      .first()
+      .click({ timeout: 5_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!clicked) {
+      return {
+        ok: false,
+        reason: 'BYG interstitial detected but Continue to Checkout click failed',
+      };
+    }
+    bygClicks += 1;
+    logger.info('step.fillerBuy.spc.byg.clicked', { clicks: bygClicks }, cid);
   }
 }
 
