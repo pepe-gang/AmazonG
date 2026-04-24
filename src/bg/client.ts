@@ -60,6 +60,9 @@ export type BGClient = {
   claimJob(): Promise<AutoGJob | null>;
   reportStatus(jobId: string, report: JobStatusReport): Promise<void>;
   listPurchases(limit?: number): Promise<ServerPurchase[]>;
+  /** Hard-delete purchase attempts for the authed user. Returns the
+   *  count BG removed (purchase rows + synthetic no-attempt jobs). */
+  deletePurchases(attemptIds: string[]): Promise<number>;
   checkVersion(): Promise<VersionInfo>;
   /**
    * Write the tracking codes for a single purchase. Distinct from
@@ -206,6 +209,15 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         { method: 'GET' },
       );
       return r?.attempts ?? [];
+    },
+
+    async deletePurchases(attemptIds: string[]): Promise<number> {
+      if (attemptIds.length === 0) return 0;
+      const r = await request<{ deletedPurchases: number; deletedJobs: number }>(
+        '/api/autog/purchases',
+        { method: 'DELETE', body: JSON.stringify({ attemptIds }) },
+      );
+      return (r?.deletedPurchases ?? 0) + (r?.deletedJobs ?? 0);
     },
 
     async checkVersion() {

@@ -133,6 +133,16 @@ export type Settings = {
    * string; null means "show every failure".
    */
   failedHiddenBeforeTs: string | null;
+  /**
+   * Attempt ids the user has explicitly deleted from their view.
+   * BG's listPurchases() keeps re-syncing server-side purchase rows on
+   * every merge, so a local-only deleteAttempt would bounce the row
+   * right back. We remember the hidden ids locally and filter them
+   * out in listMergedAttempts — lets "Delete N" mean "stop showing
+   * these, even if BG still has them". Pruned automatically when an
+   * id is no longer in either local or server lists.
+   */
+  hiddenAttemptIds: string[];
 };
 
 /**

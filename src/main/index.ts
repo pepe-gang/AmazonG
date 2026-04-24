@@ -217,6 +217,31 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
     }
   }
 
+  // Respect the user's local "deleted from view" set. Server rows for
+  // these ids otherwise rematerialize every merge because BG still
+  // holds them. Also prune any ids whose rows are no longer in either
+  // source so the set doesn't grow unbounded.
+  const settingsNow = await loadSettings();
+  const hidden = new Set(settingsNow.hiddenAttemptIds ?? []);
+  if (hidden.size > 0) {
+    const remaining: JobAttempt[] = [];
+    const stillReferenced = new Set<string>();
+    for (const a of merged.values()) {
+      if (hidden.has(a.attemptId)) {
+        stillReferenced.add(a.attemptId);
+        continue;
+      }
+      remaining.push(a);
+    }
+    // Evict hidden ids that no longer appear anywhere — keeps the list
+    // small as BG's 500-row window rotates older purchases out.
+    if (stillReferenced.size !== hidden.size) {
+      const pruned = settingsNow.hiddenAttemptIds.filter((id) => stillReferenced.has(id));
+      await saveSettings({ ...settingsNow, hiddenAttemptIds: pruned });
+    }
+    return remaining.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
   return Array.from(merged.values()).sort((a, b) =>
     b.createdAt.localeCompare(a.createdAt),
   );
@@ -646,6 +671,9 @@ function registerIpcHandlers(): void {
     const current = await loadSettings();
     const merged = { ...current, ...partial };
     await saveSettings(merged);
+    // hiddenAttemptIds feeds listMergedAttempts; toggling it must
+    // re-broadcast so rows appear/disappear without a manual refresh.
+    if (partial.hiddenAttemptIds !== undefined) scheduleBroadcastJobs();
     return merged;
   });
 
@@ -834,13 +862,58 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.jobsDelete, async (_e, attemptId: string) => {
     await storeDeleteAttempt(attemptId);
+    // Mirror the bulk path — mark hidden so a server-backed row
+    // (from BG's listPurchases) doesn't rematerialize on next merge.
+    const s = await loadSettings();
+    if (!s.hiddenAttemptIds.includes(attemptId)) {
+      await saveSettings({
+        ...s,
+        hiddenAttemptIds: [...s.hiddenAttemptIds, attemptId],
+      });
+    }
+    // Best-effort BG delete — local hide already guarantees the row
+    // stays gone for this user; this just keeps BG's own Amazon
+    // Purchases view in sync.
+    if (apiKey) {
+      try {
+        const bg = createBGClient(s.bgBaseUrl, apiKey);
+        await bg.deletePurchases([attemptId]);
+      } catch (err) {
+        logger.warn('bg.deletePurchases(single) failed; local hide still in effect', {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     scheduleBroadcastJobs();
   });
 
   ipcMain.handle(IPC.jobsDeleteBulk, async (_e, attemptIds: string[]) => {
+    // Delete any local attempt records (and their logs / snapshots).
     const removed = await storeDeleteAttempts(attemptIds);
-    if (removed > 0) scheduleBroadcastJobs();
-    return removed;
+    // Remember the ids as hidden so server-sourced rows (from BG's
+    // listPurchases) don't re-appear on the next merge. Local hide is
+    // the fast path — survives offline + makes the UI correct instantly.
+    let settings = await loadSettings();
+    if (attemptIds.length > 0) {
+      const next = Array.from(new Set([...(settings.hiddenAttemptIds ?? []), ...attemptIds]));
+      settings = { ...settings, hiddenAttemptIds: next };
+      await saveSettings(settings);
+    }
+    // Hard-delete on BG too so the server-side AmazonPurchases view
+    // (BG web UI) stops showing the same rows. Best-effort: if BG is
+    // unreachable, local hide still keeps AmazonG consistent.
+    if (apiKey && attemptIds.length > 0) {
+      try {
+        const bg = createBGClient(settings.bgBaseUrl, apiKey);
+        await bg.deletePurchases(attemptIds);
+      } catch (err) {
+        logger.warn('bg.deletePurchases(bulk) failed; local hide still in effect', {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    scheduleBroadcastJobs();
+    return Math.max(removed, attemptIds.length);
   });
 
   ipcMain.handle(

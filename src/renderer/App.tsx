@@ -1240,13 +1240,19 @@ function JobsTable({
         // a 1000-row delete drops from ~30s to well under a second.
         setBulkProgress({ done: 0, total: count });
         try {
-          await window.autog.jobsDeleteBulk(selectedAttempts.map((a) => a.attemptId));
-        } catch {
-          // broadcast will still sync whatever did land
+          const removed = await window.autog.jobsDeleteBulk(
+            selectedAttempts.map((a) => a.attemptId),
+          );
+          toast.success(`Deleted ${removed} row${removed === 1 ? '' : 's'}`);
+        } catch (err) {
+          toast.error('Delete failed', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          setSelected(new Set());
+          setBulkBusy(null);
+          setBulkProgress(null);
         }
-        setSelected(new Set());
-        setBulkBusy(null);
-        setBulkProgress(null);
       },
     });
   };

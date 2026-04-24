@@ -22,6 +22,7 @@ const DEFAULTS: Settings = {
   snapshotGroups: [],
   buyWithFillers: false,
   failedHiddenBeforeTs: null,
+  hiddenAttemptIds: [],
 };
 
 function filePath(): string {
