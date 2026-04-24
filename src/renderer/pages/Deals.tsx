@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, MapPin, Copy, ExternalLink } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { RefreshCw, MapPin, Copy, ExternalLink, ChevronDown, ChevronUp, ChevronsUpDown } from 'lucide-react';
 import { toast } from 'sonner';
 
 import type { AmazonDeal } from '@shared/ipc';
@@ -45,11 +45,148 @@ function toNumber(v: string | null | undefined): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/** Margin % of payout vs retail. Used as the sort key for the Margin
+ *  column so deals with the biggest rebate float to the top. Returns
+ *  null when either side is missing so callers can send these rows to
+ *  one end of the list regardless of sort direction. */
+function marginPct(d: AmazonDeal): number | null {
+  const price = toNumber(d.price);
+  const oldPrice = toNumber(d.oldPrice);
+  if (price === undefined || oldPrice === undefined || oldPrice === 0) return null;
+  return ((price - oldPrice) / oldPrice) * 100;
+}
+
+/** Parse BG's "MM-DD-YYYY" expiryDay into a ms timestamp. null-safe. */
+function expiryMs(day: string | null): number | null {
+  if (!day) return null;
+  const [mm, dd, yyyy] = day.split('-').map((n) => parseInt(n, 10));
+  if (!mm || !dd || !yyyy) return null;
+  return new Date(yyyy, mm - 1, dd).getTime();
+}
+
+/** Three-way comparator: negatives first, then numbers asc; null values
+ *  always sink to the end regardless of direction so the user can scan
+ *  the known-good data at the top. */
+function cmpNullable(a: number | null, b: number | null): number {
+  if (a === b) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return a - b;
+}
+
+type SortKey = 'product' | 'pricing' | 'margin' | 'expires' | 'discovered';
+type SortDir = 'asc' | 'desc';
+
+/**
+ * Clickable table header that advertises + toggles sort state. The
+ * column shows its active sort direction inline; inactive columns
+ * render a neutral two-arrow glyph on hover to hint at interactivity
+ * without crowding the header row.
+ */
+function SortableHead({
+  className,
+  label,
+  active,
+  dir,
+  onClick,
+}: {
+  className?: string;
+  label: string;
+  active: boolean;
+  dir: SortDir;
+  onClick: () => void;
+}) {
+  return (
+    <TableHead className={className}>
+      <button
+        type="button"
+        onClick={onClick}
+        className={cn(
+          'inline-flex items-center gap-1 w-full text-left -mx-1 px-1 py-0.5 rounded hover:bg-white/[0.04] transition-colors',
+          active ? 'text-foreground' : 'text-muted-foreground',
+        )}
+      >
+        <span>{label}</span>
+        {active ? (
+          dir === 'asc' ? (
+            <ChevronUp className="size-3" />
+          ) : (
+            <ChevronDown className="size-3" />
+          )
+        ) : (
+          <ChevronsUpDown className="size-3 opacity-0 group-hover:opacity-100" />
+        )}
+      </button>
+    </TableHead>
+  );
+}
+
 export function Deals() {
   const [deals, setDeals] = useState<AmazonDeal[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<number>(Date.now());
+  // Default: mirror the API's "newest first" order. Click a header to
+  // override — second click on the same header flips direction.
+  const [sortKey, setSortKey] = useState<SortKey>('discovered');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  // Ship-to-state filter. 'all' = no filter. Default to 'oregon'
+  // because that's BG's tax-free warehouse state — the only deals we
+  // can actually ship to by default.
+  const [stateFilter, setStateFilter] = useState<string>('oregon');
+
+  const onHeaderClick = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      // First click on a new column: `asc` for product/expires feels
+      // natural (A→Z, soonest-first), `desc` for numeric cols
+      // (biggest price / margin / newest first) matches user intent.
+      setSortDir(key === 'product' || key === 'expires' ? 'asc' : 'desc');
+    }
+  };
+
+  // Union of every state seen across the current deal list → feeds
+  // the filter dropdown. Sorted + uppercased for display. Recomputed
+  // only when the deals array changes.
+  const availableStates = useMemo(() => {
+    const set = new Set<string>();
+    for (const d of deals) for (const s of d.shipToStates) set.add(s.toLowerCase());
+    return Array.from(set).sort();
+  }, [deals]);
+
+  const visibleDeals = useMemo(() => {
+    const sf = stateFilter.toLowerCase();
+    // Empty `shipToStates` means "ships anywhere" per BG's schema, so
+    // those rows always pass the filter.
+    const filtered =
+      sf === 'all'
+        ? deals
+        : deals.filter(
+            (d) =>
+              d.shipToStates.length === 0 ||
+              d.shipToStates.some((s) => s.toLowerCase() === sf),
+          );
+    const copy = [...filtered];
+    const dir = sortDir === 'asc' ? 1 : -1;
+    copy.sort((a, b) => {
+      switch (sortKey) {
+        case 'product':
+          return dir * a.dealTitle.localeCompare(b.dealTitle);
+        case 'pricing':
+          return dir * cmpNullable(toNumber(a.price) ?? null, toNumber(b.price) ?? null);
+        case 'margin':
+          return dir * cmpNullable(marginPct(a), marginPct(b));
+        case 'expires':
+          return dir * cmpNullable(expiryMs(a.expiryDay), expiryMs(b.expiryDay));
+        case 'discovered':
+        default:
+          return dir * a.discoveredAt.localeCompare(b.discoveredAt);
+      }
+    });
+    return copy;
+  }, [deals, sortKey, sortDir, stateFilter]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -75,13 +212,30 @@ export function Deals() {
         <div className="min-w-0">
           <h1 className="text-xl font-semibold tracking-tight">Deals</h1>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {deals.length} live · refreshed {timeAgo(refreshedAt)}
+            {visibleDeals.length} of {deals.length} · refreshed {timeAgo(refreshedAt)}
           </p>
         </div>
-        <Button variant="secondary" onClick={() => void refresh()} size="sm" disabled={loading}>
-          <RefreshCw className={cn('h-3 w-3 mr-1', loading && 'animate-spin')} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>Ship to</span>
+            <select
+              value={stateFilter}
+              onChange={(e) => setStateFilter(e.target.value)}
+              className="h-8 rounded-md border border-white/10 bg-white/[0.04] px-2 text-xs text-foreground/90 hover:bg-white/[0.06] tabular-nums"
+            >
+              <option value="all">All states</option>
+              {availableStates.map((s) => (
+                <option key={s} value={s}>
+                  {s.slice(0, 2).toUpperCase()} — {s.replace(/\b\w/g, (c) => c.toUpperCase())}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Button variant="secondary" onClick={() => void refresh()} size="sm" disabled={loading}>
+            <RefreshCw className={cn('h-3 w-3 mr-1', loading && 'animate-spin')} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -98,10 +252,34 @@ export function Deals() {
           <Table className="table-fixed">
             <TableHeader>
               <TableRow>
-                <TableHead className="w-auto px-4">Product</TableHead>
-                <TableHead className="w-[160px] pl-1.5 pr-4">Pricing</TableHead>
-                <TableHead className="w-[160px] px-4">Margin</TableHead>
-                <TableHead className="w-[130px] px-4">Expires</TableHead>
+                <SortableHead
+                  className="w-auto px-4"
+                  label="Product"
+                  active={sortKey === 'product'}
+                  dir={sortDir}
+                  onClick={() => onHeaderClick('product')}
+                />
+                <SortableHead
+                  className="w-[160px] pl-1.5 pr-4"
+                  label="Pricing"
+                  active={sortKey === 'pricing'}
+                  dir={sortDir}
+                  onClick={() => onHeaderClick('pricing')}
+                />
+                <SortableHead
+                  className="w-[160px] px-4"
+                  label="Margin"
+                  active={sortKey === 'margin'}
+                  dir={sortDir}
+                  onClick={() => onHeaderClick('margin')}
+                />
+                <SortableHead
+                  className="w-[130px] px-4"
+                  label="Expires"
+                  active={sortKey === 'expires'}
+                  dir={sortDir}
+                  onClick={() => onHeaderClick('expires')}
+                />
                 <TableHead className="w-[80px] px-4 text-center">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -120,7 +298,20 @@ export function Deals() {
                   </TableCell>
                 </TableRow>
               )}
-              {deals.map((d) => {
+              {!loading && deals.length > 0 && visibleDeals.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
+                    No deals ship to {stateFilter.toUpperCase()}.{' '}
+                    <button
+                      className="text-primary hover:underline"
+                      onClick={() => setStateFilter('all')}
+                    >
+                      Clear filter
+                    </button>
+                  </TableCell>
+                </TableRow>
+              )}
+              {visibleDeals.map((d) => {
                 const price = toNumber(d.price);
                 const oldPrice = toNumber(d.oldPrice);
                 const margin =
