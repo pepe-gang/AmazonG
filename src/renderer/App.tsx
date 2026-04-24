@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import {
   SidebarInset,
   SidebarProvider,
@@ -1210,15 +1211,15 @@ function JobsTable({
               const tsv = attemptsToTSV(selectedAttempts, columnOrder);
               try {
                 await navigator.clipboard.writeText(tsv);
-                setOrderToast(
-                  `Copied ${selectedAttempts.length} row${selectedAttempts.length === 1 ? '' : 's'} — paste into a spreadsheet.`,
+                toast.success(
+                  `Copied ${selectedAttempts.length} row${selectedAttempts.length === 1 ? '' : 's'}`,
+                  { description: 'Paste into a spreadsheet.' },
                 );
               } catch (err) {
-                setOrderToast(
-                  `Copy failed: ${err instanceof Error ? err.message : String(err)}`,
-                );
+                toast.error('Copy failed', {
+                  description: err instanceof Error ? err.message : String(err),
+                });
               }
-              setTimeout(() => setOrderToast(null), 4000);
             }}
           >
             Copy ({selected.size})
@@ -1603,8 +1604,13 @@ function DealIdChip({ text, copyValue }: { text: string; copyValue?: string }) {
           .then(() => {
             setCopied(true);
             setTimeout(() => setCopied(false), 1200);
+            toast.success('Copied', { description: value, duration: 1800 });
           })
-          .catch(() => {});
+          .catch((err) => {
+            toast.error('Copy failed', {
+              description: err instanceof Error ? err.message : String(err),
+            });
+          });
       }}
     >
       {text}
@@ -1783,8 +1789,22 @@ function JobsCell({
                   key={code}
                   type="button"
                   className="tracking-pill"
-                  title="Click to copy"
-                  onClick={() => void navigator.clipboard.writeText(code).catch(() => undefined)}
+                  title="Click to copy tracking id"
+                  onClick={() => {
+                    void navigator.clipboard
+                      .writeText(code)
+                      .then(() =>
+                        toast.success('Tracking id copied', {
+                          description: code,
+                          duration: 1800,
+                        }),
+                      )
+                      .catch((err) =>
+                        toast.error('Copy failed', {
+                          description: err instanceof Error ? err.message : String(err),
+                        }),
+                      );
+                  }}
                 >
                   {code}
                 </button>
