@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, MapPin, Copy, ExternalLink, ChevronDown, ChevronUp, ChevronsUpDown, Send } from 'lucide-react';
+import { RefreshCw, MapPin, ChevronDown, ChevronUp, ChevronsUpDown, Send } from 'lucide-react';
 import { toast } from 'sonner';
 
 import type { AmazonDeal } from '@shared/ipc';
@@ -12,15 +12,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Checkbox } from '@/components/ui/checkbox';
 import { DealImageTile } from '@/components/deal-image-tile';
-import { KebabTrigger } from '@/components/kebab-trigger';
 import { cn } from '@/lib/utils';
 import {
   computeMargin,
@@ -302,21 +295,35 @@ export function Deals() {
           const running = bulkProgress !== null;
           return (
             <div
-              className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/[0.04] bg-accent/30"
+              // Strong tint + inset top highlight makes the bar stand out
+              // from the table header it's pinned above. Not so loud that
+              // it competes with the glass surface — just enough to cue
+              // "something here is actionable".
+              className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-b border-white/10 bg-accent/60 shadow-[inset_0_1px_0_0_rgb(255_255_255_/_0.04)]"
               role="toolbar"
             >
-              <span className="text-xs text-muted-foreground mr-1">
-                {running
-                  ? `Queuing ${bulkProgress.done}/${bulkProgress.total}…`
-                  : `${selectedInView.length} selected`}
+              <span className="text-xs font-medium text-foreground/90 mr-1 tabular-nums">
+                {running ? (
+                  <>Queuing {bulkProgress.done}/{bulkProgress.total}…</>
+                ) : (
+                  <>
+                    <span className="text-foreground">{selectedInView.length}</span>{' '}
+                    <span className="text-muted-foreground">selected</span>
+                  </>
+                )}
               </span>
               <Button
-                variant="secondary"
-                size="sm"
+                // `default` variant uses the teal accent-gradient with a
+                // glow shadow — the most emphatic affordance in the
+                // shadcn button palette. Pair with a bigger size + bold
+                // weight so it reads from across the screen.
+                variant="default"
+                size="default"
                 disabled={running}
                 onClick={() => void runBulkAddToQueue(selectedInView)}
+                className="font-semibold"
               >
-                <Send className="h-3 w-3 mr-1" />
+                <Send className="h-3.5 w-3.5 mr-1.5" />
                 Add {selectedInView.length} to AutoBuy Queue
               </Button>
               <Button
@@ -386,27 +393,26 @@ export function Deals() {
                   dir={sortDir}
                   onClick={() => onHeaderClick('expires')}
                 />
-                <TableHead className="w-[80px] px-4 text-center">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {loading && deals.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                  <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
                     Loading…
                   </TableCell>
                 </TableRow>
               )}
               {!loading && deals.length === 0 && !error && (
                 <TableRow>
-                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                  <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
                     No active deals right now. Hit Refresh if you're expecting some.
                   </TableCell>
                 </TableRow>
               )}
               {!loading && deals.length > 0 && visibleDeals.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                  <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
                     No deals ship to {stateFilter.toUpperCase()}.{' '}
                     <button
                       className="text-primary hover:underline"
@@ -510,74 +516,6 @@ export function Deals() {
                     </TableCell>
                     <TableCell className="px-4 text-xs text-muted-foreground tabular-nums">
                       {d.expiryDay ?? '—'}
-                    </TableCell>
-                    <TableCell className="px-4 text-center">
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <KebabTrigger aria-label="Deal actions" />
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem
-                            onClick={async () => {
-                              try {
-                                const r = await window.autog.dealsTrigger(d.dealId);
-                                toast.success('Added to AutoBuy queue', {
-                                  description: `${d.dealId} · job ${r.jobId.slice(0, 8)}…`,
-                                });
-                              } catch (err) {
-                                toast.error('Queue failed', {
-                                  description: err instanceof Error ? err.message : String(err),
-                                });
-                              }
-                            }}
-                          >
-                            <Send className="h-3 w-3 mr-2" /> Add to AutoBuy Queue
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => void window.autog.openExternal(d.amazonLink)}>
-                            <ExternalLink className="h-3 w-3 mr-2" /> Open on Amazon
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() =>
-                              void window.autog.openExternal(
-                                `https://buyinggroup.com/deal/${d.dealKey}`,
-                              )
-                            }
-                          >
-                            <ExternalLink className="h-3 w-3 mr-2" /> Open on BetterBG
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => {
-                              void navigator.clipboard
-                                .writeText(d.dealId)
-                                .then(() => toast.success('Deal ID copied', { description: d.dealId }))
-                                .catch((err) =>
-                                  toast.error('Copy failed', {
-                                    description: err instanceof Error ? err.message : String(err),
-                                  }),
-                                );
-                            }}
-                          >
-                            <Copy className="h-3 w-3 mr-2" /> Copy deal ID
-                          </DropdownMenuItem>
-                          {d.upc && (
-                            <DropdownMenuItem
-                              onClick={() => {
-                                void navigator.clipboard
-                                  .writeText(d.upc!)
-                                  .then(() => toast.success('UPC copied', { description: d.upc! }))
-                                  .catch((err) =>
-                                    toast.error('Copy failed', {
-                                      description:
-                                        err instanceof Error ? err.message : String(err),
-                                    }),
-                                  );
-                              }}
-                            >
-                              <Copy className="h-3 w-3 mr-2" /> Copy UPC
-                            </DropdownMenuItem>
-                          )}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
                     </TableCell>
                   </TableRow>
                 );
