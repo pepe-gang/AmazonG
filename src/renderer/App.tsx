@@ -2019,57 +2019,63 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
   };
 
   return (
-    <div className="logs-view">
-      <div className="logs-head">
-        <div>
-          <div className="logs-title">{attempt.dealTitle ?? '(untitled deal)'}</div>
-          <div className="logs-meta">
-            <span className="account-pill">{attempt.amazonEmail}</span>
-            <span className="meta-sep">·</span>
-            <StatusBadge status={attempt.status} />
-            <span className="meta-sep">·</span>
-            <span>{formatDate(attempt.createdAt)} {formatTime(attempt.createdAt)}</span>
-            {attempt.cost && (
-              <>
-                <span className="meta-sep">·</span>
-                <span>{attempt.cost}</span>
-              </>
-            )}
-            {attempt.cashbackPct !== null && (
-              <>
-                <span className="meta-sep">·</span>
-                <span>{attempt.cashbackPct}% cashback</span>
-              </>
-            )}
-            {attempt.orderId && (
-              <>
-                <span className="meta-sep">·</span>
-                <span className="cell-mono">order {attempt.orderId}</span>
-              </>
-            )}
+    // Match every other page's Bestie rhythm: outer padding column,
+    // content lives in a glass section.
+    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0">
+      <section className="glass flex flex-col gap-3 px-5 py-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <div className="text-base font-medium text-foreground truncate max-w-[760px]">
+              {attempt.dealTitle ?? '(untitled deal)'}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              <span className="account-pill">{attempt.amazonEmail}</span>
+              <span className="text-muted-foreground/60">·</span>
+              <StatusBadge status={attempt.status} />
+              <span className="text-muted-foreground/60">·</span>
+              <span>{formatDate(attempt.createdAt)} {formatTime(attempt.createdAt)}</span>
+              {attempt.cost && (
+                <>
+                  <span className="text-muted-foreground/60">·</span>
+                  <span className="tabular-nums">{attempt.cost}</span>
+                </>
+              )}
+              {attempt.cashbackPct !== null && (
+                <>
+                  <span className="text-muted-foreground/60">·</span>
+                  <span className="tabular-nums">{attempt.cashbackPct}% cashback</span>
+                </>
+              )}
+              {attempt.orderId && (
+                <>
+                  <span className="text-muted-foreground/60">·</span>
+                  <span className="font-mono text-[11px]">order {attempt.orderId}</span>
+                </>
+              )}
+            </div>
           </div>
-        </div>
-        <div className="logs-head-actions">
           {hasSnapshot && (
-            <>
-              <button className="ghost-btn" onClick={() => void openSnapshot('screenshot')}>Screenshot</button>
-              <button className="ghost-btn" onClick={() => void openSnapshot('html')}>HTML</button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button variant="secondary" size="sm" onClick={() => void openSnapshot('screenshot')}>
+                Screenshot
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => void openSnapshot('html')}>
+                HTML
+              </Button>
               {snapshotData?.hasTrace && (
-                <button
-                  className="ghost-btn"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   title="Open trace file in Finder — drag into trace.playwright.dev to inspect"
                   onClick={() => void window.autog.jobsOpenTrace(attempt.attemptId)}
                 >
                   Trace
-                </button>
+                </Button>
               )}
-            </>
+            </div>
           )}
-          <button className="ghost-btn" onClick={() => void reload()} disabled={loading}>
-            {loading ? 'Loading…' : 'Refresh'}
-          </button>
         </div>
-      </div>
+      </section>
 
       {attempt.error && <div className="error-banner">{attempt.error}</div>}
 
