@@ -1,0 +1,388 @@
+@import "tailwindcss";
+
+/* Inter Variable — bundled via @fontsource-variable/inter so Electron
+ * packages the font locally (no CDN fetch at runtime). The font-face
+ * declaration ships as part of the package; importing the CSS here
+ * registers "Inter Variable" as a usable family. */
+@import "@fontsource-variable/inter";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(0.9745 0.0079 253.8524);
+  --foreground: oklch(0.1443 0.0191 261.1564);
+  --card: oklch(0.9897 0.0051 247.8755);
+  --card-foreground: oklch(0.1443 0.0191 261.1564);
+  --popover: oklch(0.9897 0.0051 247.8755);
+  --popover-foreground: oklch(0.1443 0.0191 261.1564);
+  --primary: oklch(0.2038 0.0264 260.9332);
+  --primary-foreground: oklch(0.9851 0 0);
+  --secondary: oklch(0.9442 0.0137 258.3455);
+  --secondary-foreground: oklch(0.2038 0.0264 260.9332);
+  --muted: oklch(0.9442 0.0137 258.3455);
+  --muted-foreground: oklch(0.5195 0.0188 262.6912);
+  --accent: oklch(0.9442 0.0137 258.3455);
+  --accent-foreground: oklch(0.2038 0.0264 260.9332);
+  --destructive: oklch(0.5770 0.2450 27.3250);
+  --destructive-foreground: oklch(1 0 0);
+  --border: oklch(0.9013 0.0156 257.2001);
+  --input: oklch(0.9013 0.0156 257.2001);
+  --ring: oklch(0.6503 0.0220 257.4949);
+  --success: oklch(0.5500 0.1700 145);
+  --success-foreground: oklch(1 0 0);
+  --warning: oklch(0.7500 0.1500 75);
+  --warning-foreground: oklch(0.2 0 0);
+  --chart-1: oklch(0.8100 0.1000 252);
+  --chart-2: oklch(0.6200 0.1900 260);
+  --chart-3: oklch(0.5500 0.2200 263);
+  --chart-4: oklch(0.4900 0.2200 264);
+  --chart-5: oklch(0.4200 0.1800 266);
+  --sidebar: oklch(0.9601 0.0103 261.7889);
+  --sidebar-foreground: oklch(0.1443 0.0191 261.1564);
+  --sidebar-primary: oklch(0.2038 0.0264 260.9332);
+  --sidebar-primary-foreground: oklch(0.9851 0 0);
+  --sidebar-accent: oklch(0.9442 0.0137 258.3455);
+  --sidebar-accent-foreground: oklch(0.2038 0.0264 260.9332);
+  --sidebar-border: oklch(0.9013 0.0156 257.2001);
+  --sidebar-ring: oklch(0.6503 0.0220 257.4949);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+  --font-serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --radius: 0.625rem;
+  --shadow-x: 0;
+  --shadow-y: 1px;
+  --shadow-blur: 3px;
+  --shadow-spread: 0px;
+  --shadow-opacity: 0.1;
+  --shadow-color: oklch(0 0 0);
+  --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
+  --shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
+  --shadow-sm: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 1px 2px -1px hsl(0 0% 0% / 0.10);
+  --shadow: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 1px 2px -1px hsl(0 0% 0% / 0.10);
+  --shadow-md: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 2px 4px -1px hsl(0 0% 0% / 0.10);
+  --shadow-lg: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 4px 6px -1px hsl(0 0% 0% / 0.10);
+  --shadow-xl: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 8px 10px -1px hsl(0 0% 0% / 0.10);
+  --shadow-2xl: 0 1px 3px 0px hsl(0 0% 0% / 0.25);
+  --tracking-normal: 0em;
+  --spacing: 0.25rem;
+}
+
+.dark {
+  /* Base — deep tinted navy, not pure black (Bestie v2 spec: #020610) */
+  --background: #020610;
+  --foreground: #ECF3F8;
+
+  /* Surfaces — translucent; real color comes from backdrop-filter behind */
+  --card: hsl(230 25% 10% / 0.55);
+  --card-foreground: #ECF3F8;
+  --popover: hsl(230 25% 8% / 0.82);
+  --popover-foreground: #ECF3F8;
+
+  --primary: hsl(210 90% 66%);
+  --primary-foreground: #020610;
+
+  --secondary: hsl(220 15% 100% / 0.05);
+  --secondary-foreground: #ECF3F8;
+
+  --muted: hsl(220 15% 100% / 0.04);
+  --muted-foreground: #93A0AD;
+
+  --accent: hsl(220 15% 100% / 0.06);
+  --accent-foreground: #ECF3F8;
+
+  --destructive: hsl(0 75% 62%);
+  --destructive-foreground: hsl(0 0% 100%);
+
+  --border: hsl(220 20% 100% / 0.08);
+  --input: hsl(220 20% 100% / 0.06);
+  --ring: hsl(210 90% 66%);
+  --fg-dim: #667382;
+
+  --radius: 0.75rem;
+
+  /* Layout tokens (used by tables, rows, lists) */
+  --row-height: 56px;
+  --row-height-sm: 44px;
+  --row-height-lg: 64px;
+
+  /* Glass-specific tokens */
+  --glass-blur: 52px;
+  --glass-saturation: 140%;
+  --glass-bg: hsl(220 25% 12% / 0.55);
+  --glass-border: hsl(220 25% 100% / 0.05);
+  --glass-highlight: hsl(220 25% 100% / 0.08);
+  --glass-shadow: hsl(230 40% 4% / 0.55);
+
+  /* Accent gradient — Teal / Cyber */
+  --accent-a: oklch(0.72 0.20 150); /* mint */
+  --accent-b: oklch(0.75 0.18 180); /* teal */
+  --accent-c: oklch(0.78 0.16 210); /* cyan */
+  --accent-gradient: linear-gradient(135deg, var(--accent-a) 0%, var(--accent-b) 50%, var(--accent-c) 100%);
+  /* Drop-shadow glow color used by active nav / primary button (teal) */
+  --accent-shadow: oklch(0.65 0.18 180);
+
+  /* App-specific tokens kept for compatibility */
+  --success: hsl(150 60% 55%);
+  --success-foreground: hsl(230 30% 6%);
+  --warning: hsl(40 90% 60%);
+  --warning-foreground: hsl(230 30% 6%);
+  --chart-1: oklch(0.8100 0.1000 252);
+  --chart-2: oklch(0.6200 0.1900 260);
+  --chart-3: oklch(0.5500 0.2200 263);
+  --chart-4: oklch(0.4900 0.2200 264);
+  --chart-5: oklch(0.4200 0.1800 266);
+
+  /* Sidebar — transparent so the .glass wrapper carries the look */
+  --sidebar: hsl(220 25% 12% / 0.55);
+  --sidebar-foreground: hsl(220 20% 96%);
+  --sidebar-primary: hsl(210 90% 66%);
+  --sidebar-primary-foreground: hsl(230 30% 6%);
+  --sidebar-accent: hsl(220 15% 100% / 0.06);
+  --sidebar-accent-foreground: hsl(220 20% 96%);
+  --sidebar-border: hsl(220 20% 100% / 0.08);
+  --sidebar-ring: hsl(210 90% 66%);
+
+  --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  --shadow-x: 0;
+  --shadow-y: 1px;
+  --shadow-blur: 3px;
+  --shadow-spread: 0px;
+  --shadow-opacity: 0.1;
+  --shadow-color: oklch(0 0 0);
+  --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
+  --shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
+  --shadow-sm: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 1px 2px -1px hsl(0 0% 0% / 0.10);
+  --shadow: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 1px 2px -1px hsl(0 0% 0% / 0.10);
+  --shadow-md: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 2px 4px -1px hsl(0 0% 0% / 0.10);
+  --shadow-lg: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 4px 6px -1px hsl(0 0% 0% / 0.10);
+  --shadow-xl: 0 1px 3px 0px hsl(0 0% 0% / 0.10), 0 8px 10px -1px hsl(0 0% 0% / 0.10);
+  --shadow-2xl: 0 1px 3px 0px hsl(0 0% 0% / 0.25);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-serif);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --shadow-2xs: var(--shadow-2xs);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow: var(--shadow);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-2xl: var(--shadow-2xl);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    background: var(--background);
+    min-height: 100vh;
+    color: var(--foreground);
+  }
+
+  body {
+    min-height: 100vh;
+    color: var(--foreground);
+    background: transparent;
+    @apply font-sans antialiased;
+  }
+
+  /* Aurora — fixed, behind everything, slowly drifts */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background:
+      radial-gradient(ellipse 60% 50% at 15% 15%, oklch(0.55 0.22 258 / 0.45) 0%, transparent 55%),
+      radial-gradient(ellipse 55% 50% at 85% 10%, oklch(0.60 0.20 290 / 0.40) 0%, transparent 55%),
+      radial-gradient(ellipse 60% 60% at 70% 90%, oklch(0.62 0.18 210 / 0.38) 0%, transparent 55%),
+      radial-gradient(ellipse 50% 50% at 10% 85%, oklch(0.55 0.22 290 / 0.35) 0%, transparent 55%),
+      var(--background);
+    animation: aurora-drift 32s ease-in-out infinite alternate;
+  }
+
+  /* Subtle film grain */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: 0.04;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.8'/></svg>");
+  }
+
+  @keyframes aurora-drift {
+    0%   { transform: translate(0, 0) scale(1); }
+    50%  { transform: translate(-3%, 2%) scale(1.05); }
+    100% { transform: translate(2%, -2%) scale(1.02); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    body::before { animation: none; }
+  }
+
+  /* Sober typography for glass — restraint over weight */
+  h1, h2, h3 {
+    letter-spacing: -0.02em;
+    font-weight: 500;
+  }
+  h1 { font-size: 1.875rem; }
+  h2 { font-size: 1.5rem; }
+  h3 { font-size: 1.125rem; }
+
+  /* Custom scrollbars — subtle white-with-alpha to match the glass surfaces */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(220 20% 100% / 0.12) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: hsl(220 20% 100% / 0.10);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    border-radius: 9999px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(220 20% 100% / 0.22);
+  }
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+/* Glass surfaces */
+@utility glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-highlight),
+    0 1px 2px 0 hsl(230 40% 4% / 0.3),
+    0 20px 50px -20px var(--glass-shadow);
+  border-radius: var(--radius);
+}
+
+@utility glass-inner {
+  background: hsl(220 15% 100% / 0.02);
+  backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid var(--glass-border);
+  border-radius: calc(var(--radius) - 4px);
+  box-shadow: 0 1px 2px 0 hsl(230 40% 4% / 0.2);
+}
+
+/* Chrome glass — matches the page glass surfaces' translucent navy + heavy
+ * blur, but without the inset highlight, drop shadow, or border-radius that
+ * `.glass` adds. Used by the title bar and the sidebar. */
+@utility glass-chrome {
+  background-color: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+}
+
+@utility glass-strong {
+  background: hsl(220 25% 8% / 0.82);
+  backdrop-filter: blur(40px) saturate(160%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-highlight),
+    0 30px 80px -20px var(--glass-shadow);
+  border-radius: var(--radius);
+}
+
+/* Accent gradient utilities */
+@utility bg-accent-gradient {
+  background: var(--accent-gradient);
+}
+
+@utility text-accent-gradient {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+@utility border-accent-gradient {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--background), var(--background)) padding-box,
+    var(--accent-gradient) border-box;
+}
+
+/* Hero headline (used on top-of-page h1s) */
+@utility headline {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-size: 2.5rem;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+}
+
+/* Fallback for browsers without backdrop-filter (Electron/Chromium has it) */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass,
+  .glass-strong {
+    background: hsl(230 25% 12%);
+  }
+}

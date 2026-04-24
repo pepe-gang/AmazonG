@@ -1,4 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { toast } from 'sonner';
+import {
+  SidebarInset,
+  SidebarProvider,
+  SidebarTrigger,
+} from '@/components/ui/sidebar';
+import { Separator } from '@/components/ui/separator';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import { Toaster } from '@/components/ui/sonner';
+import { AppSidebar } from '@/components/app-sidebar';
+import { Deals } from '@/pages/Deals';
 import type {
   AmazonProfile,
   JobAttempt,
@@ -17,9 +46,20 @@ function stripIpcPrefix(msg: string): string {
   return msg.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/, '').trim();
 }
 
+/** In-process fan-out so every component that called `useSettings()`
+ *  picks up an update made by another component. Each instance
+ *  maintains its own copy of the settings object (local useState); the
+ *  custom event keeps them in sync without adding another IPC channel. */
+const SETTINGS_EVENT = 'autog:settings-changed';
+
 /** Fetch settings once on mount + provide an updater. Used by the
  *  settings panels (LiveModePanel / HeadlessTogglePanel /
- *  AllowedPrefixesPanel) instead of each panel doing its own IPC dance. */
+ *  AllowedPrefixesPanel) instead of each panel doing its own IPC dance.
+ *  Subscribes to SETTINGS_EVENT so that when one component updates a
+ *  setting, every other `useSettings()` copy in the tree re-fetches
+ *  and re-renders (previously each instance cached the initial fetch
+ *  and never refreshed — the Dashboard failed counter kept the stale
+ *  value until the user hit reload). */
 function useSettings(): {
   settings: Settings | null;
   busy: boolean;
@@ -28,13 +68,35 @@ function useSettings(): {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    void window.autog.settingsGet().then(setSettings);
+    let cancelled = false;
+    const refresh = (next?: Settings) => {
+      if (next) {
+        if (!cancelled) setSettings(next);
+        return;
+      }
+      void window.autog.settingsGet().then((s) => {
+        if (!cancelled) setSettings(s);
+      });
+    };
+    refresh();
+    const onEvt = (e: Event) => {
+      const detail = (e as CustomEvent<Settings>).detail;
+      refresh(detail);
+    };
+    window.addEventListener(SETTINGS_EVENT, onEvt);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(SETTINGS_EVENT, onEvt);
+    };
   }, []);
   const update = useCallback(async (patch: Partial<Settings>) => {
     setBusy(true);
     try {
       const next = await window.autog.settingsSet(patch);
       setSettings(next);
+      // Fan out to every other live useSettings() consumer. Passing
+      // `next` as detail avoids a second IPC round-trip on each one.
+      window.dispatchEvent(new CustomEvent<Settings>(SETTINGS_EVENT, { detail: next }));
     } finally {
       setBusy(false);
     }
@@ -56,7 +118,14 @@ export function App() {
     return off;
   }, []);
 
-  return status.connected ? <MainScreen status={status} /> : <OnboardingScreen />;
+  return (
+    <>
+      {status.connected ? <MainScreen status={status} /> : <OnboardingScreen />}
+      {/* Sonner Toaster: mounted at app root so any component can `toast(...)`.
+          Styled via CSS vars inside sonner.tsx so it picks up our tokens. */}
+      <Toaster />
+    </>
+  );
 }
 
 /* ============================================================
@@ -80,24 +149,39 @@ function OnboardingScreen() {
   };
 
   return (
-    <div className="onboarding">
-      <div className="onboarding-card">
-        <div className="app-badge">
+    // Drag-region padding on top so macOS traffic lights don't overlap
+    // the card. Flex centers the card against the aurora background.
+    <div
+      className="flex flex-1 items-center justify-center px-6 pt-12 pb-6"
+      style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+    >
+      <div
+        className="glass w-full max-w-md p-7 flex flex-col gap-4"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        <div className="flex size-12 items-center justify-center rounded-xl bg-accent-gradient text-white shadow-[0_4px_16px_-4px_oklch(0.65_0.18_180_/_0.4)]">
           <AppIcon />
         </div>
-        <h1>Paste your Secret Key</h1>
-        <p className="lede">
-          Link this device to your BetterBG account to start running jobs on Amazon.
-        </p>
+        <div className="flex flex-col gap-1">
+          <h1 className="text-xl font-medium tracking-tight text-foreground">
+            Paste your Secret Key
+          </h1>
+          <p className="text-sm text-muted-foreground leading-relaxed">
+            Link this device to your BetterBG account to start running jobs on Amazon.
+          </p>
+        </div>
 
         <form
+          className="flex flex-col gap-2"
           onSubmit={(e) => {
             e.preventDefault();
             if (apiKey.trim() && !busy) void connect();
           }}
         >
-          <label htmlFor="key">Secret Key</label>
-          <input
+          <label htmlFor="key" className="text-xs font-medium text-foreground/80">
+            Secret Key
+          </label>
+          <Input
             id="key"
             type="password"
             placeholder="••••••••••••••••"
@@ -106,25 +190,32 @@ function OnboardingScreen() {
             disabled={busy}
             autoFocus
           />
-          <button className="primary-btn" type="submit" disabled={busy || !apiKey.trim()}>
+          <Button type="submit" disabled={busy || !apiKey.trim()} className="mt-2 w-full">
             {busy ? 'Connecting…' : 'Continue'}
-          </button>
+          </Button>
         </form>
 
-        {error && <div className="error-banner">{error}</div>}
-
-        <div className="guide-link">
-          <div>
-            <div className="guide-title">Don't have a key yet?</div>
-            <div className="guide-sub">Generate one in the BetterBG dashboard.</div>
+        {error && (
+          <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            {error}
           </div>
-          <button
+        )}
+
+        <div className="flex items-center justify-between gap-3 rounded-lg glass-inner p-3 text-sm">
+          <div className="flex flex-col min-w-0">
+            <span className="font-medium text-foreground/90">Don't have a key yet?</span>
+            <span className="text-xs text-muted-foreground mt-0.5">
+              Generate one in the BetterBG dashboard.
+            </span>
+          </div>
+          <Button
             type="button"
-            className="link-btn"
+            variant="ghost"
+            size="sm"
             onClick={() => void window.autog.openExternal(SETUP_GUIDE_URL)}
           >
             Open Setup Guide →
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -157,7 +248,30 @@ const EMPTY_STATS: Stats = {
 };
 
 function MainScreen({ status }: { status: RendererStatus }) {
-  const [view, setView] = useState<View>('dashboard');
+  // Route-driven nav via HashRouter — logs are opened as a modal out of
+  // the jobs table, not a full route. Keep `view` state out for now;
+  // MainShell uses react-router internally so sidebar active states
+  // stay in sync with the URL.
+  return (
+    <HashRouter>
+      <MainShell status={status} />
+    </HashRouter>
+  );
+}
+
+/**
+ * App shell: glass top-chrome header + sidebar + routed content. All
+ * worker/status state lives here so status-pill and Start/Stop can
+ * stay pinned across every route. Mirrors Bestie's `DashboardLayout`
+ * pattern — one `SidebarProvider`, a header with `SidebarTrigger`, a
+ * flex-row with `AppSidebar` + `SidebarInset`, and the routes inside.
+ */
+function MainShell({ status }: { status: RendererStatus }) {
+  // Routing handles Dashboard/Accounts; the Logs drawer is a separate
+  // right-side Sheet that opens on top of whichever route is active.
+  // Clicking "View Log" on a jobs row sets `logsAttempt`; the Sheet
+  // mounts LogsView and slides in without unmounting the dashboard.
+  const [logsAttempt, setLogsAttempt] = useState<JobAttempt | null>(null);
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [profiles, setProfiles] = useState<AmazonProfile[]>([]);
   const [attempts, setAttempts] = useState<JobAttempt[]>([]);
@@ -226,15 +340,8 @@ function MainScreen({ status }: { status: RendererStatus }) {
     }
   };
 
-  const disconnect = async () => {
-    if (!confirm('Disconnect from BetterBG? The saved Secret Key will be removed.')) return;
-    setBusy(true);
-    try {
-      await window.autog.identityDisconnect();
-    } finally {
-      setBusy(false);
-    }
-  };
+  // Disconnect moved into AccountsView — kept out of the header so the
+  // top chrome stays focused on worker state (Start/Stop + uptime).
 
   const uptimeLabel = useMemo(() => {
     if (!stats.startedAt) return '—';
@@ -253,86 +360,149 @@ function MainScreen({ status }: { status: RendererStatus }) {
   const accountsReady = profiles.filter((p) => p.enabled && p.loggedIn).length;
 
   return (
-    <div className="app">
-      <div className="toolbar">
-        <div className="toolbar-left">
-          <div className="brand-pill" title={appVersion ? `AmazonG ${appVersion}` : 'AmazonG'}>
-            <div className="app-badge">
-              <AppIcon />
-            </div>
-            <span className="brand-pill-label">AmazonG</span>
-            {appVersion && <span className="brand-pill-version">v{appVersion}</span>}
-          </div>
+    <SidebarProvider defaultOpen={false} className="!min-h-0 h-screen flex-col">
+      <header
+        className="glass-chrome flex h-12 shrink-0 items-center gap-2 border-b border-white/5 px-4 pl-24"
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+      >
+        <Separator orientation="vertical" className="mr-2 !h-4" />
+        <SidebarTrigger
+          className="-ml-1"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        />
+        <span className="font-medium text-sm">AmazonG</span>
+        {appVersion && (
+          <span className="text-xs text-muted-foreground">v{appVersion}</span>
+        )}
 
-          {view === 'dashboard' ? (
-            <>
-              <button
-                className={`primary-action ${status.running ? 'danger' : ''}`}
-                onClick={toggleWorker}
-                disabled={busy}
-              >
-                {status.running ? <StopIcon /> : <PlayIcon />}
-                {status.running ? 'Stop' : 'Start'}
-              </button>
-              <button
-                className="ghost-btn"
-                onClick={disconnect}
-                disabled={busy || status.running}
-              >
-                Disconnect
-              </button>
-              <div className={`status-pill ${status.running ? 'running' : 'idle'}`}>
-                <span className="dot" />
-                {status.running ? uptimeLabel : 'Idle'}
-              </div>
-            </>
-          ) : (
-            <button className="ghost-btn" onClick={() => setView('dashboard')}>
-              <BackIcon /> {typeof view === 'object' && view.kind === 'logs' ? 'Back' : 'Dashboard'}
-            </button>
-          )}
-        </div>
-        <div className="toolbar-right">
-          {view === 'dashboard' && (
-            <button className="ghost-btn" onClick={() => setView('accounts')}>
-              <UsersIcon />
-              Amazon Accounts
-              {accountsCount > 0 && (
-                <span className={`count-badge ${accountsReady > 0 ? 'ready' : ''}`}>
-                  {accountsReady}/{accountsCount}
-                </span>
+        <div
+          className="ml-auto flex items-center gap-2"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border border-white/10 bg-white/[0.04]">
+            <span className="relative inline-flex items-center justify-center size-3">
+              {/* Running = expanding ring behind a solid dot. Idle = flat
+                  inert dot. Reduced motion users see the solid dot only
+                  (animate-ping is suppressed by prefers-reduced-motion). */}
+              {status.running && (
+                <span className="absolute inset-0 rounded-full bg-emerald-400/70 animate-ping" />
               )}
-            </button>
-          )}
+              <span
+                className={
+                  'relative size-2 rounded-full ' +
+                  (status.running
+                    ? 'bg-emerald-400 shadow-[0_0_6px_0_oklch(0.75_0.18_150_/_0.9)]'
+                    : 'bg-white/20')
+                }
+              />
+            </span>
+            <span className="tabular-nums text-foreground/90">
+              {status.running ? uptimeLabel : 'Idle'}
+            </span>
+          </div>
+          <Button
+            variant={status.running ? 'destructive' : 'default'}
+            size="sm"
+            onClick={toggleWorker}
+            disabled={busy}
+          >
+            {status.running ? <StopIcon /> : <PlayIcon />}
+            {status.running ? 'Stop' : 'Start'}
+          </Button>
         </div>
+      </header>
+
+      <div className="flex flex-1 min-h-0 w-full">
+        <AppSidebar version={appVersion || undefined} />
+        <SidebarInset>
+          {/* No `overflow-hidden` on this outer column — pop-overs /
+              dialogs / dropdowns anchored inside the page need to be
+              able to escape vertically. Inner scroll containers
+              (`.jobs-table-wrap`, logs body) keep their own bounds. */}
+          <div className="flex flex-1 flex-col min-h-0">
+            {updateInfo && !updateDismissed && (
+              <div
+                className="mx-4 mt-3 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-sm text-amber-100"
+                role="status"
+              >
+                <span className="flex-1">
+                  <b>AmazonG v{updateInfo.latest}</b> is available (you have v{appVersion}).
+                  Download the latest from the{' '}
+                  <button
+                    className="underline hover:text-amber-50"
+                    onClick={() =>
+                      void window.autog.openExternal('https://betterbg.vercel.app/dashboard/auto-buy')
+                    }
+                  >
+                    BetterBG setup guide
+                  </button>
+                  .
+                </span>
+                <Button variant="ghost" size="sm" onClick={() => setUpdateDismissed(true)}>
+                  Dismiss
+                </Button>
+              </div>
+            )}
+            {status.lastError && (
+              <div className="mx-4 mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                {status.lastError}
+              </div>
+            )}
+            <Routes>
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route
+                path="/dashboard"
+                element={
+                  <DashboardView
+                    status={status}
+                    uptimeLabel={uptimeLabel}
+                    attempts={attempts}
+                    profiles={profiles}
+                    onViewLogs={setLogsAttempt}
+                  />
+                }
+              />
+              <Route
+                path="/accounts"
+                element={
+                  <AccountsView
+                    profiles={profiles}
+                    workerRunning={status.running}
+                    identity={status.identity}
+                  />
+                }
+              />
+              <Route path="/deals" element={<Deals />} />
+            </Routes>
+          </div>
+        </SidebarInset>
       </div>
 
-      <div className="content">
-        {updateInfo && !updateDismissed && (
-          <div className="update-notice" role="status">
-            <span>
-              <b>AmazonG v{updateInfo.latest}</b> is available (you have v{appVersion}).
-              Download the latest from the <button className="link-inline" onClick={() => void window.autog.openExternal('https://betterbg.vercel.app/dashboard/auto-buy')}>BetterBG setup guide</button>.
-            </span>
-            <button className="ghost-btn" onClick={() => setUpdateDismissed(true)}>Dismiss</button>
+      {/* Logs as a right-side Sheet — the dashboard stays mounted
+          underneath so closing the drawer returns users to the exact
+          scroll position they left. onOpenChange handles both the
+          built-in X close and swipe/escape dismissal. */}
+      <Sheet
+        open={logsAttempt !== null}
+        onOpenChange={(next) => {
+          if (!next) setLogsAttempt(null);
+        }}
+      >
+        <SheetContent
+          side="right"
+          className="w-full sm:max-w-3xl p-0 gap-0 flex flex-col"
+        >
+          <SheetHeader className="sr-only">
+            <SheetTitle>
+              Attempt logs — {logsAttempt?.dealTitle ?? logsAttempt?.amazonEmail ?? ''}
+            </SheetTitle>
+          </SheetHeader>
+          <div className="flex-1 min-h-0 overflow-auto">
+            {logsAttempt && <LogsView attempt={logsAttempt} />}
           </div>
-        )}
-        {status.lastError && <div className="error-banner">{status.lastError}</div>}
-        {view === 'dashboard' ? (
-          <DashboardView
-            status={status}
-            uptimeLabel={uptimeLabel}
-            attempts={attempts}
-            profiles={profiles}
-            onViewLogs={(attempt) => setView({ kind: 'logs', attempt })}
-          />
-        ) : view === 'accounts' ? (
-          <AccountsView profiles={profiles} workerRunning={status.running} />
-        ) : (
-          <LogsView attempt={view.attempt} />
-        )}
-      </div>
-    </div>
+        </SheetContent>
+      </Sheet>
+    </SidebarProvider>
   );
 }
 
@@ -347,6 +517,13 @@ function DashboardView(props: {
   onViewLogs: (a: JobAttempt) => void;
 }) {
   const { status, uptimeLabel, attempts, profiles, onViewLogs } = props;
+  const { settings } = useSettings();
+  // Timestamp of the last time the user reset the Failed counter.
+  // Every attempt with a failed status whose createdAt is earlier than
+  // this is excluded from the count + the failures-by-reason
+  // breakdown. The rows themselves still exist (BG re-syncs them);
+  // this is purely a display filter.
+  const failedHiddenBeforeTs = settings?.failedHiddenBeforeTs ?? null;
 
   const accountsCount = profiles.length;
   const accountsReady = profiles.filter((p) => p.enabled && p.loggedIn).length;
@@ -376,26 +553,43 @@ function DashboardView(props: {
   const statusCounts = useMemo(() => {
     const c = { pending: 0, success: 0, cancelled: 0, failed: 0 };
     for (const a of attempts) {
-      c[STATUS_GROUP[a.status]] += 1;
+      const group = STATUS_GROUP[a.status];
+      // Hide pre-reset failures from the counter — the popover's Clear
+      // action stamps settings.failedHiddenBeforeTs when the user wants
+      // to start fresh. Server rows keep flowing in through
+      // listMergedAttempts; we just skip them in the dashboard number.
+      if (
+        group === 'failed' &&
+        failedHiddenBeforeTs !== null &&
+        a.createdAt < failedHiddenBeforeTs
+      ) {
+        continue;
+      }
+      c[group] += 1;
     }
     return c;
-  }, [attempts]);
+  }, [attempts, failedHiddenBeforeTs]);
 
   const failedErrorBreakdown = useMemo(() => {
     const by = new Map<string, number>();
     for (const a of attempts) {
       if (STATUS_GROUP[a.status] !== 'failed') continue;
+      if (failedHiddenBeforeTs !== null && a.createdAt < failedHiddenBeforeTs) continue;
       const key = normalizeFailureError(a.error);
       by.set(key, (by.get(key) ?? 0) + 1);
     }
     return Array.from(by.entries()).sort((a, b) => b[1] - a[1]);
-  }, [attempts]);
+  }, [attempts, failedHiddenBeforeTs]);
 
   const fmt = (n: number) => `${n >= 0 ? '+' : '−'}$${Math.abs(n).toFixed(2)}`;
 
   return (
-    <>
-      <div className="stat-row">
+    // No `overflow-hidden` here — the inner Jobs section has its own
+    // scroll container (`.jobs-table-wrap`) and clipping this wrapper
+    // also clips absolute-positioned popovers anchored to the stat
+    // tiles above (e.g. FailedErrorPopover).
+    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <StatCard
           icon={<BoltIcon />}
           iconVariant="blue"
@@ -466,13 +660,15 @@ function DashboardView(props: {
         />
       </div>
 
-      <JobsTable
-        attempts={attempts}
-        profiles={profiles}
-        onViewLogs={onViewLogs}
-        workerRunning={status.running}
-      />
-    </>
+      <section className="glass flex flex-1 min-h-0 flex-col overflow-hidden">
+        <JobsTable
+          attempts={attempts}
+          profiles={profiles}
+          onViewLogs={onViewLogs}
+          workerRunning={status.running}
+        />
+      </section>
+    </div>
   );
 }
 
@@ -505,7 +701,7 @@ const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
  * tick the column on (which writes the new order back to settings),
  * the "haven't-seen-it-yet" check stops firing.
  */
-const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail', 'buyMode']);
+const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail']);
 
 function resolveColumnOrder(saved: string[]): JobColumnId[] {
   const valid = new Set<JobColumnId>(DEFAULT_COLUMN_ORDER);
@@ -1021,24 +1217,25 @@ function JobsTable({
   };
 
   return (
-    <div className="jobs-card">
-      <div className="jobs-head">
-        <h2>Amazon Purchases</h2>
-        <div className="jobs-head-right">
-          <div className="jobs-count">
-            {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
-          </div>
-        </div>
+    // Outer is a plain flex column — the parent DashboardView section
+    // already wraps this in `.glass` so we don't need another card
+    // surface here. The inner blocks inherit that translucent shell.
+    <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+      <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-white/[0.04]">
+        <h2 className="text-base font-medium tracking-tight">Amazon Purchases</h2>
+        <span className="text-xs text-muted-foreground tabular-nums">
+          {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
+        </span>
       </div>
 
       {attempts.length > 0 && (
-        <div className="jobs-filters">
-          <input
-            className="jobs-search"
+        <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/[0.04]">
+          <Input
             type="search"
             placeholder="Search title, account, deal key, order id…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            className="h-8 max-w-xs"
           />
           <ColumnsMenu
             order={fullColumnOrder}
@@ -1052,7 +1249,11 @@ function JobsTable({
             onToggleAll={setAllStatusGroupsVisible}
             onReset={resetStatusFilter}
           />
-          <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
+          <select
+            value={accountFilter}
+            onChange={(e) => setAccountFilter(e.target.value)}
+            className="h-8 rounded-md border border-white/10 bg-white/[0.04] px-2 text-sm text-foreground/90 hover:bg-white/[0.06]"
+          >
             <option value="all">All accounts</option>
             {accountOptions.map(({ email, label }) => (
               <option key={email} value={email}>
@@ -1061,43 +1262,48 @@ function JobsTable({
             ))}
           </select>
           {hasFilter && (
-            <button className="ghost-btn" onClick={clearFilters}>
+            <Button variant="ghost" size="sm" onClick={clearFilters}>
               Clear
-            </button>
+            </Button>
           )}
         </div>
       )}
 
       {selected.size > 0 && (
-        <div className="bulk-bar" role="toolbar">
-          <span className="bulk-count">
+        <div
+          className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/[0.04] bg-accent/30"
+          role="toolbar"
+        >
+          <span className="text-xs text-muted-foreground mr-1">
             {bulkBusy && bulkProgress
               ? `${bulkBusy === 'verify' ? 'Verifying' : bulkBusy === 'tracking' ? 'Fetching tracking' : 'Deleting'} ${bulkProgress.done}/${bulkProgress.total}…`
               : `${selected.size} selected`}
           </span>
-          <button
-            className="ghost-btn"
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={bulkBusy !== null}
             title={`Copy ${selected.size} row${selected.size === 1 ? '' : 's'} as TSV (paste into Google Sheets / Excel)`}
             onClick={async () => {
               const tsv = attemptsToTSV(selectedAttempts, columnOrder);
               try {
                 await navigator.clipboard.writeText(tsv);
-                setOrderToast(
-                  `Copied ${selectedAttempts.length} row${selectedAttempts.length === 1 ? '' : 's'} — paste into a spreadsheet.`,
+                toast.success(
+                  `Copied ${selectedAttempts.length} row${selectedAttempts.length === 1 ? '' : 's'}`,
+                  { description: 'Paste into a spreadsheet.' },
                 );
               } catch (err) {
-                setOrderToast(
-                  `Copy failed: ${err instanceof Error ? err.message : String(err)}`,
-                );
+                toast.error('Copy failed', {
+                  description: err instanceof Error ? err.message : String(err),
+                });
               }
-              setTimeout(() => setOrderToast(null), 4000);
             }}
           >
             Copy ({selected.size})
-          </button>
-          <button
-            className="ghost-btn"
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={bulkBusy !== null || selectedVerifiable.length === 0}
             title={
               selectedVerifiable.length === 0
@@ -1107,9 +1313,10 @@ function JobsTable({
             onClick={() => void runBulkVerify()}
           >
             Verify Order ({selectedVerifiable.length})
-          </button>
-          <button
-            className="ghost-btn"
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={bulkBusy !== null || selectedForTracking.length === 0}
             title={
               selectedForTracking.length === 0
@@ -1119,26 +1326,29 @@ function JobsTable({
             onClick={() => void runBulkFetchTracking()}
           >
             Fetch Tracking ({selectedForTracking.length})
-          </button>
-          <button
-            className="ghost-btn danger-text"
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
             disabled={bulkBusy !== null}
             onClick={() => void runBulkDelete()}
           >
             Delete ({selected.size})
-          </button>
+          </Button>
         </div>
       )}
 
-      <div className="jobs-table-wrap">
+      <div className="flex-1 min-h-0 overflow-auto jobs-table-wrap">
         {attempts.length === 0 ? (
-          <div className="jobs-empty">
+          <div className="flex items-center justify-center min-h-[200px] text-sm text-muted-foreground text-center px-8">
             {workerRunning
               ? 'Worker is polling. Rows will appear once a job is claimed.'
               : 'Click Start to begin polling BetterBG for jobs. Each claimed job will create one row per Amazon account.'}
           </div>
         ) : visible.length === 0 ? (
-          <div className="jobs-empty">No rows match current filters.</div>
+          <div className="flex items-center justify-center min-h-[200px] text-sm text-muted-foreground">
+            No rows match current filters.
+          </div>
         ) : (
           <table className="jobs-table">
             <thead>
@@ -1471,8 +1681,13 @@ function DealIdChip({ text, copyValue }: { text: string; copyValue?: string }) {
           .then(() => {
             setCopied(true);
             setTimeout(() => setCopied(false), 1200);
+            toast.success('Copied', { description: value, duration: 1800 });
           })
-          .catch(() => {});
+          .catch((err) => {
+            toast.error('Copy failed', {
+              description: err instanceof Error ? err.message : String(err),
+            });
+          });
       }}
     >
       {text}
@@ -1651,8 +1866,22 @@ function JobsCell({
                   key={code}
                   type="button"
                   className="tracking-pill"
-                  title="Click to copy"
-                  onClick={() => void navigator.clipboard.writeText(code).catch(() => undefined)}
+                  title="Click to copy tracking id"
+                  onClick={() => {
+                    void navigator.clipboard
+                      .writeText(code)
+                      .then(() =>
+                        toast.success('Tracking id copied', {
+                          description: code,
+                          duration: 1800,
+                        }),
+                      )
+                      .catch((err) =>
+                        toast.error('Copy failed', {
+                          description: err instanceof Error ? err.message : String(err),
+                        }),
+                      );
+                  }}
                 >
                   {code}
                 </button>
@@ -1776,6 +2005,98 @@ function formatTime(iso: string): string {
 }
 
 /* ============================================================
+   Log-line formatting
+   ============================================================ */
+
+/**
+ * Fields that are the same on every log line for a given attempt
+ * (already shown in the drawer header), plus empty/null noise.
+ * Strip them from the key/value tail so lines are scannable.
+ */
+const LOG_REDUNDANT_KEYS = new Set(['jobId', 'profile', 'attemptId']);
+
+/**
+ * Compact a `data` blob into:
+ *  - a single "headline" string (prefer an explicit `message`; fall
+ *    back to blank so the event name carries the line), and
+ *  - the remaining key/value pairs, sorted for stable output.
+ *
+ * Null / undefined / empty-string values are dropped — they're never
+ * interesting and they bloat every scrape.ok line with
+ * `cashbackPct=null, condition=null`.
+ */
+function formatLogData(data: unknown): { message: string | null; pairs: [string, string][] } {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { message: null, pairs: [] };
+  }
+  const obj = data as Record<string, unknown>;
+  let message: string | null = null;
+  const pairs: [string, string][] = [];
+  for (const [key, raw] of Object.entries(obj)) {
+    if (LOG_REDUNDANT_KEYS.has(key)) continue;
+    if (raw === null || raw === undefined || raw === '') continue;
+    if (key === 'message' && typeof raw === 'string') {
+      message = raw;
+      continue;
+    }
+    let value: string;
+    if (typeof raw === 'string') value = raw;
+    else if (typeof raw === 'number' || typeof raw === 'boolean') value = String(raw);
+    else value = JSON.stringify(raw);
+    // Clip runaway long values (e.g. a 500-char error detail) so the
+    // line doesn't wrap for 10 rows. Full detail still lives in the
+    // raw log file + can be surfaced later via a detail view.
+    if (value.length > 160) value = value.slice(0, 157) + '…';
+    pairs.push([key, value]);
+  }
+  return { message, pairs };
+}
+
+function LogLine({ ev }: { ev: LogEvent }) {
+  const { message, pairs } = useMemo(() => formatLogData(ev.data), [ev.data]);
+  return (
+    <div className="flex gap-3 px-3 py-1.5 hover:bg-white/[0.02] rounded">
+      <span className="shrink-0 tabular-nums text-muted-foreground/70 text-[11.5px] font-mono leading-5">
+        {ev.ts.slice(11, 19)}
+      </span>
+      <span
+        className={
+          'shrink-0 h-5 flex items-center px-1.5 rounded text-[10px] font-medium uppercase tracking-wider ' +
+          (ev.level === 'error'
+            ? 'bg-red-500/15 text-red-300'
+            : ev.level === 'warn'
+              ? 'bg-amber-500/15 text-amber-300'
+              : ev.level === 'debug'
+                ? 'bg-white/[0.06] text-muted-foreground'
+                : 'bg-sky-500/15 text-sky-300')
+        }
+      >
+        {ev.level}
+      </span>
+      <div className="flex-1 min-w-0 leading-5">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="font-mono text-[12.5px] text-foreground">{ev.message}</span>
+          {message && (
+            <span className="text-[12.5px] text-foreground/80">{message}</span>
+          )}
+        </div>
+        {pairs.length > 0 && (
+          <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px]">
+            {pairs.map(([k, v]) => (
+              <span key={k} className="text-muted-foreground">
+                <span className="text-muted-foreground/60">{k}</span>
+                <span className="text-muted-foreground/40">=</span>
+                <span className="text-foreground/75">{v}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    Dry-run banner (toggle)
    ============================================================ */
 function LiveModePanel() {
@@ -1793,17 +2114,17 @@ function LiveModePanel() {
           </div>
         </div>
         <label
-          className={`toggle ${live ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={live ? 'Real orders will be placed' : 'Dry-run — no orders placed'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={live}
-            onChange={(e) => void update({ buyDryRun: !e.target.checked })}
+            onCheckedChange={(v) => void update({ buyDryRun: !v })}
             disabled={busy}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{live ? 'On' : 'Off'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {live ? 'On' : 'Off'}
+          </span>
         </label>
       </div>
     </div>
@@ -1859,57 +2180,63 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
   };
 
   return (
-    <div className="logs-view">
-      <div className="logs-head">
-        <div>
-          <div className="logs-title">{attempt.dealTitle ?? '(untitled deal)'}</div>
-          <div className="logs-meta">
-            <span className="account-pill">{attempt.amazonEmail}</span>
-            <span className="meta-sep">·</span>
-            <StatusBadge status={attempt.status} />
-            <span className="meta-sep">·</span>
-            <span>{formatDate(attempt.createdAt)} {formatTime(attempt.createdAt)}</span>
-            {attempt.cost && (
-              <>
-                <span className="meta-sep">·</span>
-                <span>{attempt.cost}</span>
-              </>
-            )}
-            {attempt.cashbackPct !== null && (
-              <>
-                <span className="meta-sep">·</span>
-                <span>{attempt.cashbackPct}% cashback</span>
-              </>
-            )}
-            {attempt.orderId && (
-              <>
-                <span className="meta-sep">·</span>
-                <span className="cell-mono">order {attempt.orderId}</span>
-              </>
-            )}
+    // Match every other page's Bestie rhythm: outer padding column,
+    // content lives in a glass section.
+    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0">
+      <section className="glass flex flex-col gap-3 px-5 py-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <div className="text-base font-medium text-foreground truncate max-w-[760px]">
+              {attempt.dealTitle ?? '(untitled deal)'}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              <span className="account-pill">{attempt.amazonEmail}</span>
+              <span className="text-muted-foreground/60">·</span>
+              <StatusBadge status={attempt.status} />
+              <span className="text-muted-foreground/60">·</span>
+              <span>{formatDate(attempt.createdAt)} {formatTime(attempt.createdAt)}</span>
+              {attempt.cost && (
+                <>
+                  <span className="text-muted-foreground/60">·</span>
+                  <span className="tabular-nums">{attempt.cost}</span>
+                </>
+              )}
+              {attempt.cashbackPct !== null && (
+                <>
+                  <span className="text-muted-foreground/60">·</span>
+                  <span className="tabular-nums">{attempt.cashbackPct}% cashback</span>
+                </>
+              )}
+              {attempt.orderId && (
+                <>
+                  <span className="text-muted-foreground/60">·</span>
+                  <span className="font-mono text-[11px]">order {attempt.orderId}</span>
+                </>
+              )}
+            </div>
           </div>
-        </div>
-        <div className="logs-head-actions">
           {hasSnapshot && (
-            <>
-              <button className="ghost-btn" onClick={() => void openSnapshot('screenshot')}>Screenshot</button>
-              <button className="ghost-btn" onClick={() => void openSnapshot('html')}>HTML</button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button variant="secondary" size="sm" onClick={() => void openSnapshot('screenshot')}>
+                Screenshot
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => void openSnapshot('html')}>
+                HTML
+              </Button>
               {snapshotData?.hasTrace && (
-                <button
-                  className="ghost-btn"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   title="Open trace file in Finder — drag into trace.playwright.dev to inspect"
                   onClick={() => void window.autog.jobsOpenTrace(attempt.attemptId)}
                 >
                   Trace
-                </button>
+                </Button>
               )}
-            </>
+            </div>
           )}
-          <button className="ghost-btn" onClick={() => void reload()} disabled={loading}>
-            {loading ? 'Loading…' : 'Refresh'}
-          </button>
         </div>
-      </div>
+      </section>
 
       {attempt.error && <div className="error-banner">{attempt.error}</div>}
 
@@ -1948,16 +2275,7 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
         {logs.length === 0 ? (
           <div className="log-empty">{loading ? 'Loading logs…' : 'No logs recorded for this attempt.'}</div>
         ) : (
-          logs.map((ev, i) => (
-            <div key={i} className="log-line">
-              <span className="log-time">{ev.ts.slice(11, 19)}</span>
-              <span className={`log-level ${ev.level}`}>{ev.level}</span>
-              <span className="log-message">
-                {ev.message}
-                {ev.data ? <span className="log-data"> {JSON.stringify(ev.data)}</span> : null}
-              </span>
-            </div>
-          ))
+          logs.map((ev, i) => <LogLine key={i} ev={ev} />)
         )}
       </div>
     </div>
@@ -1970,9 +2288,11 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
 function AccountsView({
   profiles,
   workerRunning,
+  identity,
 }: {
   profiles: AmazonProfile[];
   workerRunning: boolean;
+  identity: RendererStatus['identity'];
 }) {
   const [lockedToast, setLockedToast] = useState(false);
   const handleLockedClick = () => {
@@ -1980,18 +2300,24 @@ function AccountsView({
     setTimeout(() => setLockedToast(false), 4000);
   };
   return (
-    <>
+    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0 overflow-auto">
       {workerRunning && (
-        <div className="lock-banner" role="alert">
-          <span className="lock-banner-icon">🔒</span>
+        <div
+          className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-sm text-amber-100"
+          role="alert"
+        >
+          <span>🔒</span>
           <span>
             Account settings are locked while the worker is running. Click <b>Stop</b> in the
-            dashboard to edit accounts, prefixes, or headless mode.
+            header to edit accounts, prefixes, or headless mode.
           </span>
         </div>
       )}
       <div
-        className={workerRunning ? 'lock-wrapper lock-wrapper-locked' : 'lock-wrapper'}
+        className={
+          'flex flex-col gap-3 ' +
+          (workerRunning ? 'opacity-60 pointer-events-none' : '')
+        }
         aria-disabled={workerRunning}
         onClickCapture={(e) => {
           if (!workerRunning) return;
@@ -2010,13 +2336,91 @@ function AccountsView({
         <BuyWithFillersPanel />
         <SnapshotSettingsPanel />
         <AccountsList profiles={profiles} />
+        <BetterBGConnectionPanel identity={identity} workerRunning={workerRunning} />
       </div>
       {lockedToast && (
-        <div className="lock-toast" role="status">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 glass-strong px-4 py-2 text-sm rounded-full shadow-lg z-50" role="status">
           Stop the worker first — settings can't be changed while jobs are polling.
         </div>
       )}
-    </>
+    </div>
+  );
+}
+
+/**
+ * BetterBG identity + disconnect action. Moved out of the header so
+ * the glass top chrome stays focused on worker state (Start/Stop,
+ * uptime) and irreversible "detach this device" lives with the other
+ * settings. Uses ConfirmDialog for the "really disconnect?" prompt so
+ * it matches the glass look of everything else.
+ */
+function BetterBGConnectionPanel({
+  identity,
+  workerRunning,
+}: {
+  identity: RendererStatus['identity'];
+  workerRunning: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+
+  const startDisconnect = () => {
+    setConfirmState({
+      title: 'Disconnect from BetterBG?',
+      message:
+        'The saved Secret Key is removed and this device stops claiming jobs. You\'ll need to paste the key again to reconnect. Your Amazon profiles + their saved sessions are untouched.',
+      confirmLabel: 'Disconnect',
+      danger: true,
+      onConfirm: async () => {
+        setBusy(true);
+        try {
+          await window.autog.identityDisconnect();
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
+  };
+
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div className="min-w-0">
+          <div className="prefix-title">BetterBG connection</div>
+          <div className="prefix-sub">
+            This device is linked to {identity?.userEmail ?? 'your BetterBG account'} via a
+            saved Secret Key. The worker uses that key to claim jobs. Disconnect to unlink
+            the device — you can re-paste the key later to reconnect.
+          </div>
+          {identity?.last4 && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="uppercase tracking-wider text-[10px]">Key</span>
+              <span className="font-mono text-foreground/70">…{identity.last4}</span>
+              {identity.keyCreatedAt && (
+                <>
+                  <span className="text-muted-foreground/60">·</span>
+                  <span>added {formatDate(identity.keyCreatedAt)}</span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={startDisconnect}
+          disabled={busy || workerRunning}
+          title={
+            workerRunning
+              ? 'Stop the worker first — can\'t disconnect while jobs are polling'
+              : 'Unlink this device from BetterBG'
+          }
+        >
+          Disconnect
+        </Button>
+      </div>
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+    </div>
   );
 }
 
@@ -2036,17 +2440,17 @@ function AutoStartWorkerPanel() {
           </div>
         </div>
         <label
-          className={`toggle ${on ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={on ? 'Worker starts on launch' : 'Worker waits for you to click Start'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={on}
-            onChange={(e) => void update({ autoStartWorker: e.target.checked })}
+            onCheckedChange={(v) => void update({ autoStartWorker: v })}
             disabled={busy}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{on ? 'On' : 'Off'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {on ? 'On' : 'Off'}
+          </span>
         </label>
       </div>
     </div>
@@ -2077,17 +2481,17 @@ function BuyWithFillersPanel() {
           </div>
         </div>
         <label
-          className={`toggle ${on ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={on ? 'Filler mode enabled — all accounts' : 'Filler mode disabled'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={on}
-            onChange={(e) => void update({ buyWithFillers: e.target.checked })}
+            onCheckedChange={(v) => void update({ buyWithFillers: v })}
             disabled={busy}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{on ? 'On' : 'Off'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {on ? 'On' : 'Off'}
+          </span>
         </label>
       </div>
     </div>
@@ -2150,17 +2554,17 @@ function SnapshotSettingsPanel() {
           </div>
         </div>
         <label
-          className={`toggle ${on ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={on ? 'Snapshots enabled' : 'Snapshots disabled'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={on}
-            onChange={(e) => void update({ snapshotOnFailure: e.target.checked })}
+            onCheckedChange={(v) => void update({ snapshotOnFailure: v })}
             disabled={busy}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{on ? 'On' : 'Off'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {on ? 'On' : 'Off'}
+          </span>
         </label>
       </div>
       {on && (
@@ -2259,17 +2663,17 @@ function HeadlessTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
           </div>
         </div>
         <label
-          className={`toggle ${on ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={on ? 'Headless: all accounts run hidden' : 'At least one account is set to Visible'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={on}
-            onChange={() => void toggle()}
+            onCheckedChange={() => void toggle()}
             disabled={busy || applying}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{on ? 'Headless' : 'Visible'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
+            {on ? 'Headless' : 'Visible'}
+          </span>
         </label>
       </div>
     </div>
@@ -2663,9 +3067,7 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                   </div>
                   {!isRenaming && (
                     <label
-                      className={`toggle ${p.loggedIn && p.enabled ? 'on' : 'off'} ${
-                        !p.loggedIn ? 'toggle-locked' : ''
-                      }`}
+                      className="flex items-center gap-2 cursor-pointer"
                       title={
                         !p.loggedIn
                           ? 'Sign in first to enable this account'
@@ -2674,14 +3076,12 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                             : 'Disabled — worker skips this account'
                       }
                     >
-                      <input
-                        type="checkbox"
+                      <Switch
                         checked={p.loggedIn && p.enabled}
                         disabled={!p.loggedIn}
-                        onChange={(e) => void toggleEnabled(p.email, e.target.checked)}
+                        onCheckedChange={(v) => void toggleEnabled(p.email, v)}
                       />
-                      <span className="toggle-slider" />
-                      <span className="toggle-label">
+                      <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
                         {p.enabled ? 'Enabled' : 'Disabled'}
                       </span>
                     </label>
@@ -2744,43 +3144,36 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                 {!isRenaming && (
                   <div className="account-actions">
                     <label
-                      className={`toggle ${p.headless !== false ? 'on' : 'off'}`}
+                      className="flex items-center gap-2 cursor-pointer"
                       title={
                         p.headless !== false
                           ? 'Headless ON — worker runs this account without showing a browser window'
                           : 'Headless OFF — worker shows the Chromium window for this account (useful for debugging)'
                       }
                     >
-                      <input
-                        type="checkbox"
+                      <Switch
                         checked={p.headless !== false}
-                        onChange={(e) =>
-                          void window.autog.profilesSetHeadless(p.email, e.target.checked)
+                        onCheckedChange={(v) =>
+                          void window.autog.profilesSetHeadless(p.email, v)
                         }
                       />
-                      <span className="toggle-slider" />
-                      <span className="toggle-label">Headless</span>
+                      <span className="text-xs font-medium text-foreground/80">Headless</span>
                     </label>
                     <label
-                      className={`toggle ${p.buyWithFillers ? 'on' : 'off'}`}
+                      className="flex items-center gap-2 cursor-pointer"
                       title={
                         p.buyWithFillers
                           ? 'Buy-with-Fillers ON for this account — places target alongside ~10 filler items, cancels fillers after verify'
                           : 'Buy-with-Fillers OFF — this account follows the global setting (or plain Buy Now if global is off too)'
                       }
                     >
-                      <input
-                        type="checkbox"
+                      <Switch
                         checked={p.buyWithFillers}
-                        onChange={(e) =>
-                          void window.autog.profilesSetBuyWithFillers(
-                            p.email,
-                            e.target.checked,
-                          )
+                        onCheckedChange={(v) =>
+                          void window.autog.profilesSetBuyWithFillers(p.email, v)
                         }
                       />
-                      <span className="toggle-slider" />
-                      <span className="toggle-label">Fillers</span>
+                      <span className="text-xs font-medium text-foreground/80">Fillers</span>
                     </label>
                     {(() => {
                       // Cashback gate — server-side setting on BG, reflected
@@ -2790,20 +3183,20 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                         remoteSettings[p.email.toLowerCase()]?.requireMinCashback ?? true;
                       return (
                         <label
-                          className={`toggle ${require ? 'on' : 'off'}`}
+                          className="flex items-center gap-2 cursor-pointer"
                           title={
                             require
                               ? 'Cashback gate ON — buys only when cashback ≥ the worker floor (6% default). Click to allow any %.'
                               : 'Cashback gate OFF — buys regardless of cashback. Click to re-enable the 6% floor.'
                           }
                         >
-                          <input
-                            type="checkbox"
+                          <Switch
                             checked={require}
-                            onChange={() => void toggleRequireMinCashback(p.email)}
+                            onCheckedChange={() => void toggleRequireMinCashback(p.email)}
                           />
-                          <span className="toggle-slider" />
-                          <span className="toggle-label">Require ≥ 6% CB</span>
+                          <span className="text-xs font-medium text-foreground/80">
+                            Require ≥ 6% CB
+                          </span>
                         </label>
                       );
                     })()}
@@ -2862,14 +3255,6 @@ function ConfirmDialog({
   onClose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    if (!state) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [state, onClose]);
 
   if (!state) return null;
 
@@ -2887,28 +3272,48 @@ function ConfirmDialog({
   };
 
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="modal-card" onMouseDown={(e) => e.stopPropagation()}>
-        <div className={`modal-icon ${state.danger ? 'danger' : ''}`}>
-          {state.danger ? <AlertIcon /> : <InfoIcon />}
-        </div>
-        <div className="modal-title">{state.title}</div>
-        <div className="modal-message">{state.message}</div>
-        <div className="modal-actions">
-          <button className="ghost-btn" onClick={onClose} disabled={busy}>
+    // Controlled shadcn Dialog — `open` follows the presence of state;
+    // onOpenChange is invoked when the user clicks the backdrop, hits
+    // Escape, or clicks the built-in close X. The overlay + content
+    // already carry the glass-strong animations from the primitive.
+    <Dialog
+      open={true}
+      onOpenChange={(next) => {
+        if (!next && !busy) onClose();
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            {state.danger && (
+              <span
+                className="flex size-7 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/15 text-red-300"
+                aria-hidden
+              >
+                <AlertIcon />
+              </span>
+            )}
+            {state.title}
+          </DialogTitle>
+          <DialogDescription className="text-sm text-muted-foreground leading-relaxed">
+            {state.message}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
-          </button>
-          <button
-            className={`primary-action ${state.danger ? 'danger' : ''}`}
+          </Button>
+          <Button
+            variant={state.danger ? 'destructive' : 'default'}
             onClick={() => void handleConfirm()}
             disabled={busy}
             autoFocus
           >
             {busy ? 'Working…' : state.confirmLabel ?? 'Confirm'}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -2971,18 +3376,40 @@ function normalizeFailureError(raw: string | null | undefined): string {
 
 function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][]; total: number }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLSpanElement | null>(null);
+  const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const { update } = useSettings();
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+
+  // Position the popover in viewport coords each time it opens. Doing
+  // it on open (not on render) means we don't need to listen for
+  // scroll/resize; if the user scrolls with the popover open we just
+  // accept the slight drift — the click-outside handler closes it
+  // soon enough. Simpler than a full Radix Popover install.
+  useEffect(() => {
+    if (!open || !wrapRef.current) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    setCoords({ top: rect.bottom + 6, left: rect.left });
+  }, [open]);
+
+  // Click-outside handler — needs to look at BOTH the trigger wrap and
+  // the popover (which is now portaled elsewhere in the DOM).
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (wrapRef.current?.contains(t)) return;
+      if (popRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [open]);
+
   if (breakdown.length === 0) return null;
   return (
-    <span className="stat-label-info-wrap" ref={ref}>
+    <span className="stat-label-info-wrap" ref={wrapRef}>
       <button
         type="button"
         className="stat-label-info"
@@ -2991,19 +3418,77 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
       >
         <InfoIcon size={14} />
       </button>
-      {open && (
-        <div className="error-breakdown-pop" role="dialog">
-          <div className="error-breakdown-head">Failures by reason</div>
-          <ul className="error-breakdown-list">
-            {breakdown.map(([msg, n]) => (
-              <li key={msg}>
-                <span className="error-breakdown-count">{n}</span>
-                <span className="error-breakdown-msg">{msg}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {open && coords &&
+        createPortal(
+          <div
+            ref={popRef}
+            role="dialog"
+            className="error-breakdown-pop"
+            style={{
+              // position: fixed so ancestor stacking contexts (the
+              // adjacent .glass section's backdrop-filter layer) can't
+              // occlude us. `z-[1000]` keeps us above everything.
+              position: 'fixed',
+              top: coords.top,
+              left: coords.left,
+              zIndex: 1000,
+            }}
+          >
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Failures by reason
+              </span>
+              {/* Resets the failure counter + the rest of this breakdown by
+                  deleting every failed jobs row. Permanent — the rows +
+                  their logs are removed locally. */}
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-red-300 hover:text-red-200 hover:bg-red-500/10"
+                onClick={() => {
+                  // Close the popover first — if we leave it open, its
+                  // z-[1000] sits above the shadcn Dialog (z-50) and the
+                  // confirm prompt ends up visually buried underneath.
+                  setOpen(false);
+                  setConfirmState({
+                    title: `Reset Failed counter?`,
+                    message: `Hides the ${total} current failure${total === 1 ? '' : 's'} from the Dashboard counter and the failures-by-reason list. The rows themselves stay in Jobs so logs remain accessible; new failures after this point count normally.`,
+                    confirmLabel: 'Reset',
+                    danger: true,
+                    onConfirm: async () => {
+                      try {
+                        // Stamp "now" so pre-existing failures are
+                        // filtered out of the counter. Also sweep local
+                        // failed rows in the same shot so the Jobs
+                        // table doesn't carry dead rows that BG won't
+                        // re-sync (failed rows with no orderId).
+                        await update({ failedHiddenBeforeTs: new Date().toISOString() });
+                        await window.autog.jobsClearFailed().catch(() => 0);
+                        toast.success(`Reset — hiding ${total} prior failure${total === 1 ? '' : 's'}`);
+                      } catch (err) {
+                        toast.error('Reset failed', {
+                          description: err instanceof Error ? err.message : String(err),
+                        });
+                      }
+                    },
+                  });
+                }}
+              >
+                Clear
+              </Button>
+            </div>
+            <ul className="error-breakdown-list">
+              {breakdown.map(([msg, n]) => (
+                <li key={msg}>
+                  <span className="error-breakdown-count">{n}</span>
+                  <span className="error-breakdown-msg">{msg}</span>
+                </li>
+              ))}
+            </ul>
+          </div>,
+          document.body,
+        )}
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </span>
   );
 }
@@ -3015,20 +3500,56 @@ function StatCard(props: {
   subtitle?: string;
   rows: { label: React.ReactNode; value: React.ReactNode; valueClass?: string }[];
 }) {
+  // Icon-badge tints — the accent-gradient is reserved for the primary
+  // brand moments, so stat tiles use their own desaturated jewel tones
+  // with matching alpha backgrounds. Colors hand-picked against the
+  // glass surface so every variant stays readable.
+  const badge: Record<typeof props.iconVariant, string> = {
+    blue: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+    purple: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
+    orange: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+    green: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+    red: 'bg-red-500/15 text-red-300 border-red-500/30',
+  };
+  const valueTone = (cls?: string): string => {
+    if (!cls) return '';
+    if (cls.includes('green')) return 'text-emerald-300';
+    if (cls.includes('red')) return 'text-red-300';
+    if (cls.includes('purple')) return 'text-violet-300';
+    if (cls.includes('muted')) return 'text-muted-foreground';
+    return '';
+  };
+
   return (
-    <div className="stat-card">
-      <div className="stat-header">
-        <div className={`stat-icon ${props.iconVariant}`}>{props.icon}</div>
-        <div>
-          <div className="stat-title">{props.title}</div>
-          {props.subtitle && <div className="stat-sub">{props.subtitle}</div>}
+    <div className="glass flex flex-col gap-3 p-4">
+      <div className="flex items-start gap-3">
+        <div
+          className={
+            'flex size-9 shrink-0 items-center justify-center rounded-lg border ' +
+            badge[props.iconVariant]
+          }
+        >
+          {props.icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium leading-tight">{props.title}</div>
+          {props.subtitle && (
+            <div className="text-xs text-muted-foreground mt-0.5">{props.subtitle}</div>
+          )}
         </div>
       </div>
-      <div className="stat-rows">
+      <div className="flex flex-col gap-1.5 text-sm">
         {props.rows.map((r, i) => (
-          <div key={i} className="stat-row-item">
-            <span className="stat-label">{r.label}</span>
-            <span className={`stat-value ${r.valueClass ?? ''}`.trim()}>{r.value}</span>
+          <div
+            key={i}
+            className="flex items-center justify-between gap-3 border-t border-white/[0.04] pt-1.5 first:border-t-0 first:pt-0"
+          >
+            <span className="text-xs uppercase tracking-wider text-muted-foreground/80 flex items-center gap-1">
+              {r.label}
+            </span>
+            <span className={'tabular-nums font-medium ' + valueTone(r.valueClass)}>
+              {r.value}
+            </span>
           </div>
         ))}
       </div>

@@ -1,32 +1,40 @@
+/* Legacy-token bridge — every component in this file still references
+ * the variables below. Re-point each one at the Bestie palette set up
+ * by index.css so unmigrated panels blend with the new glass/aurora
+ * shell instead of looking like a white card dropped on a dark page.
+ *
+ * As screens move to shadcn primitives these legacy rules get deleted
+ * one-by-one; everything that remains keeps rendering correctly in the
+ * meantime. */
 :root {
-  --bg: #f8fafc;
-  --surface: #ffffff;
-  --border: #e5e7eb;
-  --border-strong: #d1d5db;
-  --text: #0f172a;
-  --text-muted: #64748b;
-  --text-subtle: #94a3b8;
+  --bg: transparent;                         /* let aurora show through */
+  --surface: hsl(230 25% 10% / 0.55);        /* glass-like translucent dark card */
+  --border: hsl(220 20% 100% / 0.08);        /* matches Bestie --border */
+  --border-strong: hsl(220 20% 100% / 0.14);
+  --text: #ECF3F8;                           /* Bestie --foreground */
+  --text-muted: #93A0AD;                     /* Bestie --muted-foreground */
+  --text-subtle: #667382;                    /* dimmer than muted */
 
-  --primary: #2563eb;
-  --primary-hover: #1d4ed8;
-  --success: #16a34a;
-  --success-bg: #dcfce7;
-  --warn: #d97706;
-  --warn-bg: #fef3c7;
-  --danger: #dc2626;
-  --danger-bg: #fee2e2;
-  --purple: #7c3aed;
-  --purple-bg: #ede9fe;
-  --pink: #db2777;
-  --pink-bg: #fce7f3;
+  --primary: hsl(210 90% 66%);               /* Bestie --primary */
+  --primary-hover: hsl(210 90% 72%);
+  --success: hsl(150 60% 55%);
+  --success-bg: hsl(150 60% 55% / 0.15);
+  --warn: hsl(40 90% 60%);
+  --warn-bg: hsl(40 90% 60% / 0.15);
+  --danger: hsl(0 75% 62%);
+  --danger-bg: hsl(0 75% 62% / 0.15);
+  --purple: hsl(265 70% 70%);
+  --purple-bg: hsl(265 70% 70% / 0.15);
+  --pink: hsl(330 70% 65%);
+  --pink-bg: hsl(330 70% 65% / 0.15);
 
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
-  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
 
-  color-scheme: light;
-  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  color-scheme: dark;
+  font-family: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   color: var(--text);
-  background: var(--bg);
+  background: transparent;
 }
 
 * {
@@ -170,7 +178,7 @@ a,
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  background: #f1f5f9;
+  background: hsl(220 15% 100% / 0.06);
   border: 1px solid var(--border);
   border-radius: 10px;
 }
@@ -204,8 +212,8 @@ a,
 
 .error-banner {
   background: var(--danger-bg);
-  border: 1px solid #fecaca;
-  color: #991b1b;
+  border: 1px solid hsl(0 75% 62% / 0.30);
+  color: hsl(0 80% 85%);
   padding: 10px 12px;
   border-radius: 8px;
   font-size: 12.5px;
@@ -246,7 +254,7 @@ a,
   align-items: center;
   gap: 10px;
   padding: 4px 10px 4px 4px;
-  background: #f1f5f9;
+  background: hsl(220 15% 100% / 0.06);
   border: 1px solid var(--border);
   border-radius: 10px;
 }
@@ -321,7 +329,7 @@ a,
   font-family: inherit;
 }
 .ghost-btn:hover:not(:disabled) {
-  background: #f1f5f9;
+  background: hsl(220 15% 100% / 0.06);
   border-color: var(--border-strong);
 }
 .ghost-btn:disabled {
@@ -460,7 +468,10 @@ a,
   border-radius: 4px;
   line-height: 0;
 }
-.stat-label-info:hover { color: var(--text); background: var(--surface-2, #f1f5f9); }
+.stat-label-info:hover {
+  color: var(--text);
+  background: hsl(220 15% 100% / 0.06);
+}
 .error-breakdown-pop {
   position: absolute;
   top: calc(100% + 6px);
@@ -469,10 +480,16 @@ a,
   min-width: 260px;
   max-width: 360px;
   padding: 10px 12px;
-  background: var(--bg, #fff);
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  /* Glass-strong recipe — matches the rest of the overlay surfaces. */
+  background: hsl(220 25% 8% / 0.92);
+  backdrop-filter: blur(40px) saturate(160%);
+  -webkit-backdrop-filter: blur(40px) saturate(160%);
+  border: 1px solid hsl(220 25% 100% / 0.08);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 1px 0 0 hsl(220 25% 100% / 0.08),
+    0 20px 50px -20px hsl(230 40% 4% / 0.8);
+  color: var(--text);
 }
 .error-breakdown-head {
   font-size: 11px;
@@ -527,16 +544,21 @@ a,
 }
 .count-badge.ready {
   background: var(--success-bg);
-  color: #166534;
+  color: hsl(150 60% 80%);
 }
 
 /* Allowed-prefixes settings panel */
 .prefix-panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
+  background: hsl(220 25% 12% / 0.55);
+  backdrop-filter: blur(52px) saturate(140%);
+  -webkit-backdrop-filter: blur(52px) saturate(140%);
+  border: 1px solid hsl(220 25% 100% / 0.05);
+  border-radius: 12px;
   padding: 16px 18px;
-  box-shadow: var(--shadow-sm);
+  box-shadow:
+    inset 0 1px 0 0 hsl(220 25% 100% / 0.08),
+    0 1px 2px 0 hsl(230 40% 4% / 0.3),
+    0 20px 50px -20px hsl(230 40% 4% / 0.55);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -574,9 +596,9 @@ a,
 }
 .prefix-chip {
   padding: 4px 10px;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  color: #1e3a8a;
+  background: hsl(210 90% 66% / 0.12);
+  border: 1px solid hsl(210 90% 66% / 0.30);
+  color: hsl(210 90% 85%);
   font-size: 12.5px;
   font-weight: 600;
   border-radius: 999px;
@@ -740,11 +762,15 @@ a,
   display: flex;
   align-items: center;
   gap: 12px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
+  background: hsl(220 25% 12% / 0.55);
+  backdrop-filter: blur(52px) saturate(140%);
+  -webkit-backdrop-filter: blur(52px) saturate(140%);
+  border: 1px solid hsl(220 25% 100% / 0.05);
+  border-radius: 12px;
   padding: 16px 18px;
-  box-shadow: var(--shadow-sm);
+  box-shadow:
+    inset 0 1px 0 0 hsl(220 25% 100% / 0.08),
+    0 1px 2px 0 hsl(230 40% 4% / 0.3);
   transition: border-color 120ms, opacity 120ms, transform 120ms;
 }
 .account-card:hover {
@@ -783,15 +809,22 @@ a,
 .account-avatar {
   width: 44px;
   height: 44px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #3b82f6 0%, #6366f1 100%);
-  color: white;
+  border-radius: 10px;
+  background: linear-gradient(
+    135deg,
+    oklch(0.72 0.20 150) 0%,
+    oklch(0.75 0.18 180) 50%,
+    oklch(0.78 0.16 210) 100%
+  );
+  color: #020610;
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: 700;
   font-size: 18px;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+  box-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.3),
+    0 4px 16px -4px oklch(0.65 0.18 180 / 0.4);
 }
 .account-main {
   flex: 1;
@@ -1201,7 +1234,12 @@ a,
   color: var(--text-muted);
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
-  background: #f8fafc;
+  /* Translucent navy that blends with the surrounding .glass section
+   * and stays opaque enough for the sticky header to occlude scrolling
+   * rows behind it. Backdrop-filter gives the "frosted" header feel. */
+  background: hsl(220 25% 10% / 0.92);
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -1216,11 +1254,11 @@ a,
 .jobs-table th[draggable="true"]:active { cursor: grabbing; }
 .jobs-table th.th-dragging {
   opacity: 0.4;
-  background: #eef2ff;
+  background: hsl(210 90% 66% / 0.08);
 }
 .jobs-table th.th-drop-target {
   box-shadow: inset -2px 0 0 var(--primary);
-  background: #eff6ff;
+  background: hsl(210 90% 66% / 0.12);
 }
 .jobs-table th.th-right .th-sort,
 .jobs-table th.th-center .th-sort { width: 100%; }
@@ -1232,7 +1270,9 @@ a,
   vertical-align: middle;
 }
 .jobs-table tr:hover td {
-  background: #f8fafc;
+  /* Same hue as --accent but a touch stronger — visible highlight on the
+   * dark glass without washing the text out. */
+  background: hsl(220 15% 100% / 0.045);
 }
 /* Right-align numeric columns so digits line up across rows. */
 .jobs-table .cell-qty,
@@ -1275,10 +1315,10 @@ a,
 .account-pill {
   display: inline-block;
   padding: 2px 8px;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
+  background: hsl(210 90% 66% / 0.12);
+  border: 1px solid hsl(210 90% 66% / 0.30);
   border-radius: 999px;
-  color: #1e3a8a;
+  color: hsl(210 90% 85%);
   font-size: 12px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -1389,10 +1429,10 @@ a,
   accent-color: var(--primary);
 }
 .jobs-table tr.row-selected td {
-  background: #eff6ff;
+  background: hsl(210 90% 66% / 0.08);
 }
 .jobs-table tr.row-selected:hover td {
-  background: #dbeafe;
+  background: hsl(210 90% 66% / 0.14);
 }
 
 .bulk-bar {
@@ -1453,7 +1493,7 @@ a,
   border-radius: 4px;
   cursor: pointer;
 }
-.action-menu-item:hover:not(:disabled) { background: #f1f5f9; }
+.action-menu-item:hover:not(:disabled) { background: hsl(220 15% 100% / 0.06); }
 .action-menu-item:disabled { color: var(--text-subtle); cursor: not-allowed; }
 .action-menu-danger { color: var(--danger); }
 .action-menu-danger:hover:not(:disabled) { background: var(--danger-bg); }
@@ -1478,7 +1518,7 @@ a,
   cursor: pointer;
   user-select: none;
 }
-.columns-menu-item:hover { background: #f1f5f9; }
+.columns-menu-item:hover { background: hsl(220 15% 100% / 0.06); }
 .columns-menu-item input[type="checkbox"] {
   accent-color: var(--primary);
   cursor: pointer;
@@ -1516,11 +1556,11 @@ a,
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-.chip-blue { background: #dbeafe; color: #1e40af; }
+.chip-blue { background: hsl(210 90% 66% / 0.18); color: hsl(210 90% 80%); }
 .chip-purple { background: var(--purple-bg); color: var(--purple); }
-.chip-gray { background: #f1f5f9; color: #475569; }
+.chip-gray { background: hsl(220 15% 100% / 0.06); color: hsl(220 10% 75%); }
 .chip-mono {
-  background: #f1f5f9;
+  background: hsl(220 15% 100% / 0.06);
   color: #64748b;
   font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
   font-size: 10px;
@@ -1552,11 +1592,11 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   font-size: 11px;
   font-weight: 600;
 }
-.badge-gray { background: #f1f5f9; color: #475569; }
-.badge-blue { background: #dbeafe; color: #1e40af; }
-.badge-green { background: var(--success-bg); color: #166534; }
-.badge-red { background: var(--danger-bg); color: #991b1b; }
-.badge-amber { background: var(--warn-bg); color: #92400e; }
+.badge-gray { background: hsl(220 15% 100% / 0.06); color: hsl(220 10% 75%); }
+.badge-blue { background: hsl(210 90% 66% / 0.18); color: hsl(210 90% 80%); }
+.badge-green { background: var(--success-bg); color: hsl(150 60% 80%); }
+.badge-red { background: var(--danger-bg); color: hsl(0 80% 85%); }
+.badge-amber { background: var(--warn-bg); color: hsl(40 90% 80%); }
 
 /* Logs view (full-page) */
 .logs-view {
@@ -1610,15 +1650,15 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   padding: 10px 14px;
   margin-bottom: 12px;
   border-radius: 8px;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  color: #1e3a8a;
+  background: hsl(210 90% 66% / 0.12);
+  border: 1px solid hsl(210 90% 66% / 0.30);
+  color: hsl(210 90% 85%);
   font-size: 13px;
 }
 .link-inline {
   background: none;
   border: none;
-  color: #2563eb;
+  color: var(--primary);
   font: inherit;
   font-weight: 600;
   text-decoration: underline;
@@ -1626,7 +1666,7 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   padding: 0;
 }
 .link-inline:hover {
-  color: #1d4ed8;
+  color: var(--primary-hover);
 }
 
 /* Snapshot preview in logs view */
@@ -1725,14 +1765,14 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   letter-spacing: 0.02em;
 }
 .buymode-badge.single {
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
-  color: #0369a1;
+  background: hsl(210 90% 66% / 0.12);
+  border: 1px solid hsl(210 90% 66% / 0.30);
+  color: hsl(210 90% 85%);
 }
 .buymode-badge.filler {
   background: var(--purple-bg);
-  border: 1px solid #c4b5fd;
-  color: var(--purple);
+  border: 1px solid hsl(265 70% 70% / 0.35);
+  color: hsl(265 80% 85%);
 }
 
 /* Filler mode panel — locked / coming soon */
@@ -1844,10 +1884,10 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   align-self: flex-start;
   margin-top: 1px;
 }
-.log-level.info { background: #dbeafe; color: #1e40af; }
-.log-level.warn { background: var(--warn-bg); color: #92400e; }
-.log-level.error { background: var(--danger-bg); color: #991b1b; }
-.log-level.debug { background: #f1f5f9; color: #475569; }
+.log-level.info { background: hsl(210 90% 66% / 0.18); color: hsl(210 90% 80%); }
+.log-level.warn { background: var(--warn-bg); color: hsl(40 90% 80%); }
+.log-level.error { background: var(--danger-bg); color: hsl(0 80% 85%); }
+.log-level.debug { background: hsl(220 15% 100% / 0.06); color: hsl(220 10% 75%); }
 .log-message {
   color: var(--text);
   word-break: break-word;
@@ -1877,7 +1917,7 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   margin-bottom: 16px;
   border-radius: 8px;
   background: var(--warn-bg);
-  color: #92400e;
+  color: hsl(40 90% 80%);
   font-size: 13px;
   border: 1px solid #fcd34d;
   box-shadow: var(--shadow-sm);
