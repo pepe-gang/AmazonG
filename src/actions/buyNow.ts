@@ -361,16 +361,26 @@ export async function waitForCheckout(
   emit?: { step: StepEmitter; warn: StepEmitter },
 ): Promise<CheckoutReadyResult> {
   // Poll for either a Place Order button (success — we're on /spc), a
-  // "Deliver to this address" button (interstitial — Amazon parked us at the
-  // address picker after Buy Now), or Amazon's "This item is currently
-  // unavailable" error page (terminal — bail fast). When we see the address
-  // picker we first select the radio whose street matches our allowed
-  // prefixes (otherwise Amazon ships to whatever default it preselected),
-  // then click the deliver button. Mirrors old AutoG with the prefix gate
+  // Chewbacca interstitial continue button (Amazon parked us at an
+  // address / billing-address / payment-method picker after Buy Now),
+  // or Amazon's "This item is currently unavailable" error page
+  // (terminal — bail fast). When we see an address picker we first
+  // select the radio whose street matches our allowed prefixes (so
+  // Amazon doesn't ship to whatever default it preselected), then
+  // click the continue button. Mirrors old AutoG with the prefix gate
   // pulled forward into the early Buy Now → /spc transition.
+  //
+  // The interstitial label varies depending on which picker Amazon
+  // routes us to; all share the same DOM shape (primary + secondary
+  // submit, aria-labelledby points to the visible text). Rare flow:
+  // /pay?referrer=pay with a "Use this payment method" CTA — still
+  // the same primary-continue-button that we click, loop, and recheck
+  // for Place Order.
   const deadline = Date.now() + 30_000;
   let deliverClickedTimes = 0;
-  const MAX_DELIVER_CLICKS = 3;
+  // 5 rather than 3: a worst-case flow can chain several interstitials
+  // (address → billing → payment → /spc), each adding one click.
+  const MAX_DELIVER_CLICKS = 5;
   let iteration = 0;
 
   while (Date.now() < deadline) {
@@ -448,34 +458,40 @@ export async function waitForCheckout(
             return { kind: 'place' as const, sel: '__text_match__' };
           }
         }
-        // 2. Look for a "Deliver to this address" INTERACTIVE element.
+        // 2. Look for a Chewbacca interstitial continue INTERACTIVE
+        //    element. Three known labels share the same DOM shape:
+        //      - "Deliver to this address" (address picker)
+        //      - "Use this address"        (billing-address picker)
+        //      - "Use this payment method" (payment picker — rare)
         //    Restricted to buttons/inputs/role="button" — NOT <span>,
-        //    because the review page (post-interstitial) carries a
-        //    static <span>Deliver to this address</span> label above
-        //    the address summary, and loosening the selector to span
-        //    caused us to falsely re-detect the interstitial on every
-        //    iteration after a successful click. Amazon's real button
-        //    is always an <input type="submit"> (inside its a-button
-        //    wrapper) or a plain <button>, never a standalone <span>.
+        //    because the /spc review page carries static <span> labels
+        //    with matching text above the address/payment summaries,
+        //    and loosening the selector caused us to falsely re-detect
+        //    the interstitial on every iteration after a successful
+        //    click. Amazon's real button is always an <input type=
+        //    "submit"> (inside its a-button wrapper) or a plain
+        //    <button>, never a standalone <span>.
         const candidates = Array.from(
           document.querySelectorAll<HTMLElement>(
             'button, input[type="submit"], input[type="button"], a[role="button"], .a-button-input',
           ),
         );
-        // Chewbacca ships both a "primary" Deliver submit (yellow CTA the
-        // user sees) and a "secondary" Deliver submit (sticky/duplicate)
-        // whose click is a no-op — only the primary's click handler
-        // actually submits the address form. DOM order is NOT reliable:
+        // Chewbacca ships both a "primary" continue submit (yellow CTA
+        // the user sees) and a "secondary" continue submit (sticky /
+        // duplicate) whose click is a no-op — only the primary's click
+        // handler actually submits the form. DOM order is NOT reliable:
         // the secondary usually appears first, so a naive .find() picks
-        // the dead button and clicks it three times in a row. Sort matches
-        // so any element with `primary-continue-button` in its
+        // the dead button and clicks it three times in a row. Sort
+        // matches so any element with `primary-continue-button` in its
         // aria-labelledby wins over a `secondary-continue-button` match.
+        const continueLabelRe =
+          /^(deliver to this address|use this address|use this payment method)$/i;
         const deliverHits: HTMLElement[] = [];
         for (const el of candidates) {
           if (el.offsetParent === null) continue;
           if ((el as HTMLButtonElement).disabled) continue;
           const label = readLabel(el);
-          if (/^deliver to this address$/i.test(label)) {
+          if (continueLabelRe.test(label)) {
             deliverHits.push(el);
           }
         }
@@ -580,16 +596,17 @@ export async function waitForCheckout(
       if (deliverClickedTimes >= MAX_DELIVER_CLICKS) {
         return {
           ok: false,
-          reason: `Deliver button persisted after ${MAX_DELIVER_CLICKS} clicks`,
+          reason: `Interstitial continue button persisted after ${MAX_DELIVER_CLICKS} clicks`,
         };
       }
 
-      // Before clicking Deliver, make sure the radio that's currently
-      // selected matches one of our allowed house-number prefixes. If a
-      // matching radio exists but isn't selected, click it first; if none
-      // matches, bail with a clear reason rather than ship to whatever
-      // Amazon defaulted to.
-      if (allowedAddressPrefixes.length > 0) {
+      // Address-prefix gate: only meaningful on the shipping-address
+      // picker ("Deliver to this address"). The billing-address picker
+      // ("Use this address") and payment picker ("Use this payment
+      // method") don't route items, so enforcing a house-number prefix
+      // there would false-fail on legitimate billing / card selections.
+      const isShippingPicker = /^deliver to this address$/i.test(state.label ?? '');
+      if (isShippingPicker && allowedAddressPrefixes.length > 0) {
         const pick = await selectAllowedAddressRadio(page, allowedAddressPrefixes);
         if (!pick.ok) {
           // Capture the picker we couldn't parse — saved addresses can
@@ -606,11 +623,10 @@ export async function waitForCheckout(
         }
       }
 
-      // Click via the same DOM walk so we hit the visible "Deliver to this
-      // address" element. Mirror the tightened selector from the state
+      // Click via the same DOM walk so we hit the visible interstitial
+      // continue button. Mirror the tightened selector from the state
       // detector above — excludes <span> so we don't no-op on a static
-      // label element that Amazon ships on the post-interstitial review
-      // page.
+      // label element Amazon ships on the post-interstitial review page.
       const clicked = await page
         .evaluate(() => {
           const readLabel = (el: HTMLElement): string => {
@@ -637,10 +653,12 @@ export async function waitForCheckout(
               'button, input[type="submit"], input[type="button"], a[role="button"], .a-button-input',
             ),
           );
+          const continueLabelRe =
+            /^(deliver to this address|use this address|use this payment method)$/i;
           const matches = all.filter((el) => {
             if (el.offsetParent === null) return false;
             if ((el as HTMLButtonElement).disabled) return false;
-            return /^deliver to this address$/i.test(readLabel(el));
+            return continueLabelRe.test(readLabel(el));
           });
           if (matches.length === 0) return false;
           // Prefer the primary-continue submit. DOM order is unreliable
