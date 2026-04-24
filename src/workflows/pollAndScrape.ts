@@ -374,6 +374,10 @@ type ProfileResult = {
   placedQuantity: number;
   error: string | null;
   dryRun: boolean;
+  /** Filler-only order ids from this profile's Place Order fan-out.
+   *  Empty on single-mode / dry-run / failure. Snapshot at buy time —
+   *  propagated to BG via the /status report for the audit trail. */
+  fillerOrderIds: string[];
 };
 
 export function startWorker(deps: Deps): WorkerHandle {
@@ -635,6 +639,10 @@ async function handleJob(
     placedCashbackPct: r.placedCashbackPct,
     placedAt: r.placedAt,
     error: r.error,
+    // Audit snapshot — only attach when this profile ran in filler mode
+    // AND produced filler orders. BG persists on AutoBuyPurchase for
+    // post-hoc reconciliation (see PurchaseReport.fillerOrderIds docs).
+    ...(r.fillerOrderIds.length > 0 ? { fillerOrderIds: r.fillerOrderIds } : {}),
   }));
 
   try {
@@ -1491,6 +1499,7 @@ async function runForProfile(
       placedQuantity: buy.quantity,
       error: null,
       dryRun: buy.dryRun,
+      fillerOrderIds,
     };
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
@@ -1537,6 +1546,7 @@ function failed(email: string, error: string): ProfileResult {
     placedQuantity: 0,
     error,
     dryRun: false,
+    fillerOrderIds: [],
   };
 }
 

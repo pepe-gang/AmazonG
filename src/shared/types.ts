@@ -120,6 +120,15 @@ export type JobStatusReport = {
     placedCashbackPct?: number | null;
     placedPrice?: string | null;
     trackingIds?: string[] | null;
+    /**
+     * Audit snapshot: every Amazon order id from the Place Order fan-out
+     * that does NOT contain the target ASIN. BG persists these on the
+     * purchase row for manual reconciliation — AutoG cancels each one
+     * inline + in verify phase, but if anything slips through the user
+     * needs a list to cross-check against Amazon Your Orders. Omit on
+     * single-mode purchases.
+     */
+    fillerOrderIds?: string[] | null;
   }[];
 };
 
