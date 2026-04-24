@@ -7,6 +7,7 @@ import {
 } from '@/components/ui/sidebar';
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Toaster } from '@/components/ui/sonner';
 import { AppSidebar } from '@/components/app-sidebar';
 import type {
@@ -487,8 +488,8 @@ function DashboardView(props: {
   const fmt = (n: number) => `${n >= 0 ? '+' : '−'}$${Math.abs(n).toFixed(2)}`;
 
   return (
-    <>
-      <div className="stat-row">
+    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0 overflow-hidden">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <StatCard
           icon={<BoltIcon />}
           iconVariant="blue"
@@ -559,13 +560,15 @@ function DashboardView(props: {
         />
       </div>
 
-      <JobsTable
-        attempts={attempts}
-        profiles={profiles}
-        onViewLogs={onViewLogs}
-        workerRunning={status.running}
-      />
-    </>
+      <section className="glass flex flex-1 min-h-0 flex-col overflow-hidden">
+        <JobsTable
+          attempts={attempts}
+          profiles={profiles}
+          onViewLogs={onViewLogs}
+          workerRunning={status.running}
+        />
+      </section>
+    </div>
   );
 }
 
@@ -1114,24 +1117,25 @@ function JobsTable({
   };
 
   return (
-    <div className="jobs-card">
-      <div className="jobs-head">
-        <h2>Amazon Purchases</h2>
-        <div className="jobs-head-right">
-          <div className="jobs-count">
-            {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
-          </div>
-        </div>
+    // Outer is a plain flex column — the parent DashboardView section
+    // already wraps this in `.glass` so we don't need another card
+    // surface here. The inner blocks inherit that translucent shell.
+    <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+      <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-white/[0.04]">
+        <h2 className="text-base font-medium tracking-tight">Amazon Purchases</h2>
+        <span className="text-xs text-muted-foreground tabular-nums">
+          {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
+        </span>
       </div>
 
       {attempts.length > 0 && (
-        <div className="jobs-filters">
-          <input
-            className="jobs-search"
+        <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/[0.04]">
+          <Input
             type="search"
             placeholder="Search title, account, deal key, order id…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            className="h-8 max-w-xs"
           />
           <ColumnsMenu
             order={fullColumnOrder}
@@ -1145,7 +1149,11 @@ function JobsTable({
             onToggleAll={setAllStatusGroupsVisible}
             onReset={resetStatusFilter}
           />
-          <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
+          <select
+            value={accountFilter}
+            onChange={(e) => setAccountFilter(e.target.value)}
+            className="h-8 rounded-md border border-white/10 bg-white/[0.04] px-2 text-sm text-foreground/90 hover:bg-white/[0.06]"
+          >
             <option value="all">All accounts</option>
             {accountOptions.map(({ email, label }) => (
               <option key={email} value={email}>
@@ -1154,22 +1162,26 @@ function JobsTable({
             ))}
           </select>
           {hasFilter && (
-            <button className="ghost-btn" onClick={clearFilters}>
+            <Button variant="ghost" size="sm" onClick={clearFilters}>
               Clear
-            </button>
+            </Button>
           )}
         </div>
       )}
 
       {selected.size > 0 && (
-        <div className="bulk-bar" role="toolbar">
-          <span className="bulk-count">
+        <div
+          className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/[0.04] bg-accent/30"
+          role="toolbar"
+        >
+          <span className="text-xs text-muted-foreground mr-1">
             {bulkBusy && bulkProgress
               ? `${bulkBusy === 'verify' ? 'Verifying' : bulkBusy === 'tracking' ? 'Fetching tracking' : 'Deleting'} ${bulkProgress.done}/${bulkProgress.total}…`
               : `${selected.size} selected`}
           </span>
-          <button
-            className="ghost-btn"
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={bulkBusy !== null}
             title={`Copy ${selected.size} row${selected.size === 1 ? '' : 's'} as TSV (paste into Google Sheets / Excel)`}
             onClick={async () => {
@@ -1188,9 +1200,10 @@ function JobsTable({
             }}
           >
             Copy ({selected.size})
-          </button>
-          <button
-            className="ghost-btn"
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={bulkBusy !== null || selectedVerifiable.length === 0}
             title={
               selectedVerifiable.length === 0
@@ -1200,9 +1213,10 @@ function JobsTable({
             onClick={() => void runBulkVerify()}
           >
             Verify Order ({selectedVerifiable.length})
-          </button>
-          <button
-            className="ghost-btn"
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={bulkBusy !== null || selectedForTracking.length === 0}
             title={
               selectedForTracking.length === 0
@@ -1212,26 +1226,29 @@ function JobsTable({
             onClick={() => void runBulkFetchTracking()}
           >
             Fetch Tracking ({selectedForTracking.length})
-          </button>
-          <button
-            className="ghost-btn danger-text"
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
             disabled={bulkBusy !== null}
             onClick={() => void runBulkDelete()}
           >
             Delete ({selected.size})
-          </button>
+          </Button>
         </div>
       )}
 
-      <div className="jobs-table-wrap">
+      <div className="flex-1 min-h-0 overflow-auto jobs-table-wrap">
         {attempts.length === 0 ? (
-          <div className="jobs-empty">
+          <div className="flex items-center justify-center min-h-[200px] text-sm text-muted-foreground text-center px-8">
             {workerRunning
               ? 'Worker is polling. Rows will appear once a job is claimed.'
               : 'Click Start to begin polling BetterBG for jobs. Each claimed job will create one row per Amazon account.'}
           </div>
         ) : visible.length === 0 ? (
-          <div className="jobs-empty">No rows match current filters.</div>
+          <div className="flex items-center justify-center min-h-[200px] text-sm text-muted-foreground">
+            No rows match current filters.
+          </div>
         ) : (
           <table className="jobs-table">
             <thead>
@@ -3108,20 +3125,56 @@ function StatCard(props: {
   subtitle?: string;
   rows: { label: React.ReactNode; value: React.ReactNode; valueClass?: string }[];
 }) {
+  // Icon-badge tints — the accent-gradient is reserved for the primary
+  // brand moments, so stat tiles use their own desaturated jewel tones
+  // with matching alpha backgrounds. Colors hand-picked against the
+  // glass surface so every variant stays readable.
+  const badge: Record<typeof props.iconVariant, string> = {
+    blue: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+    purple: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
+    orange: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+    green: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+    red: 'bg-red-500/15 text-red-300 border-red-500/30',
+  };
+  const valueTone = (cls?: string): string => {
+    if (!cls) return '';
+    if (cls.includes('green')) return 'text-emerald-300';
+    if (cls.includes('red')) return 'text-red-300';
+    if (cls.includes('purple')) return 'text-violet-300';
+    if (cls.includes('muted')) return 'text-muted-foreground';
+    return '';
+  };
+
   return (
-    <div className="stat-card">
-      <div className="stat-header">
-        <div className={`stat-icon ${props.iconVariant}`}>{props.icon}</div>
-        <div>
-          <div className="stat-title">{props.title}</div>
-          {props.subtitle && <div className="stat-sub">{props.subtitle}</div>}
+    <div className="glass flex flex-col gap-3 p-4">
+      <div className="flex items-start gap-3">
+        <div
+          className={
+            'flex size-9 shrink-0 items-center justify-center rounded-lg border ' +
+            badge[props.iconVariant]
+          }
+        >
+          {props.icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium leading-tight">{props.title}</div>
+          {props.subtitle && (
+            <div className="text-xs text-muted-foreground mt-0.5">{props.subtitle}</div>
+          )}
         </div>
       </div>
-      <div className="stat-rows">
+      <div className="flex flex-col gap-1.5 text-sm">
         {props.rows.map((r, i) => (
-          <div key={i} className="stat-row-item">
-            <span className="stat-label">{r.label}</span>
-            <span className={`stat-value ${r.valueClass ?? ''}`.trim()}>{r.value}</span>
+          <div
+            key={i}
+            className="flex items-center justify-between gap-3 border-t border-white/[0.04] pt-1.5 first:border-t-0 first:pt-0"
+          >
+            <span className="text-xs uppercase tracking-wider text-muted-foreground/80 flex items-center gap-1">
+              {r.label}
+            </span>
+            <span className={'tabular-nums font-medium ' + valueTone(r.valueClass)}>
+              {r.value}
+            </span>
           </div>
         ))}
       </div>
