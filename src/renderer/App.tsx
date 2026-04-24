@@ -492,12 +492,12 @@ type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'buyMode' | 'qty' | 'ret
 type JobColumnId =
   | 'date' | 'item' | 'dealId' | 'account' | 'buyMode' | 'qty'
   | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit'
-  | 'orderId' | 'tracking' | 'status';
+  | 'orderId' | 'tracking' | 'fillerOrders' | 'status';
 
 const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
   'date', 'item', 'dealId', 'account', 'buyMode', 'qty',
   'retail', 'totalRetail', 'payout', 'cb', 'profit',
-  'orderId', 'tracking', 'status',
+  'orderId', 'tracking', 'fillerOrders', 'status',
 ];
 
 /**
@@ -505,7 +505,7 @@ const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
  * tick the column on (which writes the new order back to settings),
  * the "haven't-seen-it-yet" check stops firing.
  */
-const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail', 'buyMode']);
+const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail', 'buyMode', 'fillerOrders']);
 
 function resolveColumnOrder(saved: string[]): JobColumnId[] {
   const valid = new Set<JobColumnId>(DEFAULT_COLUMN_ORDER);
@@ -616,6 +616,7 @@ function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
     }
     case 'orderId': return a.orderId ?? '';
     case 'tracking': return (a.trackingIds ?? []).join(', ');
+    case 'fillerOrders': return (a.fillerOrderIds ?? []).join(', ');
     case 'status':  return STATUS_LABEL[a.status] ?? a.status;
   }
 }
@@ -653,6 +654,7 @@ const COLUMN_LABEL: Record<JobColumnId, string> = {
   profit: 'Profit',
   orderId: 'Order ID',
   tracking: 'Tracking',
+  fillerOrders: 'Filler Orders',
   status: 'Status',
 };
 
@@ -1647,6 +1649,34 @@ function JobsCell({
                   onClick={() => void navigator.clipboard.writeText(code).catch(() => undefined)}
                 >
                   {code}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span className="muted">—</span>
+          )}
+        </td>
+      );
+    case 'fillerOrders':
+      // Buy-with-Fillers audit trail. Each id is an Amazon order that
+      // came from the Place Order fan-out but does NOT contain the
+      // target — AutoG tries to cancel each inline + in the verify
+      // phase. Shown here so the user can cross-check against Your
+      // Orders if anything slipped past the sweep. Empty on single-mode
+      // buys and on filler buys where Amazon didn't split the cart.
+      return (
+        <td className="cell-tracking">
+          {a.fillerOrderIds && a.fillerOrderIds.length > 0 ? (
+            <div className="tracking-list">
+              {a.fillerOrderIds.map((oid) => (
+                <button
+                  key={oid}
+                  type="button"
+                  className="tracking-pill"
+                  title="Click to copy"
+                  onClick={() => void navigator.clipboard.writeText(oid).catch(() => undefined)}
+                >
+                  {oid}
                 </button>
               ))}
             </div>
