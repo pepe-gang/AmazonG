@@ -35,6 +35,9 @@ export const IPC = {
    *  public endpoint (x-api-key: pepe-gang). The renderer re-fetches
    *  on user click; no polling. */
   dealsList: 'deals:list',
+  /** Enqueue a buy job on BetterBG for a specific Amazon deal. Job is
+   *  scoped to the authed user, invisible to any other AutoG key. */
+  dealsTrigger: 'deals:trigger',
   /** Fetch the per-Amazon-account remote settings map from BG (keyed by
    *  email → { requireMinCashback }). Renderer calls this when the
    *  Accounts tab mounts to paint the toggles with the live state. */
@@ -177,6 +180,12 @@ export type AutoGBridge = {
   profilesOpenOrder(email: string, orderId: string): Promise<void>;
   profilesReorder(orderedEmails: string[]): Promise<AmazonProfile[]>;
   dealsList(): Promise<AmazonDeal[]>;
+  dealsTrigger(dealId: string): Promise<{
+    jobId: string;
+    dealTitle: string;
+    price: string | null;
+    oldPrice: string | null;
+  }>;
   profilesRemoteSettings(): Promise<Record<string, { requireMinCashback: boolean }>>;
   profilesSetRequireMinCashback(email: string, requireMinCashback: boolean): Promise<{ email: string; requireMinCashback: boolean }>;
   jobsList(): Promise<JobAttempt[]>;

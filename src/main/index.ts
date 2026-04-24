@@ -758,6 +758,19 @@ function registerIpcHandlers(): void {
     return data;
   });
 
+  /**
+   * Queue a buy job on BetterBG for a specific Amazon deal. Uses the
+   * user's AutoG key (via the same BGClient the worker uses) so the
+   * job is scoped to their userId server-side — another person's
+   * AmazonG worker cannot claim it even if they share the app.
+   */
+  ipcMain.handle(IPC.dealsTrigger, async (_e, dealId: string) => {
+    if (!apiKey) throw new Error('not connected to BG');
+    const settings = await loadSettings();
+    const bg = createBGClient(settings.bgBaseUrl, apiKey);
+    return bg.triggerDealJob(dealId);
+  });
+
   // Remote per-Amazon-account settings. These live on BG (today: just
   // the requireMinCashback toggle) because the worker needs them at buy
   // time anyway — and they should travel with the user's BG identity

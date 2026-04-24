@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, MapPin, Copy, ExternalLink, ChevronDown, ChevronUp, ChevronsUpDown } from 'lucide-react';
+import { RefreshCw, MapPin, Copy, ExternalLink, ChevronDown, ChevronUp, ChevronsUpDown, Send } from 'lucide-react';
 import { toast } from 'sonner';
 
 import type { AmazonDeal } from '@shared/ipc';
@@ -400,6 +400,22 @@ export function Deals() {
                           <KebabTrigger aria-label="Deal actions" />
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
+                          <DropdownMenuItem
+                            onClick={async () => {
+                              try {
+                                const r = await window.autog.dealsTrigger(d.dealId);
+                                toast.success('Sent to BetterBG', {
+                                  description: `${d.dealId} · job ${r.jobId.slice(0, 8)}…`,
+                                });
+                              } catch (err) {
+                                toast.error('Send failed', {
+                                  description: err instanceof Error ? err.message : String(err),
+                                });
+                              }
+                            }}
+                          >
+                            <Send className="h-3 w-3 mr-2" /> Send to BetterBG
+                          </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => void window.autog.openExternal(d.amazonLink)}>
                             <ExternalLink className="h-3 w-3 mr-2" /> Open on Amazon
                           </DropdownMenuItem>

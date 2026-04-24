@@ -50,6 +50,8 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.profilesReorder, orderedEmails) as Promise<AmazonProfile[]>,
   dealsList: () =>
     ipcRenderer.invoke(IPC.dealsList) as ReturnType<AutoGBridge['dealsList']>,
+  dealsTrigger: (dealId) =>
+    ipcRenderer.invoke(IPC.dealsTrigger, dealId) as ReturnType<AutoGBridge['dealsTrigger']>,
   profilesRemoteSettings: () =>
     ipcRenderer.invoke(IPC.profilesRemoteSettings) as Promise<
       Record<string, { requireMinCashback: boolean }>

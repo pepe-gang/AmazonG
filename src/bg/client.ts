@@ -89,6 +89,18 @@ export type BGClient = {
    */
   rebuy(buyJobId: string, amazonEmail: string): Promise<{ jobId: string; deduped: boolean }>;
   /**
+   * Enqueue a buy job on BetterBG for a public Amazon deal. Thin
+   * wrapper around POST /api/autog/jobs/trigger — scoped to the
+   * authed user, so the job is only claimable by workers using this
+   * same AutoG key.
+   */
+  triggerDealJob(dealId: string): Promise<{
+    jobId: string;
+    dealTitle: string;
+    price: string | null;
+    oldPrice: string | null;
+  }>;
+  /**
    * Fetch per-Amazon-account settings configured on BG's web dashboard.
    * Worker calls this each claim cycle to pick up toggle changes without
    * needing a restart. Returns an empty list on auth failure so a misconfigured
@@ -229,6 +241,28 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
       );
       if (!r) throw new BGApiError(500, '/api/autog/jobs/rebuy', 'empty response');
       return { jobId: r.jobId, deduped: !!r.deduped };
+    },
+
+    async triggerDealJob(dealId) {
+      const r = await request<{
+        ok: true;
+        jobId: string;
+        dealTitle: string;
+        price: string | null;
+        oldPrice: string | null;
+      }>('/api/autog/jobs/trigger', {
+        method: 'POST',
+        body: JSON.stringify({ dealId }),
+      });
+      if (!r) {
+        throw new BGApiError(500, '/api/autog/jobs/trigger', 'empty response');
+      }
+      return {
+        jobId: r.jobId,
+        dealTitle: r.dealTitle,
+        price: r.price,
+        oldPrice: r.oldPrice,
+      };
     },
 
     async listAmazonAccounts() {
