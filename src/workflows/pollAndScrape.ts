@@ -268,6 +268,8 @@ async function runFillerBuyWithRetries(
   deps: Deps,
   job: AutoGJob,
   cid: string,
+  /** Per-profile override of the min-cashback floor. See runForProfile. */
+  minCashbackPct: number,
   onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
   let lastRaw: BuyWithFillersResult = {
@@ -287,7 +289,7 @@ async function runFillerBuyWithRetries(
       productUrl: job.productUrl,
       maxPrice: job.maxPrice,
       allowedAddressPrefixes: deps.allowedAddressPrefixes,
-      minCashbackPct: deps.minCashbackPct,
+      minCashbackPct,
       dryRun: deps.buyDryRun,
       correlationId: `${cid}/attempt-${attempt}`,
       onStage,
@@ -505,6 +507,40 @@ async function handleJob(
   const fillerByEmail = new Map<string, boolean>(
     eligible.map((p) => [p.email, shouldUseFillers(deps.buyWithFillers, p, job.viaFiller)]),
   );
+
+  // Per-Amazon-account cashback-gate overrides from BG. One HTTP call per
+  // job claim; on failure we fall through to the default (gate enabled)
+  // so a BG outage can't silently skip the gate. Accounts the user
+  // hasn't registered on BG aren't in the map → default to requireMinCashback=true.
+  const accountOverrides = await deps.bg.listAmazonAccounts().catch((err) => {
+    logger.warn(
+      'job.accounts.load.fail',
+      { jobId: job.id, error: err instanceof Error ? err.message : String(err) },
+      cid,
+    );
+    return [];
+  });
+  const requireMinByEmail = new Map<string, boolean>(
+    accountOverrides.map((a) => [a.email.toLowerCase(), a.requireMinCashback]),
+  );
+  const effectiveMinByEmail = new Map<string, number>(
+    eligible.map((p) => {
+      const require = requireMinByEmail.get(p.email.toLowerCase()) ?? true;
+      return [p.email, require ? deps.minCashbackPct : 0];
+    }),
+  );
+  logger.info(
+    'job.accounts.gates',
+    {
+      jobId: job.id,
+      gates: eligible.map((p) => ({
+        email: p.email,
+        requireMinCashback: requireMinByEmail.get(p.email.toLowerCase()) ?? true,
+        effectiveMinCashbackPct: effectiveMinByEmail.get(p.email) ?? deps.minCashbackPct,
+      })),
+    },
+    cid,
+  );
   const anyFiller = Array.from(fillerByEmail.values()).some(Boolean);
   const concurrency = fanoutConcurrency(anyFiller);
   logger.info(
@@ -552,7 +588,15 @@ async function handleJob(
   );
 
   const results = await pMap(eligible, concurrency, (profile) =>
-    runForProfile(deps, sessions, job, profile, cid, fillerByEmail.get(profile.email) === true),
+    runForProfile(
+      deps,
+      sessions,
+      job,
+      profile,
+      cid,
+      fillerByEmail.get(profile.email) === true,
+      effectiveMinByEmail.get(profile.email) ?? deps.minCashbackPct,
+    ),
   );
 
   // Aggregate.
@@ -1234,6 +1278,10 @@ async function runForProfile(
   profileData: AmazonProfile,
   parentCid: string,
   useFillers: boolean,
+  /** Per-profile override of the worker's min-cashback floor. Comes from
+   *  `AmazonAccount.requireMinCashback=false` on BG — when false, the
+   *  effective floor drops to 0 so the buy flow bypasses the gate. */
+  effectiveMinCashbackPct: number,
 ): Promise<ProfileResult> {
   const profile = profileData.email;
   // Per-profile correlation id so logs across the parallel runs are
@@ -1361,14 +1409,14 @@ async function runForProfile(
     const onStage = (stage: 'placing' | null): Promise<void> =>
       deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;
     } else {
       buy = await buyNow(page, {
         dryRun: deps.buyDryRun,
-        minCashbackPct: deps.minCashbackPct,
+        minCashbackPct: effectiveMinCashbackPct,
         maxPrice: job.maxPrice,
         allowedAddressPrefixes: deps.allowedAddressPrefixes,
         correlationId: cid,

@@ -45,6 +45,15 @@ export type VersionInfo = {
   downloadUrls: { darwin?: string; win32?: string; linux?: string };
 };
 
+/** Per-Amazon-account settings surfaced by BG's web dashboard that the
+ *  worker needs to honor at buy time. Fetched once per claim poll. */
+export type AmazonAccountSetting = {
+  email: string;
+  /** When false, skip the worker's min-cashback gate for this account
+   *  (user flipped the toggle on the web dashboard). Default true. */
+  requireMinCashback: boolean;
+};
+
 export type BGClient = {
   readonly baseUrl: string;
   me(): Promise<IdentityInfo>;
@@ -79,6 +88,13 @@ export type BGClient = {
    * pair is already queued or in-progress.
    */
   rebuy(buyJobId: string, amazonEmail: string): Promise<{ jobId: string; deduped: boolean }>;
+  /**
+   * Fetch per-Amazon-account settings configured on BG's web dashboard.
+   * Worker calls this each claim cycle to pick up toggle changes without
+   * needing a restart. Returns an empty list on auth failure so a misconfigured
+   * key can't silently flip the cashback gate off for every account.
+   */
+  listAmazonAccounts(): Promise<AmazonAccountSetting[]>;
 };
 
 /**
@@ -203,6 +219,14 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
       );
       if (!r) throw new BGApiError(500, '/api/autog/jobs/rebuy', 'empty response');
       return { jobId: r.jobId, deduped: !!r.deduped };
+    },
+
+    async listAmazonAccounts() {
+      const r = await request<{ accounts: AmazonAccountSetting[] }>(
+        '/api/autog/amazon-accounts',
+        { method: 'GET' },
+      );
+      return Array.isArray(r?.accounts) ? r.accounts : [];
     },
   };
 }
