@@ -497,7 +497,7 @@ type JobColumnId =
 const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
   'date', 'item', 'dealId', 'account', 'buyMode', 'qty',
   'retail', 'totalRetail', 'payout', 'cb', 'profit',
-  'orderId', 'tracking', 'fillerOrders', 'status',
+  'orderId', 'fillerOrders', 'tracking', 'status',
 ];
 
 /**
@@ -505,7 +505,7 @@ const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
  * tick the column on (which writes the new order back to settings),
  * the "haven't-seen-it-yet" check stops firing.
  */
-const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail', 'buyMode', 'fillerOrders']);
+const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail', 'buyMode']);
 
 function resolveColumnOrder(saved: string[]): JobColumnId[] {
   const valid = new Set<JobColumnId>(DEFAULT_COLUMN_ORDER);
@@ -1221,6 +1221,7 @@ function JobsTable({
                       accountLabel={accountLabelByEmail.get(a.amazonEmail.toLowerCase()) ?? null}
                       onOpenProductUrl={(url) => void window.autog.openExternal(url)}
                       onOpenOrder={() => void openOrderInProfile(a.amazonEmail, a.orderId!)}
+                      onOpenFillerOrder={(oid) => void openOrderInProfile(a.amazonEmail, oid)}
                     />
                   ))}
                   <td className="cell-actions">
@@ -1491,12 +1492,17 @@ function JobsCell({
   accountLabel,
   onOpenProductUrl,
   onOpenOrder,
+  onOpenFillerOrder,
 }: {
   id: JobColumnId;
   a: JobAttempt;
   accountLabel: string | null;
   onOpenProductUrl: (url: string) => void;
   onOpenOrder: () => void;
+  /** Open a specific filler order id in this row's Amazon profile
+   *  session. Mirrors `onOpenOrder` but takes the id as a param
+   *  because a row has 0..N filler orders, not a single bound one. */
+  onOpenFillerOrder: (orderId: string) => void;
 }) {
   switch (id) {
     case 'date':
@@ -1661,23 +1667,25 @@ function JobsCell({
       // Buy-with-Fillers audit trail. Each id is an Amazon order that
       // came from the Place Order fan-out but does NOT contain the
       // target — AutoG tries to cancel each inline + in the verify
-      // phase. Shown here so the user can cross-check against Your
-      // Orders if anything slipped past the sweep. Empty on single-mode
-      // buys and on filler buys where Amazon didn't split the cart.
+      // phase. Click a pill to open that order in the signed-in
+      // Amazon profile's session (same UX as the Order ID column).
       return (
-        <td className="cell-tracking">
+        <td className="cell-orderid">
           {a.fillerOrderIds && a.fillerOrderIds.length > 0 ? (
             <div className="tracking-list">
               {a.fillerOrderIds.map((oid) => (
-                <button
+                <a
                   key={oid}
-                  type="button"
-                  className="tracking-pill"
-                  title="Click to copy"
-                  onClick={() => void navigator.clipboard.writeText(oid).catch(() => undefined)}
+                  href="#"
+                  className="orderid-link"
+                  title={`Open filler order in ${a.amazonEmail}'s signed-in session`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onOpenFillerOrder(oid);
+                  }}
                 >
                   {oid}
-                </button>
+                </a>
               ))}
             </div>
           ) : (
