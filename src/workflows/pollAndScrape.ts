@@ -1319,11 +1319,17 @@ async function runForProfile(
     logger.info('job.profile.start', { jobId: job.id, profile }, cid);
     session = await getSession(deps, sessions, profile, profileData.headless);
     if (deps.snapshotOnFailure) await startTracing(session.context);
-    // Reuse the persistent context's existing tab (Chromium starts with an
-    // about:blank). Don't create a new tab for each job — that leaves the
-    // initial blank tab orphaned next to ours.
-    const existing = session.context.pages();
-    page = existing[0] ?? (await session.newPage());
+    // Always open our own page. A borrowed session (user previously
+    // clicked "Order ID" on this profile, opening a window tracked in
+    // openOrderSessions) would otherwise have the user's tab at
+    // context.pages()[0] — reusing it would navigate their view away
+    // and the follow-up `closeAndForgetSession` deliberately skips the
+    // context close for borrowed sessions, leaving the window stuck on
+    // whatever Amazon page our buy ended on. A dedicated page that we
+    // always close in `finally` avoids both problems: fresh sessions
+    // get torn down by the context close anyway; borrowed sessions
+    // lose just our own tab.
+    page = await session.newPage();
 
     const info = await scrapeProduct(page, job.productUrl);
     logger.info(
@@ -1580,9 +1586,14 @@ async function runForProfile(
     await closeAndForgetSession(sessions, profile);
     return failed(profile, message);
   } finally {
-    // Do NOT close the page — it's the session's only tab and closing it
-    // would terminate the persistent Chromium context (browser quits when
-    // the last page closes). Next job reuses the same tab via goto().
+    // Tear down our buy page. On worker-owned sessions the preceding
+    // closeAndForgetSession already nuked the context (this becomes a
+    // cheap catch). On borrowed sessions the context stays up (by
+    // design — it's the user's "View Order" window) but our tab is
+    // gone, so they don't see a wedged buy page.
+    if (page) {
+      await page.close().catch(() => undefined);
+    }
   }
 }
 
