@@ -540,11 +540,16 @@ a,
 
 /* Allowed-prefixes settings panel */
 .prefix-panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
+  background: hsl(220 25% 12% / 0.55);
+  backdrop-filter: blur(52px) saturate(140%);
+  -webkit-backdrop-filter: blur(52px) saturate(140%);
+  border: 1px solid hsl(220 25% 100% / 0.05);
+  border-radius: 12px;
   padding: 16px 18px;
-  box-shadow: var(--shadow-sm);
+  box-shadow:
+    inset 0 1px 0 0 hsl(220 25% 100% / 0.08),
+    0 1px 2px 0 hsl(230 40% 4% / 0.3),
+    0 20px 50px -20px hsl(230 40% 4% / 0.55);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -748,11 +753,15 @@ a,
   display: flex;
   align-items: center;
   gap: 12px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
+  background: hsl(220 25% 12% / 0.55);
+  backdrop-filter: blur(52px) saturate(140%);
+  -webkit-backdrop-filter: blur(52px) saturate(140%);
+  border: 1px solid hsl(220 25% 100% / 0.05);
+  border-radius: 12px;
   padding: 16px 18px;
-  box-shadow: var(--shadow-sm);
+  box-shadow:
+    inset 0 1px 0 0 hsl(220 25% 100% / 0.08),
+    0 1px 2px 0 hsl(230 40% 4% / 0.3);
   transition: border-color 120ms, opacity 120ms, transform 120ms;
 }
 .account-card:hover {
@@ -791,15 +800,22 @@ a,
 .account-avatar {
   width: 44px;
   height: 44px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #3b82f6 0%, #6366f1 100%);
-  color: white;
+  border-radius: 10px;
+  background: linear-gradient(
+    135deg,
+    oklch(0.72 0.20 150) 0%,
+    oklch(0.75 0.18 180) 50%,
+    oklch(0.78 0.16 210) 100%
+  );
+  color: #020610;
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: 700;
   font-size: 18px;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+  box-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.3),
+    0 4px 16px -4px oklch(0.65 0.18 180 / 0.4);
 }
 .account-main {
   flex: 1;
