@@ -3390,6 +3390,10 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
                 size="xs"
                 className="text-red-300 hover:text-red-200 hover:bg-red-500/10"
                 onClick={() => {
+                  // Close the popover first — if we leave it open, its
+                  // z-[1000] sits above the shadcn Dialog (z-50) and the
+                  // confirm prompt ends up visually buried underneath.
+                  setOpen(false);
                   setConfirmState({
                     title: `Clear ${total} failed row${total === 1 ? '' : 's'}?`,
                     message: 'Resets the Failed counter and the failures-by-reason breakdown. The attempt rows and their logs are deleted locally — this cannot be undone.',
@@ -3398,7 +3402,6 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
                     onConfirm: async () => {
                       try {
                         const n = await window.autog.jobsClearFailed();
-                        setOpen(false);
                         toast.success(`Cleared ${n} failed row${n === 1 ? '' : 's'}`);
                       } catch (err) {
                         toast.error('Clear failed', {
