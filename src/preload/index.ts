@@ -69,6 +69,8 @@ const bridge: AutoGBridge = {
   jobsClearFailed: () => ipcRenderer.invoke(IPC.jobsClearFailed) as Promise<number>,
   jobsClearCanceled: () => ipcRenderer.invoke(IPC.jobsClearCanceled) as Promise<number>,
   jobsDelete: (attemptId) => ipcRenderer.invoke(IPC.jobsDelete, attemptId) as Promise<void>,
+  jobsDeleteBulk: (attemptIds) =>
+    ipcRenderer.invoke(IPC.jobsDeleteBulk, attemptIds) as Promise<number>,
   jobsVerifyOrder: (attemptId) =>
     ipcRenderer.invoke(IPC.jobsVerifyOrder, attemptId) as ReturnType<
       AutoGBridge['jobsVerifyOrder']

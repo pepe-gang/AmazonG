@@ -185,6 +185,38 @@ export async function deleteAttempt(attemptId: string): Promise<void> {
 }
 
 /**
+ * Bulk delete — one cache mutation, one debounced save, parallel log +
+ * snapshot removals. Dropping 1000+ rows via single deleteAttempt takes
+ * seconds per-call because of the IPC + fs serialization; this path is
+ * ~100x faster for large selections. Returns the count actually removed
+ * (ids not in the store are silently skipped).
+ */
+export async function deleteAttempts(attemptIds: string[]): Promise<number> {
+  if (attemptIds.length === 0) return 0;
+  const store = await load();
+  let removed = 0;
+  for (const id of attemptIds) {
+    if (store.attempts[id]) {
+      delete store.attempts[id];
+      removed += 1;
+    }
+  }
+  if (removed === 0) return 0;
+  scheduleSave();
+  await Promise.all(
+    attemptIds.map(async (id) => {
+      try {
+        await unlink(logFile(id));
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      void removeSnapshot(id);
+    }),
+  );
+  return removed;
+}
+
+/**
  * Drop attempt records older than `cutoff`. Used at app startup so the
  * table doesn't grow unbounded.
  */

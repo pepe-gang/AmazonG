@@ -898,6 +898,7 @@ function JobsTable({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState<null | 'verify' | 'delete' | 'tracking'>(null);
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   // Drag-to-reorder + hide/show columns. Both persist in settings so
   // the layout (and the TSV-copy shape) survives restarts.
@@ -1224,25 +1225,30 @@ function JobsTable({
     setTimeout(() => setOrderToast(null), 8000);
   };
 
-  const runBulkDelete = async () => {
+  const runBulkDelete = () => {
     if (selectedAttempts.length === 0) return;
-    if (!confirm(`Delete ${selectedAttempts.length} selected row${selectedAttempts.length === 1 ? '' : 's'} and their logs?`)) {
-      return;
-    }
-    setBulkBusy('delete');
-    setBulkProgress({ done: 0, total: selectedAttempts.length });
-    for (let i = 0; i < selectedAttempts.length; i++) {
-      const a = selectedAttempts[i]!;
-      try {
-        await window.autog.jobsDelete(a.attemptId);
-      } catch {
-        // skip — broadcast will sync state
-      }
-      setBulkProgress({ done: i + 1, total: selectedAttempts.length });
-    }
-    setSelected(new Set());
-    setBulkBusy(null);
-    setBulkProgress(null);
+    const count = selectedAttempts.length;
+    setConfirmState({
+      title: `Delete ${count} row${count === 1 ? '' : 's'}?`,
+      message: `This removes the selected attempt${count === 1 ? '' : 's'} and ${count === 1 ? 'its log' : 'their logs'} from disk. This cannot be undone.`,
+      confirmLabel: `Delete ${count}`,
+      danger: true,
+      onConfirm: async () => {
+        setBulkBusy('delete');
+        // Bulk path: one IPC + one cache mutation + parallel log/snapshot
+        // unlinks on the main side. Much faster than looping jobsDelete —
+        // a 1000-row delete drops from ~30s to well under a second.
+        setBulkProgress({ done: 0, total: count });
+        try {
+          await window.autog.jobsDeleteBulk(selectedAttempts.map((a) => a.attemptId));
+        } catch {
+          // broadcast will still sync whatever did land
+        }
+        setSelected(new Set());
+        setBulkBusy(null);
+        setBulkProgress(null);
+      },
+    });
   };
 
   return (
@@ -1496,6 +1502,7 @@ function JobsTable({
           {orderToast}
         </div>
       )}
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

@@ -52,6 +52,7 @@ export const IPC = {
   jobsClearFailed: 'jobs:clear-failed',
   jobsClearCanceled: 'jobs:clear-canceled',
   jobsDelete: 'jobs:delete',
+  jobsDeleteBulk: 'jobs:delete-bulk',
   jobsVerifyOrder: 'jobs:verify-order',
   jobsFetchTracking: 'jobs:fetch-tracking',
   jobsRebuy: 'jobs:rebuy',
@@ -194,6 +195,8 @@ export type AutoGBridge = {
   jobsClearFailed(): Promise<number>;
   jobsClearCanceled(): Promise<number>;
   jobsDelete(attemptId: string): Promise<void>;
+  /** Delete many attempts in one pass. Returns the count actually removed. */
+  jobsDeleteBulk(attemptIds: string[]): Promise<number>;
   jobsVerifyOrder(attemptId: string): Promise<
     | { kind: 'active' | 'cancelled' | 'timeout'; orderId: string }
     | { kind: 'error' | 'busy'; message: string }

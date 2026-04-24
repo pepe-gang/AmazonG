@@ -12,6 +12,7 @@ import {
   clearFailed as storeClearFailed,
   createAttempt as storeCreateAttempt,
   deleteAttempt as storeDeleteAttempt,
+  deleteAttempts as storeDeleteAttempts,
   getAttempt as storeGetAttempt,
   listAttempts as storeListAttempts,
   pruneOlderThan,
@@ -834,6 +835,12 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC.jobsDelete, async (_e, attemptId: string) => {
     await storeDeleteAttempt(attemptId);
     scheduleBroadcastJobs();
+  });
+
+  ipcMain.handle(IPC.jobsDeleteBulk, async (_e, attemptIds: string[]) => {
+    const removed = await storeDeleteAttempts(attemptIds);
+    if (removed > 0) scheduleBroadcastJobs();
+    return removed;
   });
 
   ipcMain.handle(
