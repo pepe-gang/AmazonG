@@ -12,6 +12,14 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
   Sheet,
   SheetContent,
   SheetHeader,
@@ -298,15 +306,8 @@ function MainShell({ status }: { status: RendererStatus }) {
     }
   };
 
-  const disconnect = async () => {
-    if (!confirm('Disconnect from BetterBG? The saved Secret Key will be removed.')) return;
-    setBusy(true);
-    try {
-      await window.autog.identityDisconnect();
-    } finally {
-      setBusy(false);
-    }
-  };
+  // Disconnect moved into AccountsView — kept out of the header so the
+  // top chrome stays focused on worker state (Start/Stop + uptime).
 
   const uptimeLabel = useMemo(() => {
     if (!stats.startedAt) return '—';
@@ -374,14 +375,6 @@ function MainShell({ status }: { status: RendererStatus }) {
             {status.running ? <StopIcon /> : <PlayIcon />}
             {status.running ? 'Stop' : 'Start'}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={disconnect}
-            disabled={busy || status.running}
-          >
-            Disconnect
-          </Button>
         </div>
       </header>
 
@@ -437,7 +430,13 @@ function MainShell({ status }: { status: RendererStatus }) {
               />
               <Route
                 path="/accounts"
-                element={<AccountsView profiles={profiles} workerRunning={status.running} />}
+                element={
+                  <AccountsView
+                    profiles={profiles}
+                    workerRunning={status.running}
+                    identity={status.identity}
+                  />
+                }
               />
             </Routes>
           </div>
@@ -2234,9 +2233,11 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
 function AccountsView({
   profiles,
   workerRunning,
+  identity,
 }: {
   profiles: AmazonProfile[];
   workerRunning: boolean;
+  identity: RendererStatus['identity'];
 }) {
   const [lockedToast, setLockedToast] = useState(false);
   const handleLockedClick = () => {
@@ -2280,12 +2281,90 @@ function AccountsView({
         <BuyWithFillersPanel />
         <SnapshotSettingsPanel />
         <AccountsList profiles={profiles} />
+        <BetterBGConnectionPanel identity={identity} workerRunning={workerRunning} />
       </div>
       {lockedToast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 glass-strong px-4 py-2 text-sm rounded-full shadow-lg z-50" role="status">
           Stop the worker first — settings can't be changed while jobs are polling.
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * BetterBG identity + disconnect action. Moved out of the header so
+ * the glass top chrome stays focused on worker state (Start/Stop,
+ * uptime) and irreversible "detach this device" lives with the other
+ * settings. Uses ConfirmDialog for the "really disconnect?" prompt so
+ * it matches the glass look of everything else.
+ */
+function BetterBGConnectionPanel({
+  identity,
+  workerRunning,
+}: {
+  identity: RendererStatus['identity'];
+  workerRunning: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+
+  const startDisconnect = () => {
+    setConfirmState({
+      title: 'Disconnect from BetterBG?',
+      message:
+        'The saved Secret Key is removed and this device stops claiming jobs. You\'ll need to paste the key again to reconnect. Your Amazon profiles + their saved sessions are untouched.',
+      confirmLabel: 'Disconnect',
+      danger: true,
+      onConfirm: async () => {
+        setBusy(true);
+        try {
+          await window.autog.identityDisconnect();
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
+  };
+
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div className="min-w-0">
+          <div className="prefix-title">BetterBG connection</div>
+          <div className="prefix-sub">
+            This device is linked to {identity?.userEmail ?? 'your BetterBG account'} via a
+            saved Secret Key. The worker uses that key to claim jobs. Disconnect to unlink
+            the device — you can re-paste the key later to reconnect.
+          </div>
+          {identity?.last4 && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="uppercase tracking-wider text-[10px]">Key</span>
+              <span className="font-mono text-foreground/70">…{identity.last4}</span>
+              {identity.keyCreatedAt && (
+                <>
+                  <span className="text-muted-foreground/60">·</span>
+                  <span>added {formatDate(identity.keyCreatedAt)}</span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={startDisconnect}
+          disabled={busy || workerRunning}
+          title={
+            workerRunning
+              ? 'Stop the worker first — can\'t disconnect while jobs are polling'
+              : 'Unlink this device from BetterBG'
+          }
+        >
+          Disconnect
+        </Button>
+      </div>
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
@@ -3121,14 +3200,6 @@ function ConfirmDialog({
   onClose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    if (!state) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [state, onClose]);
 
   if (!state) return null;
 
@@ -3146,28 +3217,48 @@ function ConfirmDialog({
   };
 
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="modal-card" onMouseDown={(e) => e.stopPropagation()}>
-        <div className={`modal-icon ${state.danger ? 'danger' : ''}`}>
-          {state.danger ? <AlertIcon /> : <InfoIcon />}
-        </div>
-        <div className="modal-title">{state.title}</div>
-        <div className="modal-message">{state.message}</div>
-        <div className="modal-actions">
-          <button className="ghost-btn" onClick={onClose} disabled={busy}>
+    // Controlled shadcn Dialog — `open` follows the presence of state;
+    // onOpenChange is invoked when the user clicks the backdrop, hits
+    // Escape, or clicks the built-in close X. The overlay + content
+    // already carry the glass-strong animations from the primitive.
+    <Dialog
+      open={true}
+      onOpenChange={(next) => {
+        if (!next && !busy) onClose();
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            {state.danger && (
+              <span
+                className="flex size-7 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/15 text-red-300"
+                aria-hidden
+              >
+                <AlertIcon />
+              </span>
+            )}
+            {state.title}
+          </DialogTitle>
+          <DialogDescription className="text-sm text-muted-foreground leading-relaxed">
+            {state.message}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
-          </button>
-          <button
-            className={`primary-action ${state.danger ? 'danger' : ''}`}
+          </Button>
+          <Button
+            variant={state.danger ? 'destructive' : 'default'}
             onClick={() => void handleConfirm()}
             disabled={busy}
             autoFocus
           >
             {busy ? 'Working…' : state.confirmLabel ?? 'Confirm'}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -3231,6 +3322,7 @@ function normalizeFailureError(raw: string | null | undefined): string {
 function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][]; total: number }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const wrapRef = useRef<HTMLSpanElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
 
@@ -3297,19 +3389,24 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
                 variant="ghost"
                 size="xs"
                 className="text-red-300 hover:text-red-200 hover:bg-red-500/10"
-                onClick={async () => {
-                  if (!confirm(`Delete ${total} failed row${total === 1 ? '' : 's'} and reset this counter? Their logs will also be removed.`)) {
-                    return;
-                  }
-                  try {
-                    const n = await window.autog.jobsClearFailed();
-                    setOpen(false);
-                    toast.success(`Cleared ${n} failed row${n === 1 ? '' : 's'}`);
-                  } catch (err) {
-                    toast.error('Clear failed', {
-                      description: err instanceof Error ? err.message : String(err),
-                    });
-                  }
+                onClick={() => {
+                  setConfirmState({
+                    title: `Clear ${total} failed row${total === 1 ? '' : 's'}?`,
+                    message: 'Resets the Failed counter and the failures-by-reason breakdown. The attempt rows and their logs are deleted locally — this cannot be undone.',
+                    confirmLabel: 'Clear',
+                    danger: true,
+                    onConfirm: async () => {
+                      try {
+                        const n = await window.autog.jobsClearFailed();
+                        setOpen(false);
+                        toast.success(`Cleared ${n} failed row${n === 1 ? '' : 's'}`);
+                      } catch (err) {
+                        toast.error('Clear failed', {
+                          description: err instanceof Error ? err.message : String(err),
+                        });
+                      }
+                    },
+                  });
                 }}
               >
                 Clear
@@ -3326,6 +3423,7 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
           </div>,
           document.body,
         )}
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </span>
   );
 }
