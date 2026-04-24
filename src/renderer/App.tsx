@@ -675,7 +675,7 @@ function DashboardView(props: {
 /* ============================================================
    Jobs table
    ============================================================ */
-type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'buyMode' | 'qty' | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'status' | 'orderId';
+type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'buyMode' | 'qty' | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'status' | 'orderId' | 'fillerOrders';
 
 /**
  * Stable identifiers for each draggable column in the Jobs table. The
@@ -890,7 +890,9 @@ function JobsTable({
   }, [profiles]);
   const [sortKey, setSortKey] = useState<SortKey>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
-  const [accountFilter, setAccountFilter] = useState<string>('all');
+  // Empty set = all accounts. Non-empty = only show rows whose
+  // amazonEmail is in the set. Session-scoped — not persisted.
+  const [accountFilter, setAccountFilter] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
   const [orderToast, setOrderToast] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -932,9 +934,6 @@ function JobsTable({
     if (visible) next.add(s);
     else next.delete(s);
     void update({ jobsStatusFilter: ALL_STATUS_GROUPS.filter((x) => next.has(x)) });
-  };
-  const setAllStatusGroupsVisible = (visible: boolean) => {
-    void update({ jobsStatusFilter: visible ? [...ALL_STATUS_GROUPS] : ['__none__'] });
   };
   const resetStatusFilter = () => {
     void update({ jobsStatusFilter: [] });
@@ -1012,12 +1011,30 @@ function JobsTable({
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [attempts, accountLabelByEmail]);
 
+  // Per-group row counts shown on the inline filter pills. Respects the
+  // account/search filters so the numbers match what you'd see if you
+  // toggled that status on — otherwise "Failed · 1295" would mislead
+  // after you picked a single account.
+  const statusGroupCounts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const c: Record<StatusGroup, number> = { pending: 0, success: 0, cancelled: 0, failed: 0 };
+    for (const a of attempts) {
+      if (accountFilter.size > 0 && !accountFilter.has(a.amazonEmail)) continue;
+      if (q.length > 0) {
+        const hay = `${a.dealTitle ?? ''} ${a.amazonEmail} ${a.dealId ?? ''} ${a.dealKey ?? ''} ${a.orderId ?? ''}`.toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+      c[STATUS_GROUP[a.status]] += 1;
+    }
+    return c;
+  }, [attempts, accountFilter, search]);
+
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = attempts.filter((a) => {
       if (!visibleStatusGroups.has(STATUS_GROUP[a.status])) return false;
-      if (accountFilter !== 'all' && a.amazonEmail !== accountFilter) return false;
+      if (accountFilter.size > 0 && !accountFilter.has(a.amazonEmail)) return false;
       if (q.length > 0) {
         const hay = `${a.dealTitle ?? ''} ${a.amazonEmail} ${a.dealId ?? ''} ${a.dealKey ?? ''} ${a.orderId ?? ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -1082,6 +1099,14 @@ function JobsTable({
           return a.status.localeCompare(b.status);
         case 'orderId':
           return (a.orderId ?? '').localeCompare(b.orderId ?? '');
+        case 'fillerOrders': {
+          // Rows with no filler orders sort as "empty" (first asc, last
+          // desc). Ones with orders compare by their first id so users
+          // can quickly line up rows from the same filler placement.
+          const aId = a.fillerOrderIds?.[0] ?? '';
+          const bId = b.fillerOrderIds?.[0] ?? '';
+          return aId.localeCompare(bId);
+        }
       }
     };
     filtered.sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
@@ -1099,14 +1124,14 @@ function JobsTable({
 
   const clearFilters = () => {
     resetStatusFilter();
-    setAccountFilter('all');
+    setAccountFilter(new Set());
     setSearch('');
   };
 
   const statusFilterIsCustom =
     visibleStatusGroups.size !== DEFAULT_VISIBLE_STATUS_GROUPS.length ||
     !DEFAULT_VISIBLE_STATUS_GROUPS.every((s) => visibleStatusGroups.has(s));
-  const hasFilter = statusFilterIsCustom || accountFilter !== 'all' || search.length > 0;
+  const hasFilter = statusFilterIsCustom || accountFilter.size > 0 || search.length > 0;
 
   // Drop selections that no longer exist in the visible-or-attempts set
   // (e.g. after a bulk delete) so the bulk bar reflects reality.
@@ -1247,24 +1272,34 @@ function JobsTable({
             onToggle={setColumnHidden}
             onReset={() => void update({ jobsColumnOrder: [], jobsColumnHidden: [] })}
           />
-          <StatusFilterMenu
-            visible={visibleStatusGroups}
-            onToggle={setStatusGroupVisible}
-            onToggleAll={setAllStatusGroupsVisible}
-            onReset={resetStatusFilter}
+          <AccountFilterMenu
+            options={accountOptions}
+            selected={accountFilter}
+            onToggle={(email, on) => {
+              const next = new Set(accountFilter);
+              if (on) next.add(email);
+              else next.delete(email);
+              setAccountFilter(next);
+            }}
+            onClear={() => setAccountFilter(new Set())}
           />
-          <select
-            value={accountFilter}
-            onChange={(e) => setAccountFilter(e.target.value)}
-            className="h-8 rounded-md border border-white/10 bg-white/[0.04] px-2 text-sm text-foreground/90 hover:bg-white/[0.06]"
-          >
-            <option value="all">All accounts</option>
-            {accountOptions.map(({ email, label }) => (
-              <option key={email} value={email}>
-                {label}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-1.5">
+            {ALL_STATUS_GROUPS.map((s) => {
+              const active = visibleStatusGroups.has(s);
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setStatusGroupVisible(s, !active)}
+                  className={`status-filter-pill ${s} ${active ? 'is-active' : ''}`}
+                  title={active ? `Hide ${STATUS_GROUP_LABEL[s]}` : `Show ${STATUS_GROUP_LABEL[s]}`}
+                >
+                  {STATUS_GROUP_LABEL[s]}
+                  <span className="status-filter-count">· {statusGroupCounts[s]}</span>
+                </button>
+              );
+            })}
+          </div>
           {hasFilter && (
             <Button variant="ghost" size="sm" onClick={clearFilters}>
               Clear
@@ -1535,21 +1570,20 @@ function ColumnsMenu({
 }
 
 /**
- * Multi-select status filter dropdown. Replaces the old single-select
- * "All statuses / one status" dropdown. Defaults hide Failed and
- * Cancelled — once an order has settled into one of those, it usually
- * doesn't need attention. User can tick them on to audit.
+ * Multi-select Amazon-account filter. Empty selection = all accounts.
+ * Shows the count in the trigger so users see at a glance how many
+ * accounts are narrowing the view.
  */
-function StatusFilterMenu({
-  visible,
+function AccountFilterMenu({
+  options,
+  selected,
   onToggle,
-  onToggleAll,
-  onReset,
+  onClear,
 }: {
-  visible: Set<StatusGroup>;
-  onToggle: (s: StatusGroup, visible: boolean) => void;
-  onToggleAll: (visible: boolean) => void;
-  onReset: () => void;
+  options: { email: string; label: string }[];
+  selected: Set<string>;
+  onToggle: (email: string, on: boolean) => void;
+  onClear: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -1561,47 +1595,53 @@ function StatusFilterMenu({
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [open]);
-  const allChecked = visible.size === ALL_STATUS_GROUPS.length;
-  const someChecked = visible.size > 0 && !allChecked;
-  const allCheckboxRef = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    if (allCheckboxRef.current) allCheckboxRef.current.indeterminate = someChecked;
-  }, [someChecked, open]);
+  const label =
+    selected.size === 0
+      ? 'All accounts'
+      : selected.size === 1
+      ? (options.find((o) => o.email === Array.from(selected)[0])?.label ?? '1 account')
+      : `${selected.size} accounts`;
   return (
     <div className="action-menu-wrap" ref={ref}>
       <button
         className="ghost-btn"
         onClick={() => setOpen((o) => !o)}
-        title="Show only the statuses you tick"
+        title="Filter by Amazon account. Tick multiple to union."
       >
-        Statuses ({visible.size}/{ALL_STATUS_GROUPS.length}) ▾
+        {label} ▾
       </button>
       {open && (
         <div className="action-menu columns-menu">
-          <label className="columns-menu-item">
-            <input
-              ref={allCheckboxRef}
-              type="checkbox"
-              checked={allChecked}
-              onChange={(e) => onToggleAll(e.target.checked)}
-            />
-            All
-          </label>
-          <div className="action-menu-sep" />
-          {ALL_STATUS_GROUPS.map((s) => (
-            <label key={s} className="columns-menu-item">
-              <input
-                type="checkbox"
-                checked={visible.has(s)}
-                onChange={(e) => onToggle(s, e.target.checked)}
-              />
-              {STATUS_GROUP_LABEL[s]}
-            </label>
-          ))}
-          <div className="action-menu-sep" />
-          <button className="action-menu-item" onClick={() => { onReset(); setOpen(false); }}>
-            Reset to default
-          </button>
+          {options.length === 0 ? (
+            <div className="columns-menu-item" style={{ opacity: 0.6, cursor: 'default' }}>
+              No accounts yet
+            </div>
+          ) : (
+            options.map(({ email, label }) => (
+              <label key={email} className="columns-menu-item">
+                <input
+                  type="checkbox"
+                  checked={selected.has(email)}
+                  onChange={(e) => onToggle(email, e.target.checked)}
+                />
+                {label}
+              </label>
+            ))
+          )}
+          {selected.size > 0 && (
+            <>
+              <div className="action-menu-sep" />
+              <button
+                className="action-menu-item"
+                onClick={() => {
+                  onClear();
+                  setOpen(false);
+                }}
+              >
+                Show all accounts
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

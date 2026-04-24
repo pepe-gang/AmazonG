@@ -31,9 +31,9 @@ export function truncateAtWord(s: string, maxChars: number): string {
 }
 
 export interface MarginDisplay {
-  /** Arrow glyph — "▲" when payout ≥ retail, "▼" when payout < retail, "" when unknown. */
+  /** Arrow glyph — "▲" when payout > retail, "▼" when payout < retail, "" when equal / unknown. */
   indicator: string;
-  /** `$|diff| | ±pct%` or `"—"` when retail unknown. */
+  /** `$|diff| | ±pct%` — or `$0.00 | 0.00%` when retail is missing (BG convention: missing retail ≡ retail equal to payout). */
   label: string;
   /** Tailwind color class matching the direction. */
   className: string;
@@ -43,17 +43,32 @@ export interface MarginDisplay {
  * Payout-vs-retail margin display. `price` is what BG pays; `oldPrice`
  * is what Amazon charges. A positive margin means you keep the difference
  * — green. A negative margin means you're paying out of pocket — red.
+ *
+ * BG feed convention: when retail (oldPrice) is missing, it means retail
+ * equals payout — so margin is $0.00 / 0.00% (rendered neutral), not
+ * "unknown".
  */
 export function computeMargin(
   price: number,
   oldPrice: number | null | undefined,
 ): MarginDisplay {
-  if (oldPrice === null || oldPrice === undefined) {
+  const retail = oldPrice ?? price;
+  if (retail === 0) {
     return { indicator: '', label: '—', className: 'text-muted-foreground' };
   }
-  const pct = ((price - oldPrice) / oldPrice) * 100;
-  const dollars = price - oldPrice;
-  const up = pct >= 0;
+  const dollars = price - retail;
+  const pct = (dollars / retail) * 100;
+  // Break-even is a win, not neutral — on a 0% deal BG still pays the
+  // cashback on top of Amazon retail, so it goes to the user's pocket.
+  // Render green so users stop skipping these by reflex.
+  if (dollars === 0) {
+    return {
+      indicator: '▲',
+      label: '$0.00 | 0.00%',
+      className: 'text-emerald-300',
+    };
+  }
+  const up = dollars > 0;
   const pctLabel = `${up ? '+' : '−'}${Math.abs(pct).toFixed(2)}%`;
   const dollarLabel = `$${Math.abs(dollars).toFixed(2)}`;
   return {

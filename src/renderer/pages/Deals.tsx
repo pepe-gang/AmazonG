@@ -40,13 +40,15 @@ function toNumber(v: string | null | undefined): number | undefined {
 }
 
 /** Margin % of payout vs retail. Used as the sort key for the Margin
- *  column so deals with the biggest rebate float to the top. Returns
- *  null when either side is missing so callers can send these rows to
- *  one end of the list regardless of sort direction. */
+ *  column so deals with the biggest rebate float to the top. BG feed
+ *  convention: missing retail means retail equals payout → 0% margin.
+ *  Null only when payout itself is missing — those rows sink to the
+ *  end regardless of direction. */
 function marginPct(d: AmazonDeal): number | null {
   const price = toNumber(d.price);
   const oldPrice = toNumber(d.oldPrice);
-  if (price === undefined || oldPrice === undefined || oldPrice === 0) return null;
+  if (price === undefined) return null;
+  if (oldPrice === undefined || oldPrice === 0) return 0;
   return ((price - oldPrice) / oldPrice) * 100;
 }
 

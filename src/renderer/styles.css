@@ -1614,6 +1614,56 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   border: 1px solid hsl(25 90% 60% / 0.28);
 }
 
+/* Inline status-filter pills (Jobs table). Each hue has an "active"
+ * state that tints the full pill, and a dimmed "inactive" state so
+ * hidden groups are obviously off. The count is visually secondary
+ * but same color family so the pill reads as one chip. */
+.status-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+  background: hsl(220 15% 100% / 0.03);
+  color: hsl(220 10% 65%);
+  border: 1px solid hsl(220 15% 100% / 0.08);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+.status-filter-pill:hover {
+  background: hsl(220 15% 100% / 0.06);
+  color: hsl(220 10% 80%);
+}
+.status-filter-pill .status-filter-count {
+  opacity: 0.75;
+}
+
+.status-filter-pill.is-active.pending {
+  background: var(--warn-bg);
+  color: hsl(40 90% 80%);
+  border-color: hsl(40 90% 60% / 0.28);
+}
+.status-filter-pill.is-active.success {
+  background: var(--success-bg);
+  color: hsl(150 60% 80%);
+  border-color: hsl(150 60% 50% / 0.28);
+}
+.status-filter-pill.is-active.cancelled {
+  background: hsl(25 90% 60% / 0.18);
+  color: hsl(25 95% 78%);
+  border-color: hsl(25 90% 60% / 0.28);
+}
+.status-filter-pill.is-active.failed {
+  background: var(--danger-bg);
+  color: hsl(0 80% 85%);
+  border-color: hsl(0 80% 60% / 0.28);
+}
+
 /* Logs view (full-page) */
 .logs-view {
   flex: 1;
