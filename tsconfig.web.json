@@ -15,7 +15,8 @@
     "baseUrl": ".",
     "paths": {
       "@shared/*": ["src/shared/*"],
-      "@parsers/*": ["src/parsers/*"]
+      "@parsers/*": ["src/parsers/*"],
+      "@/*": ["src/renderer/*"]
     }
   },
   "include": ["src/renderer/**/*", "src/shared/**/*"]
