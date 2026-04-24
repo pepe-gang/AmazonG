@@ -1,4 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import {
+  SidebarInset,
+  SidebarProvider,
+  SidebarTrigger,
+} from '@/components/ui/sidebar';
+import { Separator } from '@/components/ui/separator';
+import { Button } from '@/components/ui/button';
+import { Toaster } from '@/components/ui/sonner';
+import { AppSidebar } from '@/components/app-sidebar';
 import type {
   AmazonProfile,
   JobAttempt,
@@ -56,7 +66,14 @@ export function App() {
     return off;
   }, []);
 
-  return status.connected ? <MainScreen status={status} /> : <OnboardingScreen />;
+  return (
+    <>
+      {status.connected ? <MainScreen status={status} /> : <OnboardingScreen />}
+      {/* Sonner Toaster: mounted at app root so any component can `toast(...)`.
+          Styled via CSS vars inside sonner.tsx so it picks up our tokens. */}
+      <Toaster />
+    </>
+  );
 }
 
 /* ============================================================
@@ -157,7 +174,29 @@ const EMPTY_STATS: Stats = {
 };
 
 function MainScreen({ status }: { status: RendererStatus }) {
+  // Route-driven nav via HashRouter — logs are opened as a modal out of
+  // the jobs table, not a full route. Keep `view` state out for now;
+  // MainShell uses react-router internally so sidebar active states
+  // stay in sync with the URL.
+  return (
+    <HashRouter>
+      <MainShell status={status} />
+    </HashRouter>
+  );
+}
+
+/**
+ * App shell: glass top-chrome header + sidebar + routed content. All
+ * worker/status state lives here so status-pill and Start/Stop can
+ * stay pinned across every route. Mirrors Bestie's `DashboardLayout`
+ * pattern — one `SidebarProvider`, a header with `SidebarTrigger`, a
+ * flex-row with `AppSidebar` + `SidebarInset`, and the routes inside.
+ */
+function MainShell({ status }: { status: RendererStatus }) {
   const [view, setView] = useState<View>('dashboard');
+  // NOTE: the route replaces this for nav purposes, but `view` is
+  // still used for the Logs drawer state until the modal extraction
+  // lands in a later phase.
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [profiles, setProfiles] = useState<AmazonProfile[]>([]);
   const [attempts, setAttempts] = useState<JobAttempt[]>([]);
@@ -166,6 +205,7 @@ function MainScreen({ status }: { status: RendererStatus }) {
   const [appVersion, setAppVersion] = useState<string>('');
   const [updateInfo, setUpdateInfo] = useState<{ latest: string } | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  const navigate = useNavigate();
   useEffect(() => {
     void window.autog.appVersion().then(setAppVersion);
     // Check for updates on mount + every 6 hours
@@ -252,87 +292,140 @@ function MainScreen({ status }: { status: RendererStatus }) {
   const accountsCount = profiles.length;
   const accountsReady = profiles.filter((p) => p.enabled && p.loggedIn).length;
 
+  // Logs view still lives inside `view` state — when the user clicks
+  // "View Log" on a jobs row, we flip to { kind: 'logs', attempt } and
+  // render LogsView as a full-screen overlay. A later phase turns this
+  // into a shadcn Dialog.
+  const isLogs = typeof view === 'object' && view.kind === 'logs';
+
   return (
-    <div className="app">
-      <div className="toolbar">
-        <div className="toolbar-left">
-          <div className="brand-pill" title={appVersion ? `AmazonG ${appVersion}` : 'AmazonG'}>
-            <div className="app-badge">
-              <AppIcon />
-            </div>
-            <span className="brand-pill-label">AmazonG</span>
-            {appVersion && <span className="brand-pill-version">v{appVersion}</span>}
-          </div>
+    <SidebarProvider defaultOpen={false} className="!min-h-0 h-screen flex-col">
+      <header
+        className="glass-chrome flex h-12 shrink-0 items-center gap-2 border-b border-white/5 px-4 pl-24"
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+      >
+        <Separator orientation="vertical" className="mr-2 !h-4" />
+        <SidebarTrigger
+          className="-ml-1"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        />
+        <span className="font-medium text-sm">AmazonG</span>
+        {appVersion && (
+          <span className="text-xs text-muted-foreground">v{appVersion}</span>
+        )}
 
-          {view === 'dashboard' ? (
-            <>
-              <button
-                className={`primary-action ${status.running ? 'danger' : ''}`}
-                onClick={toggleWorker}
-                disabled={busy}
-              >
-                {status.running ? <StopIcon /> : <PlayIcon />}
-                {status.running ? 'Stop' : 'Start'}
-              </button>
-              <button
-                className="ghost-btn"
-                onClick={disconnect}
-                disabled={busy || status.running}
-              >
-                Disconnect
-              </button>
-              <div className={`status-pill ${status.running ? 'running' : 'idle'}`}>
-                <span className="dot" />
-                {status.running ? uptimeLabel : 'Idle'}
-              </div>
-            </>
-          ) : (
-            <button className="ghost-btn" onClick={() => setView('dashboard')}>
-              <BackIcon /> {typeof view === 'object' && view.kind === 'logs' ? 'Back' : 'Dashboard'}
-            </button>
-          )}
-        </div>
-        <div className="toolbar-right">
-          {view === 'dashboard' && (
-            <button className="ghost-btn" onClick={() => setView('accounts')}>
-              <UsersIcon />
-              Amazon Accounts
-              {accountsCount > 0 && (
-                <span className={`count-badge ${accountsReady > 0 ? 'ready' : ''}`}>
-                  {accountsReady}/{accountsCount}
-                </span>
-              )}
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="content">
-        {updateInfo && !updateDismissed && (
-          <div className="update-notice" role="status">
-            <span>
-              <b>AmazonG v{updateInfo.latest}</b> is available (you have v{appVersion}).
-              Download the latest from the <button className="link-inline" onClick={() => void window.autog.openExternal('https://betterbg.vercel.app/dashboard/auto-buy')}>BetterBG setup guide</button>.
+        <div
+          className="ml-auto flex items-center gap-2"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border border-white/10 bg-white/[0.04]">
+            <span
+              className={
+                'relative inline-flex size-2 rounded-full ' +
+                (status.running
+                  ? 'bg-emerald-400 shadow-[0_0_6px_0_oklch(0.75_0.18_150_/_0.9)]'
+                  : 'bg-white/20')
+              }
+            />
+            <span className="tabular-nums text-foreground/90">
+              {status.running ? uptimeLabel : 'Idle'}
             </span>
-            <button className="ghost-btn" onClick={() => setUpdateDismissed(true)}>Dismiss</button>
           </div>
-        )}
-        {status.lastError && <div className="error-banner">{status.lastError}</div>}
-        {view === 'dashboard' ? (
-          <DashboardView
-            status={status}
-            uptimeLabel={uptimeLabel}
-            attempts={attempts}
-            profiles={profiles}
-            onViewLogs={(attempt) => setView({ kind: 'logs', attempt })}
-          />
-        ) : view === 'accounts' ? (
-          <AccountsView profiles={profiles} workerRunning={status.running} />
-        ) : (
-          <LogsView attempt={view.attempt} />
-        )}
+          <Button
+            variant={status.running ? 'destructive' : 'default'}
+            size="sm"
+            onClick={toggleWorker}
+            disabled={busy}
+          >
+            {status.running ? <StopIcon /> : <PlayIcon />}
+            {status.running ? 'Stop' : 'Start'}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={disconnect}
+            disabled={busy || status.running}
+          >
+            Disconnect
+          </Button>
+        </div>
+      </header>
+
+      <div className="flex flex-1 min-h-0 w-full">
+        <AppSidebar version={appVersion || undefined} />
+        <SidebarInset>
+          <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+            {updateInfo && !updateDismissed && (
+              <div
+                className="mx-4 mt-3 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-sm text-amber-100"
+                role="status"
+              >
+                <span className="flex-1">
+                  <b>AmazonG v{updateInfo.latest}</b> is available (you have v{appVersion}).
+                  Download the latest from the{' '}
+                  <button
+                    className="underline hover:text-amber-50"
+                    onClick={() =>
+                      void window.autog.openExternal('https://betterbg.vercel.app/dashboard/auto-buy')
+                    }
+                  >
+                    BetterBG setup guide
+                  </button>
+                  .
+                </span>
+                <Button variant="ghost" size="sm" onClick={() => setUpdateDismissed(true)}>
+                  Dismiss
+                </Button>
+              </div>
+            )}
+            {status.lastError && (
+              <div className="mx-4 mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                {status.lastError}
+              </div>
+            )}
+            {isLogs && typeof view === 'object' && view.kind === 'logs' ? (
+              <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+                <div className="flex items-center gap-2 px-4 py-3">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setView('dashboard');
+                      navigate('/dashboard');
+                    }}
+                  >
+                    <BackIcon /> Back
+                  </Button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-auto">
+                  <LogsView attempt={view.attempt} />
+                </div>
+              </div>
+            ) : (
+              <Routes>
+                <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                <Route
+                  path="/dashboard"
+                  element={
+                    <DashboardView
+                      status={status}
+                      uptimeLabel={uptimeLabel}
+                      attempts={attempts}
+                      profiles={profiles}
+                      onViewLogs={(attempt) => setView({ kind: 'logs', attempt })}
+                    />
+                  }
+                />
+                <Route
+                  path="/accounts"
+                  element={<AccountsView profiles={profiles} workerRunning={status.running} />}
+                />
+              </Routes>
+            )}
+          </div>
+        </SidebarInset>
       </div>
-    </div>
+    </SidebarProvider>
   );
 }
 

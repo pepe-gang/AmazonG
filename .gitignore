@@ -8,3 +8,12 @@ dist/
 
 # Electron / electron-vite cache
 .vite-cache/
+
+# Local session / debug artifacts (don't check these in — they grow
+# fast and hold transient traces from ad-hoc runs)
+.claude/
+.playwright-mcp/
+deals.csv
+screenshots/
+step1-product.png
+step2-spc.png
