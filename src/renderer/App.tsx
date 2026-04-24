@@ -898,7 +898,7 @@ function JobsTable({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState<null | 'verify' | 'delete' | 'tracking'>(null);
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
-  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   // Drag-to-reorder + hide/show columns. Both persist in settings so
   // the layout (and the TSV-copy shape) survives restarts.
@@ -1228,7 +1228,7 @@ function JobsTable({
   const runBulkDelete = () => {
     if (selectedAttempts.length === 0) return;
     const count = selectedAttempts.length;
-    setConfirmState({
+    confirm({
       title: `Delete ${count} row${count === 1 ? '' : 's'}?`,
       message: `This removes the selected attempt${count === 1 ? '' : 's'} and ${count === 1 ? 'its log' : 'their logs'} from disk. This cannot be undone.`,
       confirmLabel: `Delete ${count}`,
@@ -1508,7 +1508,7 @@ function JobsTable({
           {orderToast}
         </div>
       )}
-      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+      {confirmDialog}
     </div>
   );
 }
@@ -2429,10 +2429,10 @@ function BetterBGConnectionPanel({
   workerRunning: boolean;
 }) {
   const [busy, setBusy] = useState(false);
-  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   const startDisconnect = () => {
-    setConfirmState({
+    confirm({
       title: 'Disconnect from BetterBG?',
       message:
         'The saved Secret Key is removed and this device stops claiming jobs. You\'ll need to paste the key again to reconnect. Your Amazon profiles + their saved sessions are untouched.',
@@ -2486,7 +2486,7 @@ function BetterBGConnectionPanel({
           Disconnect
         </Button>
       </div>
-      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+      {confirmDialog}
     </div>
   );
 }
@@ -2829,7 +2829,7 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   const [newName, setNewName] = useState('');
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
-  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [toast, setToast] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [refreshingEmail, setRefreshingEmail] = useState<string | null>(null);
@@ -2915,7 +2915,7 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   };
 
   const doRemove = (email: string) => {
-    setConfirmState({
+    confirm({
       title: 'Remove Amazon account?',
       message: `${email} will be removed and its saved cookies deleted. You'll need to sign in again to re-add this account.`,
       confirmLabel: 'Remove',
@@ -3300,7 +3300,7 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
         </div>
       )}
 
-      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+      {confirmDialog}
       {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
     </div>
   );
@@ -3384,6 +3384,27 @@ function ConfirmDialog({
   );
 }
 
+/**
+ * Tiny hook that pairs a ConfirmState with its rendered ConfirmDialog.
+ * Every component that had its own `useState<ConfirmState | null>` +
+ * `<ConfirmDialog state={...} onClose={...} />` boilerplate (jobs table,
+ * accounts, logs, dashboard) now calls this and drops the ~10 lines.
+ *
+ *   const { confirm, dialog } = useConfirm();
+ *   confirm({ title, message, onConfirm });
+ *   return <>...{dialog}</>;
+ *
+ * Behavior matches the original pattern exactly: one active prompt at a
+ * time, auto-closes after onConfirm resolves (or throws — caller toasts
+ * errors), backdrop/Escape dismisses when not busy.
+ */
+function useConfirm() {
+  const [state, setState] = useState<ConfirmState | null>(null);
+  const confirm = useCallback((s: ConfirmState) => setState(s), []);
+  const dialog = <ConfirmDialog state={state} onClose={() => setState(null)} />;
+  return { confirm, dialog };
+}
+
 function Toast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
     <div className="toast" role="status">
@@ -3444,7 +3465,7 @@ function normalizeFailureError(raw: string | null | undefined): string {
 function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][]; total: number }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
-  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const { update } = useSettings();
   const wrapRef = useRef<HTMLSpanElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
@@ -3517,7 +3538,7 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
                   // z-[1000] sits above the shadcn Dialog (z-50) and the
                   // confirm prompt ends up visually buried underneath.
                   setOpen(false);
-                  setConfirmState({
+                  confirm({
                     title: `Reset Failed counter?`,
                     message: `Hides the ${total} current failure${total === 1 ? '' : 's'} from the Dashboard counter and the failures-by-reason list. The rows themselves stay in Jobs so logs remain accessible; new failures after this point count normally.`,
                     confirmLabel: 'Reset',
@@ -3555,7 +3576,7 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
           </div>,
           document.body,
         )}
-      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+      {confirmDialog}
     </span>
   );
 }
