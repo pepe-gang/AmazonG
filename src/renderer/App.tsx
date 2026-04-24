@@ -39,6 +39,33 @@ import type { Settings } from '@shared/ipc';
 import { SNAPSHOT_ERROR_GROUPS } from '@shared/snapshotGroups';
 import { computeProfit, retailPrice } from '@shared/profit';
 import { parsePrice } from '@parsers/amazonProduct';
+import {
+  ALL_STATUS_GROUPS,
+  attemptsToTSV,
+  COLUMN_ALIGN,
+  COLUMN_LABEL,
+  DEFAULT_COLUMN_ORDER,
+  DEFAULT_HIDDEN_COLUMNS,
+  DEFAULT_VISIBLE_STATUS_GROUPS,
+  resolveColumnOrder,
+  STATUS_GROUP,
+  STATUS_GROUP_BADGE_CLASS,
+  STATUS_GROUP_LABEL,
+  STATUS_LABEL,
+  type JobColumnId,
+  type SortDir,
+  type SortKey,
+  type StatusGroup,
+} from './lib/jobsColumns.js';
+import {
+  formatBytes,
+  formatDate,
+  formatTime,
+  formatUptime,
+  relDate,
+  relTime,
+  shortEmail,
+} from './lib/format.js';
 
 const SETUP_GUIDE_URL = 'https://betterbg.vercel.app/dashboard/auto-buy';
 
@@ -675,200 +702,6 @@ function DashboardView(props: {
 /* ============================================================
    Jobs table
    ============================================================ */
-type SortKey = 'date' | 'item' | 'dealId' | 'account' | 'buyMode' | 'qty' | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit' | 'status' | 'orderId' | 'fillerOrders';
-
-/**
- * Stable identifiers for each draggable column in the Jobs table. The
- * user-chosen ordering lives in settings.jobsColumnOrder; unknown ids
- * are dropped, missing ids fall back to DEFAULT_COLUMN_ORDER's tail.
- *
- * The Action menu column is intentionally excluded — it's not part of
- * the data, it stays pinned to the right.
- */
-type JobColumnId =
-  | 'date' | 'item' | 'dealId' | 'account' | 'buyMode' | 'qty'
-  | 'retail' | 'totalRetail' | 'payout' | 'cb' | 'profit'
-  | 'orderId' | 'tracking' | 'fillerOrders' | 'status';
-
-const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
-  'date', 'item', 'dealId', 'account', 'buyMode', 'qty',
-  'retail', 'totalRetail', 'payout', 'cb', 'profit',
-  'orderId', 'fillerOrders', 'tracking', 'status',
-];
-
-/**
- * Columns hidden the first time a user sees them. Once they explicitly
- * tick the column on (which writes the new order back to settings),
- * the "haven't-seen-it-yet" check stops firing.
- */
-const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail']);
-
-function resolveColumnOrder(saved: string[]): JobColumnId[] {
-  const valid = new Set<JobColumnId>(DEFAULT_COLUMN_ORDER);
-  const seen = new Set<JobColumnId>();
-  const out: JobColumnId[] = [];
-  for (const id of saved) {
-    if (valid.has(id as JobColumnId) && !seen.has(id as JobColumnId)) {
-      out.push(id as JobColumnId);
-      seen.add(id as JobColumnId);
-    }
-  }
-  // Slot any defaults the saved order didn't mention (e.g. brand-new
-  // columns added in a later release) into their natural position —
-  // right after the nearest default-predecessor the user already has.
-  DEFAULT_COLUMN_ORDER.forEach((id, i) => {
-    if (seen.has(id)) return;
-    let insertAt = 0;
-    for (let j = i - 1; j >= 0; j--) {
-      const prev = DEFAULT_COLUMN_ORDER[j]!;
-      const idx = out.indexOf(prev);
-      if (idx !== -1) { insertAt = idx + 1; break; }
-    }
-    out.splice(insertAt, 0, id);
-    seen.add(id);
-  });
-  return out;
-}
-
-// Display label per raw status — collapses to one of 4 visible buckets.
-// "Done" and "Dry-run OK" are gone; everything that's a finished-good
-// outcome reads as "Success" now.
-const STATUS_LABEL: Record<JobAttemptStatus, string> = {
-  queued: 'Pending',
-  in_progress: 'Pending',
-  awaiting_verification: 'Pending',
-  verified: 'Success',
-  completed: 'Success',
-  dry_run_success: 'Success',
-  cancelled_by_amazon: 'Cancelled',
-  failed: 'Failed',
-};
-
-/**
- * Visible status buckets. The underlying JobAttemptStatus enum still
- * has 8 values for the worker's internal state machine, but the user
- * only ever sees 4 buckets in the filter + badge — Pending, Success,
- * Cancelled, Failed. The `Done` and `Dry-run OK` raw statuses get
- * folded into Success; the in-flight three (queued / in_progress /
- * awaiting_verification) all read as Pending.
- */
-type StatusGroup = 'pending' | 'success' | 'cancelled' | 'failed';
-
-const STATUS_GROUP: Record<JobAttemptStatus, StatusGroup> = {
-  queued: 'pending',
-  in_progress: 'pending',
-  awaiting_verification: 'pending',
-  verified: 'success',
-  completed: 'success',
-  dry_run_success: 'success',
-  cancelled_by_amazon: 'cancelled',
-  failed: 'failed',
-};
-
-const ALL_STATUS_GROUPS: StatusGroup[] = ['pending', 'success', 'cancelled', 'failed'];
-
-const STATUS_GROUP_LABEL: Record<StatusGroup, string> = {
-  pending: 'Pending',
-  success: 'Success',
-  cancelled: 'Cancelled',
-  failed: 'Failed',
-};
-
-const STATUS_GROUP_BADGE_CLASS: Record<StatusGroup, string> = {
-  pending: 'badge-amber',
-  success: 'badge-green',
-  // Cancelled is a distinct "terminated-but-not-our-fault" state
-  // (Amazon killed the order post-placement); Failed is "we never
-  // got that far". Different badge tones so users stop reading them
-  // as the same thing at a glance.
-  cancelled: 'badge-orange',
-  failed: 'badge-red',
-};
-
-/** Default visible: in-flight + finished-good. Settled bad rows hidden. */
-const DEFAULT_VISIBLE_STATUS_GROUPS: StatusGroup[] = ['pending', 'success'];
-
-/** TSV cell value extractor for one column id. Used by both copy paths. */
-function tsvCell(id: JobColumnId, a: JobAttempt): string | number {
-  switch (id) {
-    case 'date':    return new Date(a.createdAt).toISOString();
-    case 'item':    return a.dealTitle ?? '';
-    case 'dealId':  return a.dealId ?? a.dealKey ?? '';
-    case 'account': return a.amazonEmail;
-    case 'buyMode': return a.buyMode === 'filler' ? 'Filler' : 'Single';
-    case 'qty':     return typeof a.quantity === 'number' ? a.quantity : '';
-    case 'retail': {
-      const n = retailPrice(a);
-      return n !== null ? n.toFixed(2) : '';
-    }
-    case 'totalRetail': {
-      const n = retailPrice(a);
-      if (n === null || typeof a.quantity !== 'number' || a.quantity <= 0) {
-        return '';
-      }
-      return (n * a.quantity).toFixed(2);
-    }
-    case 'payout':  return typeof a.price === 'number' ? a.price.toFixed(2) : '';
-    case 'cb':      return typeof a.cashbackPct === 'number' ? a.cashbackPct : '';
-    case 'profit': {
-      const p = computeProfit(a);
-      return p === null ? '' : p.toFixed(2);
-    }
-    case 'orderId': return a.orderId ?? '';
-    case 'tracking': return (a.trackingIds ?? []).join(', ');
-    case 'fillerOrders': return (a.fillerOrderIds ?? []).join(', ');
-    case 'status':  return STATUS_LABEL[a.status] ?? a.status;
-  }
-}
-
-/**
- * Format attempt rows as TSV for paste-to-spreadsheet flows. Column
- * order matches the visible Jobs table (whatever the user dragged it
- * to). NO HEADER row — paste-append into an existing tracker is the
- * primary use case, and the user explicitly doesn't want column names.
- * Cells get the standard TSV escape (wrap in quotes + double internal
- * quotes) when they contain tab/newline/quote so Google Sheets / Excel
- * parse them correctly.
- */
-function attemptsToTSV(rows: JobAttempt[], order: JobColumnId[]): string {
-  const escape = (v: string | number): string => {
-    const s = String(v);
-    return /[\t\n"]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  return rows
-    .map((a) => order.map((id) => escape(tsvCell(id, a))).join('\t'))
-    .join('\n');
-}
-
-const COLUMN_LABEL: Record<JobColumnId, string> = {
-  date: 'Date',
-  item: 'Item',
-  dealId: 'Deal ID',
-  account: 'Amazon Account',
-  buyMode: 'Buy Mode',
-  qty: 'Qty',
-  retail: 'Retail',
-  totalRetail: 'Total Retail',
-  payout: 'Payout',
-  cb: 'CB',
-  profit: 'Profit',
-  orderId: 'Order ID',
-  tracking: 'Tracking',
-  fillerOrders: 'Filler Orders',
-  status: 'Status',
-};
-
-const COLUMN_ALIGN: Partial<Record<JobColumnId, 'right' | 'center'>> = {
-  buyMode: 'center',
-  qty: 'center',
-  retail: 'right',
-  totalRetail: 'right',
-  payout: 'right',
-  cb: 'right',
-  profit: 'right',
-  status: 'center',
-};
-type SortDir = 'asc' | 'desc';
 
 function JobsTable({
   attempts,
@@ -2063,14 +1896,6 @@ function StatusBadge({ status }: { status: JobAttemptStatus }) {
   );
 }
 
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleDateString(undefined, { month: '2-digit', day: '2-digit', year: '2-digit' });
-}
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-}
-
 /* ============================================================
    Log-line formatting
    ============================================================ */
@@ -2522,13 +2347,6 @@ function AutoStartWorkerPanel() {
       </div>
     </div>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 function BuyWithFillersPanel() {
@@ -3648,38 +3466,6 @@ function StatCard(props: {
 /* ============================================================
    Utilities
    ============================================================ */
-function formatUptime(ms: number): string {
-  const total = Math.floor(ms / 1000);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
-  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
-  return `${s}s`;
-}
-
-function relTime(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  return `${h}h ago`;
-}
-
-function shortEmail(email: string): string {
-  const [user] = email.split('@');
-  return user && user.length > 12 ? user.slice(0, 12) + '…' : user ?? email;
-}
-
-function relDate(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (ms < 60_000) return 'just now';
-  if (ms < 3600_000) return `${Math.floor(ms / 60_000)}m ago`;
-  if (ms < 86_400_000) return `${Math.floor(ms / 3600_000)}h ago`;
-  return `${Math.floor(ms / 86_400_000)}d ago`;
-}
-
 /* ============================================================
    Icons (inline SVG)
    ============================================================ */
