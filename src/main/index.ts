@@ -737,6 +737,33 @@ function registerIpcHandlers(): void {
     },
   );
 
+  // Remote per-Amazon-account settings. These live on BG (today: just
+  // the requireMinCashback toggle) because the worker needs them at buy
+  // time anyway — and they should travel with the user's BG identity
+  // rather than the AmazonG install. Renderer paints the Accounts UI
+  // from this map; flips PATCH back to BG and refresh the cache.
+  ipcMain.handle(IPC.profilesRemoteSettings, async () => {
+    if (!apiKey) return {};
+    const settings = await loadSettings();
+    const bg = createBGClient(settings.bgBaseUrl, apiKey);
+    const rows = await bg.listAmazonAccounts().catch(() => []);
+    const map: Record<string, { requireMinCashback: boolean }> = {};
+    for (const r of rows) {
+      map[r.email.toLowerCase()] = { requireMinCashback: r.requireMinCashback };
+    }
+    return map;
+  });
+
+  ipcMain.handle(
+    IPC.profilesSetRequireMinCashback,
+    async (_e, email: string, requireMinCashback: boolean) => {
+      if (!apiKey) throw new Error('not connected to BG');
+      const settings = await loadSettings();
+      const bg = createBGClient(settings.bgBaseUrl, apiKey);
+      return bg.setAmazonAccountRequireMinCashback(email, requireMinCashback);
+    },
+  );
+
   ipcMain.handle(IPC.jobsList, () => listMergedAttempts());
   ipcMain.handle(IPC.jobsLogs, (_e, attemptId: string) => storeReadLogs(attemptId));
   ipcMain.handle(IPC.jobsSnapshot, async (_e, attemptId: string) => {

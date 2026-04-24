@@ -95,6 +95,16 @@ export type BGClient = {
    * key can't silently flip the cashback gate off for every account.
    */
   listAmazonAccounts(): Promise<AmazonAccountSetting[]>;
+  /**
+   * Update the per-Amazon-account cashback-gate toggle from AmazonG's
+   * Accounts UI. BG keys by email inside the AutoG key's user scope —
+   * the desktop app never needs to know BG's internal account id.
+   * Upserts when the account row doesn't exist yet.
+   */
+  setAmazonAccountRequireMinCashback(
+    email: string,
+    requireMinCashback: boolean,
+  ): Promise<AmazonAccountSetting>;
 };
 
 /**
@@ -227,6 +237,20 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         { method: 'GET' },
       );
       return Array.isArray(r?.accounts) ? r.accounts : [];
+    },
+
+    async setAmazonAccountRequireMinCashback(email, requireMinCashback) {
+      const r = await request<AmazonAccountSetting>(
+        '/api/autog/amazon-accounts',
+        {
+          method: 'POST',
+          body: JSON.stringify({ email, requireMinCashback }),
+        },
+      );
+      if (!r) {
+        throw new BGApiError(500, '/api/autog/amazon-accounts', 'empty response');
+      }
+      return r;
     },
   };
 }

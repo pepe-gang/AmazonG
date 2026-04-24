@@ -48,6 +48,15 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.profilesOpenOrder, email, orderId) as Promise<void>,
   profilesReorder: (orderedEmails) =>
     ipcRenderer.invoke(IPC.profilesReorder, orderedEmails) as Promise<AmazonProfile[]>,
+  profilesRemoteSettings: () =>
+    ipcRenderer.invoke(IPC.profilesRemoteSettings) as Promise<
+      Record<string, { requireMinCashback: boolean }>
+    >,
+  profilesSetRequireMinCashback: (email, requireMinCashback) =>
+    ipcRenderer.invoke(IPC.profilesSetRequireMinCashback, email, requireMinCashback) as Promise<{
+      email: string;
+      requireMinCashback: boolean;
+    }>,
 
   jobsList: () => ipcRenderer.invoke(IPC.jobsList) as Promise<JobAttempt[]>,
   jobsLogs: (attemptId) =>

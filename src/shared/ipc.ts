@@ -31,6 +31,13 @@ export const IPC = {
   profilesOpenOrders: 'profiles:open-orders',
   profilesOpenOrder: 'profiles:open-order',
   profilesReorder: 'profiles:reorder',
+  /** Fetch the per-Amazon-account remote settings map from BG (keyed by
+   *  email → { requireMinCashback }). Renderer calls this when the
+   *  Accounts tab mounts to paint the toggles with the live state. */
+  profilesRemoteSettings: 'profiles:remote-settings',
+  /** Toggle the cashback gate for one Amazon account on BG. Returns the
+   *  updated setting row so the caller can reconcile optimistic state. */
+  profilesSetRequireMinCashback: 'profiles:set-require-min-cashback',
 
   jobsList: 'jobs:list',
   jobsLogs: 'jobs:logs',
@@ -134,6 +141,8 @@ export type AutoGBridge = {
   profilesOpenOrders(email: string): Promise<void>;
   profilesOpenOrder(email: string, orderId: string): Promise<void>;
   profilesReorder(orderedEmails: string[]): Promise<AmazonProfile[]>;
+  profilesRemoteSettings(): Promise<Record<string, { requireMinCashback: boolean }>>;
+  profilesSetRequireMinCashback(email: string, requireMinCashback: boolean): Promise<{ email: string; requireMinCashback: boolean }>;
   jobsList(): Promise<JobAttempt[]>;
   jobsLogs(attemptId: string): Promise<LogEvent[]>;
   jobsClearAll(): Promise<void>;

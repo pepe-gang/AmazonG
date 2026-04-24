@@ -2364,6 +2364,43 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   const [refreshingEmail, setRefreshingEmail] = useState<string | null>(null);
   const [draggingEmail, setDraggingEmail] = useState<string | null>(null);
   const [dropTargetEmail, setDropTargetEmail] = useState<string | null>(null);
+  // Remote per-account settings live on BG (worker reads them to gate
+  // buys). We only carry them in renderer state for the toggle UX —
+  // source of truth stays server-side. Email keys are lowercased.
+  const [remoteSettings, setRemoteSettings] = useState<
+    Record<string, { requireMinCashback: boolean }>
+  >({});
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const map = await window.autog.profilesRemoteSettings();
+        if (!cancelled) setRemoteSettings(map ?? {});
+      } catch {
+        // Quiet failure — if BG is offline the toggle falls back to
+        // "require" (default true) visually. Buy flow already fails
+        // closed on fetch errors.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleRequireMinCashback = async (email: string) => {
+    const key = email.toLowerCase();
+    const current = remoteSettings[key]?.requireMinCashback ?? true;
+    const next = !current;
+    // Optimistic update — flip immediately, roll back on PATCH failure.
+    setRemoteSettings((prev) => ({ ...prev, [key]: { requireMinCashback: next } }));
+    try {
+      await window.autog.profilesSetRequireMinCashback(email, next);
+    } catch (err) {
+      setRemoteSettings((prev) => ({ ...prev, [key]: { requireMinCashback: current } }));
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -2745,6 +2782,31 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                       <span className="toggle-slider" />
                       <span className="toggle-label">Fillers</span>
                     </label>
+                    {(() => {
+                      // Cashback gate — server-side setting on BG, reflected
+                      // here for flip. ON (default) = worker enforces the 6%
+                      // floor for this account. OFF = buy regardless of %.
+                      const require =
+                        remoteSettings[p.email.toLowerCase()]?.requireMinCashback ?? true;
+                      return (
+                        <label
+                          className={`toggle ${require ? 'on' : 'off'}`}
+                          title={
+                            require
+                              ? 'Cashback gate ON — buys only when cashback ≥ the worker floor (6% default). Click to allow any %.'
+                              : 'Cashback gate OFF — buys regardless of cashback. Click to re-enable the 6% floor.'
+                          }
+                        >
+                          <input
+                            type="checkbox"
+                            checked={require}
+                            onChange={() => void toggleRequireMinCashback(p.email)}
+                          />
+                          <span className="toggle-slider" />
+                          <span className="toggle-label">Require ≥ 6% CB</span>
+                        </label>
+                      );
+                    })()}
                     {!p.loggedIn && (
                       <button
                         className="primary-action"
