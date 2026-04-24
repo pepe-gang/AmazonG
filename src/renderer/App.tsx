@@ -98,24 +98,39 @@ function OnboardingScreen() {
   };
 
   return (
-    <div className="onboarding">
-      <div className="onboarding-card">
-        <div className="app-badge">
+    // Drag-region padding on top so macOS traffic lights don't overlap
+    // the card. Flex centers the card against the aurora background.
+    <div
+      className="flex flex-1 items-center justify-center px-6 pt-12 pb-6"
+      style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+    >
+      <div
+        className="glass w-full max-w-md p-7 flex flex-col gap-4"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        <div className="flex size-12 items-center justify-center rounded-xl bg-accent-gradient text-white shadow-[0_4px_16px_-4px_oklch(0.65_0.18_180_/_0.4)]">
           <AppIcon />
         </div>
-        <h1>Paste your Secret Key</h1>
-        <p className="lede">
-          Link this device to your BetterBG account to start running jobs on Amazon.
-        </p>
+        <div className="flex flex-col gap-1">
+          <h1 className="text-xl font-medium tracking-tight text-foreground">
+            Paste your Secret Key
+          </h1>
+          <p className="text-sm text-muted-foreground leading-relaxed">
+            Link this device to your BetterBG account to start running jobs on Amazon.
+          </p>
+        </div>
 
         <form
+          className="flex flex-col gap-2"
           onSubmit={(e) => {
             e.preventDefault();
             if (apiKey.trim() && !busy) void connect();
           }}
         >
-          <label htmlFor="key">Secret Key</label>
-          <input
+          <label htmlFor="key" className="text-xs font-medium text-foreground/80">
+            Secret Key
+          </label>
+          <Input
             id="key"
             type="password"
             placeholder="••••••••••••••••"
@@ -124,25 +139,32 @@ function OnboardingScreen() {
             disabled={busy}
             autoFocus
           />
-          <button className="primary-btn" type="submit" disabled={busy || !apiKey.trim()}>
+          <Button type="submit" disabled={busy || !apiKey.trim()} className="mt-2 w-full">
             {busy ? 'Connecting…' : 'Continue'}
-          </button>
+          </Button>
         </form>
 
-        {error && <div className="error-banner">{error}</div>}
-
-        <div className="guide-link">
-          <div>
-            <div className="guide-title">Don't have a key yet?</div>
-            <div className="guide-sub">Generate one in the BetterBG dashboard.</div>
+        {error && (
+          <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            {error}
           </div>
-          <button
+        )}
+
+        <div className="flex items-center justify-between gap-3 rounded-lg glass-inner p-3 text-sm">
+          <div className="flex flex-col min-w-0">
+            <span className="font-medium text-foreground/90">Don't have a key yet?</span>
+            <span className="text-xs text-muted-foreground mt-0.5">
+              Generate one in the BetterBG dashboard.
+            </span>
+          </div>
+          <Button
             type="button"
-            className="link-btn"
+            variant="ghost"
+            size="sm"
             onClick={() => void window.autog.openExternal(SETUP_GUIDE_URL)}
           >
             Open Setup Guide →
-          </button>
+          </Button>
         </div>
       </div>
     </div>
