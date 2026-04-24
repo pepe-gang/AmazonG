@@ -861,9 +861,11 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(IPC.jobsDelete, async (_e, attemptId: string) => {
+    // Same pattern as jobsDeleteBulk — capture the local row before
+    // deleting so we can translate to the server's AutoBuyPurchase.id
+    // when calling BG's delete endpoint.
+    const localRow = (await storeListAttempts()).find((a) => a.attemptId === attemptId);
     await storeDeleteAttempt(attemptId);
-    // Mirror the bulk path — mark hidden so a server-backed row
-    // (from BG's listPurchases) doesn't rematerialize on next merge.
     const s = await loadSettings();
     if (!s.hiddenAttemptIds.includes(attemptId)) {
       await saveSettings({
@@ -877,7 +879,18 @@ function registerIpcHandlers(): void {
     if (apiKey) {
       try {
         const bg = createBGClient(s.bgBaseUrl, apiKey);
-        await bg.deletePurchases([attemptId]);
+        let serverId = attemptId; // default: row was server-native
+        if (localRow) {
+          const list = await bg.listPurchases(500);
+          const match = list.find(
+            (p) => p.jobId === localRow.jobId && p.amazonEmail === localRow.amazonEmail,
+          );
+          if (match) serverId = match.attemptId;
+          else serverId = ''; // no match — nothing to delete server-side
+        }
+        if (serverId) {
+          await bg.deletePurchases([serverId]);
+        }
       } catch (err) {
         logger.warn('bg.deletePurchases(single) failed; local hide still in effect', {
           err: err instanceof Error ? err.message : String(err),
@@ -888,8 +901,17 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(IPC.jobsDeleteBulk, async (_e, attemptIds: string[]) => {
+    // Capture the local rows BEFORE deleting so we can translate each
+    // local attemptId → the server's AutoBuyPurchase.id for the BG
+    // delete call. listMergedAttempts prefers local's attemptId when
+    // both sides have a copy, so the ids the renderer hands us are
+    // usually local ids, not server cuids.
+    const localBefore = await storeListAttempts();
+    const localById = new Map(localBefore.map((a) => [a.attemptId, a]));
+
     // Delete any local attempt records (and their logs / snapshots).
     const removed = await storeDeleteAttempts(attemptIds);
+
     // Remember the ids as hidden so server-sourced rows (from BG's
     // listPurchases) don't re-appear on the next merge. Local hide is
     // the fast path — survives offline + makes the UI correct instantly.
@@ -899,13 +921,37 @@ function registerIpcHandlers(): void {
       settings = { ...settings, hiddenAttemptIds: next };
       await saveSettings(settings);
     }
-    // Hard-delete on BG too so the server-side AmazonPurchases view
-    // (BG web UI) stops showing the same rows. Best-effort: if BG is
-    // unreachable, local hide still keeps AmazonG consistent.
+
+    // Hard-delete on BG. Translate local attemptIds → server attemptIds
+    // via the (jobId, amazonEmail) key that listMergedAttempts uses —
+    // without this, BG's DELETE endpoint (which keys on its own cuid)
+    // silently matches zero rows for every merged attempt. Best-effort:
+    // if BG is unreachable, local hide still keeps AmazonG consistent.
     if (apiKey && attemptIds.length > 0) {
       try {
         const bg = createBGClient(settings.bgBaseUrl, apiKey);
-        await bg.deletePurchases(attemptIds);
+        const serverRows = await bg.listPurchases(500);
+        const serverByKey = new Map<string, ServerPurchase>();
+        for (const s of serverRows) {
+          if (!s.amazonEmail) continue;
+          serverByKey.set(`${s.jobId}__${s.amazonEmail}`, s);
+        }
+        const idsForBg: string[] = [];
+        for (const id of attemptIds) {
+          const l = localById.get(id);
+          if (l) {
+            const match = serverByKey.get(`${l.jobId}__${l.amazonEmail}`);
+            if (match) idsForBg.push(match.attemptId);
+            // else: no BG match — nothing to delete server-side.
+          } else {
+            // No local row — the id is server-native (server-only row
+            // the user selected directly). Pass through as-is.
+            idsForBg.push(id);
+          }
+        }
+        if (idsForBg.length > 0) {
+          await bg.deletePurchases(idsForBg);
+        }
       } catch (err) {
         logger.warn('bg.deletePurchases(bulk) failed; local hide still in effect', {
           err: err instanceof Error ? err.message : String(err),
@@ -917,10 +963,16 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(IPC.jobsReconcileStuck, async () => {
-    // Local Pending rows stay Pending forever if the worker crashed
-    // mid-buy — abortPendingAttempts only sweeps `in_progress`, and
-    // `awaiting_verification` / `queued` survive restarts. Reconcile
-    // against BG's authoritative purchase list + flip the orphans.
+    // Two kinds of stuck Pending rows this cleans up:
+    //   1. Orphan: local row exists with no matching BG purchase. Worker
+    //      crashed before /status POST landed, or app closed mid-buy.
+    //   2. Stale-no-orderId: BG has a matching purchase AND local agrees,
+    //      but the buy never placed an Amazon order (orderId still null)
+    //      AND the row is older than 30 minutes — that's well past any
+    //      legitimate buy window, so it's not coming back. In this case
+    //      we also delete the BG-side purchase (using its real cuid, not
+    //      the local attemptId) so listMergedAttempts doesn't re-overlay
+    //      the Pending status on the next broadcast.
     if (!apiKey) return { kind: 'offline' as const };
 
     const settings = await loadSettings();
@@ -935,12 +987,15 @@ function registerIpcHandlers(): void {
       return { kind: 'offline' as const };
     }
 
-    // Same key BG↔local pairing uses in listMergedAttempts — jobId +
-    // amazonEmail, because AutoBuyPurchase.id ≠ local attemptId.
-    const serverKeys = new Set<string>();
+    // Index server rows by (jobId, amazonEmail) — the same key pairing
+    // listMergedAttempts uses, because local attemptId ≠ server
+    // AutoBuyPurchase.id. We keep the full ServerPurchase so we can
+    // forward its real server attemptId to bg.deletePurchases when we
+    // need to clean up BG-side too.
+    const serverByKey = new Map<string, ServerPurchase>();
     for (const s of serverRows) {
       if (!s.amazonEmail) continue;
-      serverKeys.add(`${s.jobId}__${s.amazonEmail}`);
+      serverByKey.set(`${s.jobId}__${s.amazonEmail}`, s);
     }
 
     const PENDING = new Set<JobAttemptStatus>([
@@ -948,19 +1003,52 @@ function registerIpcHandlers(): void {
       'in_progress',
       'awaiting_verification',
     ]);
+    const STALE_MS = 30 * 60 * 1000;
+    const now = Date.now();
+
     const local = await storeListAttempts();
+    const bgIdsToDelete: string[] = [];
     let marked = 0;
+
     for (const a of local) {
       if (!PENDING.has(a.status)) continue;
       const k = `${a.jobId}__${a.amazonEmail}`;
-      if (serverKeys.has(k)) continue;
-      await storeUpdateAttempt(a.attemptId, {
-        status: 'failed',
-        error:
-          'Orphan pending — no matching BG purchase. Worker likely crashed or the app was closed before the outcome was reported.',
-      });
-      marked += 1;
+      const serverMatch = serverByKey.get(k);
+      const ageMs = now - new Date(a.createdAt).getTime();
+      const isStale = ageMs > STALE_MS;
+      const hasOrderId = !!a.orderId;
+
+      let reason: string | null = null;
+      if (!serverMatch) {
+        reason =
+          'Orphan pending — no matching BG purchase. Worker likely crashed or the app was closed before the outcome was reported.';
+      } else if (isStale && !hasOrderId) {
+        reason =
+          'Stale pending — no Amazon order placed after 30 minutes. Treating as failed so the table reflects reality.';
+        // Only ask BG to delete when both sides are stuck: no orderId
+        // means the purchase never finished, and without cleanup the
+        // merge path would overlay BG's status back on next broadcast.
+        bgIdsToDelete.push(serverMatch.attemptId);
+      }
+      if (reason) {
+        await storeUpdateAttempt(a.attemptId, { status: 'failed', error: reason });
+        marked += 1;
+      }
     }
+
+    if (bgIdsToDelete.length > 0) {
+      try {
+        const bg = createBGClient(settings.bgBaseUrl, apiKey);
+        await bg.deletePurchases(bgIdsToDelete);
+      } catch (err) {
+        logger.warn('jobsReconcileStuck: bg.deletePurchases failed', {
+          err: err instanceof Error ? err.message : String(err),
+        });
+        // Local flip-to-failed still landed; BG may rematerialize on the
+        // next merge but at least the user's table is correct for now.
+      }
+    }
+
     if (marked > 0) scheduleBroadcastJobs();
     return { kind: 'ok' as const, marked };
   });
