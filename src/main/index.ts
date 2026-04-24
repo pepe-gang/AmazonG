@@ -916,6 +916,55 @@ function registerIpcHandlers(): void {
     return Math.max(removed, attemptIds.length);
   });
 
+  ipcMain.handle(IPC.jobsReconcileStuck, async () => {
+    // Local Pending rows stay Pending forever if the worker crashed
+    // mid-buy — abortPendingAttempts only sweeps `in_progress`, and
+    // `awaiting_verification` / `queued` survive restarts. Reconcile
+    // against BG's authoritative purchase list + flip the orphans.
+    if (!apiKey) return { kind: 'offline' as const };
+
+    const settings = await loadSettings();
+    let serverRows: ServerPurchase[];
+    try {
+      const bg = createBGClient(settings.bgBaseUrl, apiKey);
+      serverRows = await bg.listPurchases(500);
+    } catch (err) {
+      logger.warn('jobsReconcileStuck: bg.listPurchases failed', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return { kind: 'offline' as const };
+    }
+
+    // Same key BG↔local pairing uses in listMergedAttempts — jobId +
+    // amazonEmail, because AutoBuyPurchase.id ≠ local attemptId.
+    const serverKeys = new Set<string>();
+    for (const s of serverRows) {
+      if (!s.amazonEmail) continue;
+      serverKeys.add(`${s.jobId}__${s.amazonEmail}`);
+    }
+
+    const PENDING = new Set<JobAttemptStatus>([
+      'queued',
+      'in_progress',
+      'awaiting_verification',
+    ]);
+    const local = await storeListAttempts();
+    let marked = 0;
+    for (const a of local) {
+      if (!PENDING.has(a.status)) continue;
+      const k = `${a.jobId}__${a.amazonEmail}`;
+      if (serverKeys.has(k)) continue;
+      await storeUpdateAttempt(a.attemptId, {
+        status: 'failed',
+        error:
+          'Orphan pending — no matching BG purchase. Worker likely crashed or the app was closed before the outcome was reported.',
+      });
+      marked += 1;
+    }
+    if (marked > 0) scheduleBroadcastJobs();
+    return { kind: 'ok' as const, marked };
+  });
+
   ipcMain.handle(
     IPC.jobsVerifyOrder,
     async (_e, attemptId: string) => {

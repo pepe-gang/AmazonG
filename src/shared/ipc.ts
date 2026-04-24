@@ -53,6 +53,7 @@ export const IPC = {
   jobsClearCanceled: 'jobs:clear-canceled',
   jobsDelete: 'jobs:delete',
   jobsDeleteBulk: 'jobs:delete-bulk',
+  jobsReconcileStuck: 'jobs:reconcile-stuck',
   jobsVerifyOrder: 'jobs:verify-order',
   jobsFetchTracking: 'jobs:fetch-tracking',
   jobsRebuy: 'jobs:rebuy',
@@ -207,6 +208,13 @@ export type AutoGBridge = {
   jobsDelete(attemptId: string): Promise<void>;
   /** Delete many attempts in one pass. Returns the count actually removed. */
   jobsDeleteBulk(attemptIds: string[]): Promise<number>;
+  /** Reconcile local Pending rows against BG's authoritative purchase
+   *  list. Any local in_progress / awaiting_verification / queued row
+   *  with no matching BG purchase (common after the app was closed
+   *  mid-buy) gets flipped to `failed`. Returns the count flipped, plus
+   *  `kind:'offline'` if BG couldn't be reached so the renderer can
+   *  toast a clear message. */
+  jobsReconcileStuck(): Promise<{ kind: 'ok'; marked: number } | { kind: 'offline' }>;
   jobsVerifyOrder(attemptId: string): Promise<
     | { kind: 'active' | 'cancelled' | 'timeout'; orderId: string }
     | { kind: 'error' | 'busy'; message: string }

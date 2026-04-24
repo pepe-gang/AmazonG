@@ -53,6 +53,7 @@ export function JobsTable({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState<null | 'verify' | 'delete' | 'tracking'>(null);
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
+  const [syncing, setSyncing] = useState(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
 
   // Drag-to-reorder + hide/show columns. Both persist in settings so
@@ -412,6 +413,37 @@ export function JobsTable({
     });
   };
 
+  const runSync = async () => {
+    // Reconcile orphan local Pending rows (worker crashed / app closed
+    // mid-buy) against BG's authoritative purchase list. BG's copy is
+    // treated as ground truth — any local pending with no match there
+    // is flipped to failed so the table stops lying about what's
+    // actually running.
+    setSyncing(true);
+    try {
+      const r = await window.autog.jobsReconcileStuck();
+      if (r.kind === 'offline') {
+        toast.error('Sync failed', {
+          description: 'Could not reach BetterBG. Check your connection and try again.',
+        });
+      } else if (r.marked === 0) {
+        toast.success('Already in sync', {
+          description: 'No stuck Pending rows — every local attempt matches a BG record.',
+        });
+      } else {
+        toast.success(`Marked ${r.marked} stuck row${r.marked === 1 ? '' : 's'} as Failed`, {
+          description: 'Orphan Pending attempts with no BG match were resolved.',
+        });
+      }
+    } catch (err) {
+      toast.error('Sync failed', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   return (
     // Outer is a plain flex column — the parent DashboardView section
     // already wraps this in `.glass` so we don't need another card
@@ -419,9 +451,20 @@ export function JobsTable({
     <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
       <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-white/[0.04]">
         <h2 className="text-base font-medium tracking-tight">Amazon Purchases</h2>
-        <span className="text-xs text-muted-foreground tabular-nums">
-          {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
-        </span>
+        <div className="flex items-center gap-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void runSync()}
+            disabled={syncing}
+            title="Reconcile orphan local Pending rows against BetterBG. Any local Pending row with no matching BG purchase gets flipped to Failed."
+          >
+            {syncing ? 'Syncing…' : 'Sync with BG'}
+          </Button>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {visible.length} of {attempts.length} row{attempts.length === 1 ? '' : 's'}
+          </span>
+        </div>
       </div>
 
       {attempts.length > 0 && (
