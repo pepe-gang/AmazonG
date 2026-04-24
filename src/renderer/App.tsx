@@ -3286,7 +3286,35 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
               zIndex: 1000,
             }}
           >
-            <div className="error-breakdown-head">Failures by reason</div>
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Failures by reason
+              </span>
+              {/* Resets the failure counter + the rest of this breakdown by
+                  deleting every failed jobs row. Permanent — the rows +
+                  their logs are removed locally. */}
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-red-300 hover:text-red-200 hover:bg-red-500/10"
+                onClick={async () => {
+                  if (!confirm(`Delete ${total} failed row${total === 1 ? '' : 's'} and reset this counter? Their logs will also be removed.`)) {
+                    return;
+                  }
+                  try {
+                    const n = await window.autog.jobsClearFailed();
+                    setOpen(false);
+                    toast.success(`Cleared ${n} failed row${n === 1 ? '' : 's'}`);
+                  } catch (err) {
+                    toast.error('Clear failed', {
+                      description: err instanceof Error ? err.message : String(err),
+                    });
+                  }
+                }}
+              >
+                Clear
+              </Button>
+            </div>
             <ul className="error-breakdown-list">
               {breakdown.map(([msg, n]) => (
                 <li key={msg}>
