@@ -777,7 +777,11 @@ const STATUS_GROUP_LABEL: Record<StatusGroup, string> = {
 const STATUS_GROUP_BADGE_CLASS: Record<StatusGroup, string> = {
   pending: 'badge-amber',
   success: 'badge-green',
-  cancelled: 'badge-red',
+  // Cancelled is a distinct "terminated-but-not-our-fault" state
+  // (Amazon killed the order post-placement); Failed is "we never
+  // got that far". Different badge tones so users stop reading them
+  // as the same thing at a glance.
+  cancelled: 'badge-orange',
   failed: 'badge-red',
 };
 
@@ -1926,7 +1930,17 @@ function JobsCell({
       return (
         <td className="cell-status">
           <StatusBadge status={a.status} />
-          {a.error && <div className="cell-error" title={a.error}>{a.error}</div>}
+          {a.error && (
+            <div
+              className={
+                'cell-error ' +
+                (a.status === 'cancelled_by_amazon' ? 'cell-error-cancelled' : '')
+              }
+              title={a.error}
+            >
+              {a.error}
+            </div>
+          )}
         </td>
       );
   }

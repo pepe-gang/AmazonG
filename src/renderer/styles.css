@@ -1411,6 +1411,12 @@ a,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Row was cancelled by Amazon — show the reason in the cancelled
+ * badge's orange hue instead of red so the visual weight matches
+ * the status pill above it. */
+.cell-error-cancelled {
+  color: hsl(25 95% 78%);
+}
 .cell-actions {
   white-space: nowrap;
   text-align: right;
@@ -1597,6 +1603,16 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
 .badge-green { background: var(--success-bg); color: hsl(150 60% 80%); }
 .badge-red { background: var(--danger-bg); color: hsl(0 80% 85%); }
 .badge-amber { background: var(--warn-bg); color: hsl(40 90% 80%); }
+/* Orange sits visually between amber (pending) and red (failed) —
+ * clearly a terminal state but distinct from both. Used for
+ * cancelled-by-amazon rows so users stop confusing them with hard
+ * failures. Border tints match the background hue so the pill reads
+ * as one coherent chip. */
+.badge-orange {
+  background: hsl(25 90% 60% / 0.18);
+  color: hsl(25 95% 78%);
+  border: 1px solid hsl(25 90% 60% / 0.28);
+}
 
 /* Logs view (full-page) */
 .logs-view {
