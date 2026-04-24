@@ -1,5 +1,5 @@
 import * as React from "react";
-import { LayoutDashboard, Users, Settings2, Zap } from "lucide-react";
+import { LayoutDashboard, Users, Tag, Settings2, Zap } from "lucide-react";
 
 import { NavMain } from "@/components/nav-main";
 import {
@@ -19,6 +19,7 @@ import {
  */
 const navItems = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
+  { title: "Deals",     url: "/deals",     icon: Tag },
   { title: "Accounts",  url: "/accounts",  icon: Users },
 ];
 // Intentionally no `Settings` item yet — AccountsView still bundles the

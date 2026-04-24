@@ -31,6 +31,10 @@ export const IPC = {
   profilesOpenOrders: 'profiles:open-orders',
   profilesOpenOrder: 'profiles:open-order',
   profilesReorder: 'profiles:reorder',
+  /** Fetch the current live Amazon deals catalog from BetterBG's
+   *  public endpoint (x-api-key: pepe-gang). The renderer re-fetches
+   *  on user click; no polling. */
+  dealsList: 'deals:list',
   /** Fetch the per-Amazon-account remote settings map from BG (keyed by
    *  email → { requireMinCashback }). Renderer calls this when the
    *  Accounts tab mounts to paint the toggles with the live state. */
@@ -127,6 +131,27 @@ export type Settings = {
   failedHiddenBeforeTs: string | null;
 };
 
+/**
+ * One row from BetterBG's GET /api/public/deals/amazon endpoint —
+ * the shape the public catalog serves. Prices come back as string
+ * Decimals from the server; we keep them as strings in the wire type
+ * and parse to numbers at render time where the deals UI needs math.
+ */
+export type AmazonDeal = {
+  dealId: string;
+  dealKey: string;
+  dealTitle: string;
+  price: string;           // Decimal as string, e.g. "386.00"
+  oldPrice: string | null; // null when retail not known
+  expiryDay: string | null; // "MM-DD-YYYY" when present
+  upc: string | null;
+  shipToStates: string[];
+  imageUrl: string | null;
+  dealCreatedAt: string;   // ISO
+  discoveredAt: string;    // ISO
+  amazonLink: string;
+};
+
 export type AutoGBridge = {
   identityGet(): Promise<IdentityInfo | null>;
   identityConnect(apiKey: string): Promise<IdentityInfo>;
@@ -151,6 +176,7 @@ export type AutoGBridge = {
   profilesOpenOrders(email: string): Promise<void>;
   profilesOpenOrder(email: string, orderId: string): Promise<void>;
   profilesReorder(orderedEmails: string[]): Promise<AmazonProfile[]>;
+  dealsList(): Promise<AmazonDeal[]>;
   profilesRemoteSettings(): Promise<Record<string, { requireMinCashback: boolean }>>;
   profilesSetRequireMinCashback(email: string, requireMinCashback: boolean): Promise<{ email: string; requireMinCashback: boolean }>;
   jobsList(): Promise<JobAttempt[]>;

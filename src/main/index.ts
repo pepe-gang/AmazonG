@@ -737,6 +737,27 @@ function registerIpcHandlers(): void {
     },
   );
 
+  /**
+   * Deals catalog — public BetterBG endpoint scoped to Amazon. Doesn't
+   * use the user's AutoG key: the endpoint is gated by a shared
+   * `x-api-key: pepe-gang` that's safe to ship with the app (it's
+   * spelled out in BG's own public docs, and the endpoint is read-only).
+   * Running through main keeps the renderer free of hardcoded keys.
+   */
+  ipcMain.handle(IPC.dealsList, async () => {
+    const settings = await loadSettings();
+    const url = new URL('/api/public/deals/amazon', settings.bgBaseUrl).toString();
+    const r = await fetch(url, { headers: { 'x-api-key': 'pepe-gang' } });
+    if (!r.ok) {
+      throw new Error(`Deals fetch failed: HTTP ${r.status} ${r.statusText}`);
+    }
+    const data = (await r.json()) as unknown;
+    if (!Array.isArray(data)) {
+      throw new Error('Deals fetch failed: expected an array');
+    }
+    return data;
+  });
+
   // Remote per-Amazon-account settings. These live on BG (today: just
   // the requireMinCashback toggle) because the worker needs them at buy
   // time anyway — and they should travel with the user's BG identity

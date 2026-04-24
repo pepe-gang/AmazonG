@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/sheet';
 import { Toaster } from '@/components/ui/sonner';
 import { AppSidebar } from '@/components/app-sidebar';
+import { Deals } from '@/pages/Deals';
 import type {
   AmazonProfile,
   JobAttempt,
@@ -471,6 +472,7 @@ function MainShell({ status }: { status: RendererStatus }) {
                   />
                 }
               />
+              <Route path="/deals" element={<Deals />} />
             </Routes>
           </div>
         </SidebarInset>
