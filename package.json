@@ -1,7 +1,7 @@
 {
   "name": "amazong",
   "productName": "AmazonG",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "description": "Amazon automated checkout worker for BetterBG (rebuild on Playwright)",
   "private": true,
   "main": "out/main/index.js",
