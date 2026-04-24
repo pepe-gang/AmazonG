@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
   SidebarInset,
@@ -9,6 +9,13 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
 import { Toaster } from '@/components/ui/sonner';
 import { AppSidebar } from '@/components/app-sidebar';
 import type {
@@ -217,10 +224,11 @@ function MainScreen({ status }: { status: RendererStatus }) {
  * flex-row with `AppSidebar` + `SidebarInset`, and the routes inside.
  */
 function MainShell({ status }: { status: RendererStatus }) {
-  const [view, setView] = useState<View>('dashboard');
-  // NOTE: the route replaces this for nav purposes, but `view` is
-  // still used for the Logs drawer state until the modal extraction
-  // lands in a later phase.
+  // Routing handles Dashboard/Accounts; the Logs drawer is a separate
+  // right-side Sheet that opens on top of whichever route is active.
+  // Clicking "View Log" on a jobs row sets `logsAttempt`; the Sheet
+  // mounts LogsView and slides in without unmounting the dashboard.
+  const [logsAttempt, setLogsAttempt] = useState<JobAttempt | null>(null);
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [profiles, setProfiles] = useState<AmazonProfile[]>([]);
   const [attempts, setAttempts] = useState<JobAttempt[]>([]);
@@ -229,7 +237,6 @@ function MainShell({ status }: { status: RendererStatus }) {
   const [appVersion, setAppVersion] = useState<string>('');
   const [updateInfo, setUpdateInfo] = useState<{ latest: string } | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
-  const navigate = useNavigate();
   useEffect(() => {
     void window.autog.appVersion().then(setAppVersion);
     // Check for updates on mount + every 6 hours
@@ -316,12 +323,6 @@ function MainShell({ status }: { status: RendererStatus }) {
   const accountsCount = profiles.length;
   const accountsReady = profiles.filter((p) => p.enabled && p.loggedIn).length;
 
-  // Logs view still lives inside `view` state — when the user clicks
-  // "View Log" on a jobs row, we flip to { kind: 'logs', attempt } and
-  // render LogsView as a full-screen overlay. A later phase turns this
-  // into a shadcn Dialog.
-  const isLogs = typeof view === 'object' && view.kind === 'logs';
-
   return (
     <SidebarProvider defaultOpen={false} className="!min-h-0 h-screen flex-col">
       <header
@@ -343,14 +344,22 @@ function MainShell({ status }: { status: RendererStatus }) {
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border border-white/10 bg-white/[0.04]">
-            <span
-              className={
-                'relative inline-flex size-2 rounded-full ' +
-                (status.running
-                  ? 'bg-emerald-400 shadow-[0_0_6px_0_oklch(0.75_0.18_150_/_0.9)]'
-                  : 'bg-white/20')
-              }
-            />
+            <span className="relative inline-flex items-center justify-center size-3">
+              {/* Running = expanding ring behind a solid dot. Idle = flat
+                  inert dot. Reduced motion users see the solid dot only
+                  (animate-ping is suppressed by prefers-reduced-motion). */}
+              {status.running && (
+                <span className="absolute inset-0 rounded-full bg-emerald-400/70 animate-ping" />
+              )}
+              <span
+                className={
+                  'relative size-2 rounded-full ' +
+                  (status.running
+                    ? 'bg-emerald-400 shadow-[0_0_6px_0_oklch(0.75_0.18_150_/_0.9)]'
+                    : 'bg-white/20')
+                }
+              />
+            </span>
             <span className="tabular-nums text-foreground/90">
               {status.running ? uptimeLabel : 'Idle'}
             </span>
@@ -411,48 +420,53 @@ function MainShell({ status }: { status: RendererStatus }) {
                 {status.lastError}
               </div>
             )}
-            {isLogs && typeof view === 'object' && view.kind === 'logs' ? (
-              <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-                <div className="flex items-center gap-2 px-4 py-3">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setView('dashboard');
-                      navigate('/dashboard');
-                    }}
-                  >
-                    <BackIcon /> Back
-                  </Button>
-                </div>
-                <div className="flex-1 min-h-0 overflow-auto">
-                  <LogsView attempt={view.attempt} />
-                </div>
-              </div>
-            ) : (
-              <Routes>
-                <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                <Route
-                  path="/dashboard"
-                  element={
-                    <DashboardView
-                      status={status}
-                      uptimeLabel={uptimeLabel}
-                      attempts={attempts}
-                      profiles={profiles}
-                      onViewLogs={(attempt) => setView({ kind: 'logs', attempt })}
-                    />
-                  }
-                />
-                <Route
-                  path="/accounts"
-                  element={<AccountsView profiles={profiles} workerRunning={status.running} />}
-                />
-              </Routes>
-            )}
+            <Routes>
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route
+                path="/dashboard"
+                element={
+                  <DashboardView
+                    status={status}
+                    uptimeLabel={uptimeLabel}
+                    attempts={attempts}
+                    profiles={profiles}
+                    onViewLogs={setLogsAttempt}
+                  />
+                }
+              />
+              <Route
+                path="/accounts"
+                element={<AccountsView profiles={profiles} workerRunning={status.running} />}
+              />
+            </Routes>
           </div>
         </SidebarInset>
       </div>
+
+      {/* Logs as a right-side Sheet — the dashboard stays mounted
+          underneath so closing the drawer returns users to the exact
+          scroll position they left. onOpenChange handles both the
+          built-in X close and swipe/escape dismissal. */}
+      <Sheet
+        open={logsAttempt !== null}
+        onOpenChange={(next) => {
+          if (!next) setLogsAttempt(null);
+        }}
+      >
+        <SheetContent
+          side="right"
+          className="w-full sm:max-w-3xl p-0 gap-0 flex flex-col"
+        >
+          <SheetHeader className="sr-only">
+            <SheetTitle>
+              Attempt logs — {logsAttempt?.dealTitle ?? logsAttempt?.amazonEmail ?? ''}
+            </SheetTitle>
+          </SheetHeader>
+          <div className="flex-1 min-h-0 overflow-auto">
+            {logsAttempt && <LogsView attempt={logsAttempt} />}
+          </div>
+        </SheetContent>
+      </Sheet>
     </SidebarProvider>
   );
 }
@@ -1953,17 +1967,17 @@ function LiveModePanel() {
           </div>
         </div>
         <label
-          className={`toggle ${live ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={live ? 'Real orders will be placed' : 'Dry-run — no orders placed'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={live}
-            onChange={(e) => void update({ buyDryRun: !e.target.checked })}
+            onCheckedChange={(v) => void update({ buyDryRun: !v })}
             disabled={busy}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{live ? 'On' : 'Off'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {live ? 'On' : 'Off'}
+          </span>
         </label>
       </div>
     </div>
@@ -2208,17 +2222,17 @@ function AutoStartWorkerPanel() {
           </div>
         </div>
         <label
-          className={`toggle ${on ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={on ? 'Worker starts on launch' : 'Worker waits for you to click Start'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={on}
-            onChange={(e) => void update({ autoStartWorker: e.target.checked })}
+            onCheckedChange={(v) => void update({ autoStartWorker: v })}
             disabled={busy}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{on ? 'On' : 'Off'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {on ? 'On' : 'Off'}
+          </span>
         </label>
       </div>
     </div>
@@ -2249,17 +2263,17 @@ function BuyWithFillersPanel() {
           </div>
         </div>
         <label
-          className={`toggle ${on ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={on ? 'Filler mode enabled — all accounts' : 'Filler mode disabled'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={on}
-            onChange={(e) => void update({ buyWithFillers: e.target.checked })}
+            onCheckedChange={(v) => void update({ buyWithFillers: v })}
             disabled={busy}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{on ? 'On' : 'Off'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {on ? 'On' : 'Off'}
+          </span>
         </label>
       </div>
     </div>
@@ -2322,17 +2336,17 @@ function SnapshotSettingsPanel() {
           </div>
         </div>
         <label
-          className={`toggle ${on ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={on ? 'Snapshots enabled' : 'Snapshots disabled'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={on}
-            onChange={(e) => void update({ snapshotOnFailure: e.target.checked })}
+            onCheckedChange={(v) => void update({ snapshotOnFailure: v })}
             disabled={busy}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{on ? 'On' : 'Off'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {on ? 'On' : 'Off'}
+          </span>
         </label>
       </div>
       {on && (
@@ -2431,17 +2445,17 @@ function HeadlessTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
           </div>
         </div>
         <label
-          className={`toggle ${on ? 'on' : 'off'}`}
+          className="flex items-center gap-2 cursor-pointer"
           title={on ? 'Headless: all accounts run hidden' : 'At least one account is set to Visible'}
         >
-          <input
-            type="checkbox"
+          <Switch
             checked={on}
-            onChange={() => void toggle()}
+            onCheckedChange={() => void toggle()}
             disabled={busy || applying}
           />
-          <span className="toggle-slider" />
-          <span className="toggle-label">{on ? 'Headless' : 'Visible'}</span>
+          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
+            {on ? 'Headless' : 'Visible'}
+          </span>
         </label>
       </div>
     </div>
@@ -2835,9 +2849,7 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                   </div>
                   {!isRenaming && (
                     <label
-                      className={`toggle ${p.loggedIn && p.enabled ? 'on' : 'off'} ${
-                        !p.loggedIn ? 'toggle-locked' : ''
-                      }`}
+                      className="flex items-center gap-2 cursor-pointer"
                       title={
                         !p.loggedIn
                           ? 'Sign in first to enable this account'
@@ -2846,14 +2858,12 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                             : 'Disabled — worker skips this account'
                       }
                     >
-                      <input
-                        type="checkbox"
+                      <Switch
                         checked={p.loggedIn && p.enabled}
                         disabled={!p.loggedIn}
-                        onChange={(e) => void toggleEnabled(p.email, e.target.checked)}
+                        onCheckedChange={(v) => void toggleEnabled(p.email, v)}
                       />
-                      <span className="toggle-slider" />
-                      <span className="toggle-label">
+                      <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
                         {p.enabled ? 'Enabled' : 'Disabled'}
                       </span>
                     </label>
@@ -2916,43 +2926,36 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                 {!isRenaming && (
                   <div className="account-actions">
                     <label
-                      className={`toggle ${p.headless !== false ? 'on' : 'off'}`}
+                      className="flex items-center gap-2 cursor-pointer"
                       title={
                         p.headless !== false
                           ? 'Headless ON — worker runs this account without showing a browser window'
                           : 'Headless OFF — worker shows the Chromium window for this account (useful for debugging)'
                       }
                     >
-                      <input
-                        type="checkbox"
+                      <Switch
                         checked={p.headless !== false}
-                        onChange={(e) =>
-                          void window.autog.profilesSetHeadless(p.email, e.target.checked)
+                        onCheckedChange={(v) =>
+                          void window.autog.profilesSetHeadless(p.email, v)
                         }
                       />
-                      <span className="toggle-slider" />
-                      <span className="toggle-label">Headless</span>
+                      <span className="text-xs font-medium text-foreground/80">Headless</span>
                     </label>
                     <label
-                      className={`toggle ${p.buyWithFillers ? 'on' : 'off'}`}
+                      className="flex items-center gap-2 cursor-pointer"
                       title={
                         p.buyWithFillers
                           ? 'Buy-with-Fillers ON for this account — places target alongside ~10 filler items, cancels fillers after verify'
                           : 'Buy-with-Fillers OFF — this account follows the global setting (or plain Buy Now if global is off too)'
                       }
                     >
-                      <input
-                        type="checkbox"
+                      <Switch
                         checked={p.buyWithFillers}
-                        onChange={(e) =>
-                          void window.autog.profilesSetBuyWithFillers(
-                            p.email,
-                            e.target.checked,
-                          )
+                        onCheckedChange={(v) =>
+                          void window.autog.profilesSetBuyWithFillers(p.email, v)
                         }
                       />
-                      <span className="toggle-slider" />
-                      <span className="toggle-label">Fillers</span>
+                      <span className="text-xs font-medium text-foreground/80">Fillers</span>
                     </label>
                     {(() => {
                       // Cashback gate — server-side setting on BG, reflected
@@ -2962,20 +2965,20 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                         remoteSettings[p.email.toLowerCase()]?.requireMinCashback ?? true;
                       return (
                         <label
-                          className={`toggle ${require ? 'on' : 'off'}`}
+                          className="flex items-center gap-2 cursor-pointer"
                           title={
                             require
                               ? 'Cashback gate ON — buys only when cashback ≥ the worker floor (6% default). Click to allow any %.'
                               : 'Cashback gate OFF — buys regardless of cashback. Click to re-enable the 6% floor.'
                           }
                         >
-                          <input
-                            type="checkbox"
+                          <Switch
                             checked={require}
-                            onChange={() => void toggleRequireMinCashback(p.email)}
+                            onCheckedChange={() => void toggleRequireMinCashback(p.email)}
                           />
-                          <span className="toggle-slider" />
-                          <span className="toggle-label">Require ≥ 6% CB</span>
+                          <span className="text-xs font-medium text-foreground/80">
+                            Require ≥ 6% CB
+                          </span>
                         </label>
                       );
                     })()}
