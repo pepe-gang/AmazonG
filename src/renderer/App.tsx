@@ -2090,18 +2090,24 @@ function AccountsView({
     setTimeout(() => setLockedToast(false), 4000);
   };
   return (
-    <>
+    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0 overflow-auto">
       {workerRunning && (
-        <div className="lock-banner" role="alert">
-          <span className="lock-banner-icon">🔒</span>
+        <div
+          className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-sm text-amber-100"
+          role="alert"
+        >
+          <span>🔒</span>
           <span>
             Account settings are locked while the worker is running. Click <b>Stop</b> in the
-            dashboard to edit accounts, prefixes, or headless mode.
+            header to edit accounts, prefixes, or headless mode.
           </span>
         </div>
       )}
       <div
-        className={workerRunning ? 'lock-wrapper lock-wrapper-locked' : 'lock-wrapper'}
+        className={
+          'flex flex-col gap-3 ' +
+          (workerRunning ? 'opacity-60 pointer-events-none' : '')
+        }
         aria-disabled={workerRunning}
         onClickCapture={(e) => {
           if (!workerRunning) return;
@@ -2122,11 +2128,11 @@ function AccountsView({
         <AccountsList profiles={profiles} />
       </div>
       {lockedToast && (
-        <div className="lock-toast" role="status">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 glass-strong px-4 py-2 text-sm rounded-full shadow-lg z-50" role="status">
           Stop the worker first — settings can't be changed while jobs are polling.
         </div>
       )}
-    </>
+    </div>
   );
 }
 
