@@ -295,36 +295,41 @@ export function Deals() {
           const running = bulkProgress !== null;
           return (
             <div
-              // Strong tint + inset top highlight makes the bar stand out
-              // from the table header it's pinned above. Not so loud that
-              // it competes with the glass surface — just enough to cue
-              // "something here is actionable".
-              className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-b border-white/10 bg-accent/60 shadow-[inset_0_1px_0_0_rgb(255_255_255_/_0.04)]"
+              // Subtle accent wash so the bar is noticeable without
+              // shouting. The CTA itself carries the clickable cue
+              // (border + pointer + hover) — no need to over-tint the
+              // surrounding strip.
+              className="flex flex-wrap items-center gap-3 px-4 py-2 border-b border-white/[0.06] bg-white/[0.03]"
               role="toolbar"
             >
-              <span className="text-xs font-medium text-foreground/90 mr-1 tabular-nums">
+              <span className="text-xs mr-1 tabular-nums">
                 {running ? (
-                  <>Queuing {bulkProgress.done}/{bulkProgress.total}…</>
+                  <span className="text-foreground/80">
+                    Queuing {bulkProgress.done}/{bulkProgress.total}…
+                  </span>
                 ) : (
                   <>
-                    <span className="text-foreground">{selectedInView.length}</span>{' '}
+                    <span className="text-foreground font-medium">
+                      {selectedInView.length}
+                    </span>{' '}
                     <span className="text-muted-foreground">selected</span>
                   </>
                 )}
               </span>
               <Button
-                // `default` variant uses the teal accent-gradient with a
-                // glow shadow — the most emphatic affordance in the
-                // shadcn button palette. Pair with a bigger size + bold
-                // weight so it reads from across the screen.
-                variant="default"
-                size="default"
+                // Outline variant with a primary-tinted border + text —
+                // clearly a button (visible border, hover-brighten,
+                // pointer cursor) without the gradient "hero" look
+                // that reads like a static badge. Arrow glyph + action
+                // verb make the affordance unmistakable.
+                variant="outline"
+                size="sm"
                 disabled={running}
                 onClick={() => void runBulkAddToQueue(selectedInView)}
-                className="font-semibold"
+                className="border-primary/40 text-primary hover:border-primary/70 hover:bg-primary/10 hover:text-primary font-medium"
               >
-                <Send className="h-3.5 w-3.5 mr-1.5" />
-                Add {selectedInView.length} to AutoBuy Queue
+                <Send className="h-3 w-3 mr-1" />
+                Add to AutoBuy Queue
               </Button>
               <Button
                 variant="ghost"
