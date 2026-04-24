@@ -66,6 +66,21 @@ import {
   relTime,
   shortEmail,
 } from './lib/format.js';
+import { useSettings } from './hooks/useSettings.js';
+import {
+  AppIcon,
+  BackIcon,
+  BoltIcon,
+  DollarIcon,
+  InfoIcon,
+  PencilIcon,
+  PlayIcon,
+  PlusIcon,
+  ShoppingIcon,
+  StopIcon,
+  UsersIcon,
+} from './components/icons.js';
+import { useConfirm } from './components/ConfirmDialog.js';
 
 const SETUP_GUIDE_URL = 'https://betterbg.vercel.app/dashboard/auto-buy';
 
@@ -73,63 +88,6 @@ function stripIpcPrefix(msg: string): string {
   return msg.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/, '').trim();
 }
 
-/** In-process fan-out so every component that called `useSettings()`
- *  picks up an update made by another component. Each instance
- *  maintains its own copy of the settings object (local useState); the
- *  custom event keeps them in sync without adding another IPC channel. */
-const SETTINGS_EVENT = 'autog:settings-changed';
-
-/** Fetch settings once on mount + provide an updater. Used by the
- *  settings panels (LiveModePanel / HeadlessTogglePanel /
- *  AllowedPrefixesPanel) instead of each panel doing its own IPC dance.
- *  Subscribes to SETTINGS_EVENT so that when one component updates a
- *  setting, every other `useSettings()` copy in the tree re-fetches
- *  and re-renders (previously each instance cached the initial fetch
- *  and never refreshed — the Dashboard failed counter kept the stale
- *  value until the user hit reload). */
-function useSettings(): {
-  settings: Settings | null;
-  busy: boolean;
-  update: (patch: Partial<Settings>) => Promise<void>;
-} {
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = (next?: Settings) => {
-      if (next) {
-        if (!cancelled) setSettings(next);
-        return;
-      }
-      void window.autog.settingsGet().then((s) => {
-        if (!cancelled) setSettings(s);
-      });
-    };
-    refresh();
-    const onEvt = (e: Event) => {
-      const detail = (e as CustomEvent<Settings>).detail;
-      refresh(detail);
-    };
-    window.addEventListener(SETTINGS_EVENT, onEvt);
-    return () => {
-      cancelled = true;
-      window.removeEventListener(SETTINGS_EVENT, onEvt);
-    };
-  }, []);
-  const update = useCallback(async (patch: Partial<Settings>) => {
-    setBusy(true);
-    try {
-      const next = await window.autog.settingsSet(patch);
-      setSettings(next);
-      // Fan out to every other live useSettings() consumer. Passing
-      // `next` as detail avoids a second IPC round-trip on each one.
-      window.dispatchEvent(new CustomEvent<Settings>(SETTINGS_EVENT, { detail: next }));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
-  return { settings, busy, update };
-}
 
 export function App() {
   const [status, setStatus] = useState<RendererStatus>({
@@ -3124,105 +3082,6 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   );
 }
 
-type ConfirmState = {
-  title: string;
-  message: string;
-  confirmLabel?: string;
-  danger?: boolean;
-  onConfirm: () => void | Promise<void>;
-};
-
-function ConfirmDialog({
-  state,
-  onClose,
-}: {
-  state: ConfirmState | null;
-  onClose: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-
-  if (!state) return null;
-
-  const handleConfirm = async () => {
-    setBusy(true);
-    try {
-      await state.onConfirm();
-      onClose();
-    } catch {
-      // caller is expected to handle errors (toast/etc) — just close
-      onClose();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    // Controlled shadcn Dialog — `open` follows the presence of state;
-    // onOpenChange is invoked when the user clicks the backdrop, hits
-    // Escape, or clicks the built-in close X. The overlay + content
-    // already carry the glass-strong animations from the primitive.
-    <Dialog
-      open={true}
-      onOpenChange={(next) => {
-        if (!next && !busy) onClose();
-      }}
-    >
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-base">
-            {state.danger && (
-              <span
-                className="flex size-7 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/15 text-red-300"
-                aria-hidden
-              >
-                <AlertIcon />
-              </span>
-            )}
-            {state.title}
-          </DialogTitle>
-          <DialogDescription className="text-sm text-muted-foreground leading-relaxed">
-            {state.message}
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose} disabled={busy}>
-            Cancel
-          </Button>
-          <Button
-            variant={state.danger ? 'destructive' : 'default'}
-            onClick={() => void handleConfirm()}
-            disabled={busy}
-            autoFocus
-          >
-            {busy ? 'Working…' : state.confirmLabel ?? 'Confirm'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/**
- * Tiny hook that pairs a ConfirmState with its rendered ConfirmDialog.
- * Every component that had its own `useState<ConfirmState | null>` +
- * `<ConfirmDialog state={...} onClose={...} />` boilerplate (jobs table,
- * accounts, logs, dashboard) now calls this and drops the ~10 lines.
- *
- *   const { confirm, dialog } = useConfirm();
- *   confirm({ title, message, onConfirm });
- *   return <>...{dialog}</>;
- *
- * Behavior matches the original pattern exactly: one active prompt at a
- * time, auto-closes after onConfirm resolves (or throws — caller toasts
- * errors), backdrop/Escape dismisses when not busy.
- */
-function useConfirm() {
-  const [state, setState] = useState<ConfirmState | null>(null);
-  const confirm = useCallback((s: ConfirmState) => setState(s), []);
-  const dialog = <ConfirmDialog state={state} onClose={() => setState(null)} />;
-  return { confirm, dialog };
-}
-
 function Toast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
     <div className="toast" role="status">
@@ -3463,112 +3322,3 @@ function StatCard(props: {
   );
 }
 
-/* ============================================================
-   Utilities
-   ============================================================ */
-/* ============================================================
-   Icons (inline SVG)
-   ============================================================ */
-const svgProps = {
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: '2',
-  strokeLinecap: 'round' as const,
-  strokeLinejoin: 'round' as const,
-};
-
-function AppIcon() {
-  return (
-    <svg {...svgProps}>
-      <path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z" />
-    </svg>
-  );
-}
-function PlayIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
-      <path d="M8 5v14l11-7z" />
-    </svg>
-  );
-}
-function StopIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
-      <rect x="6" y="6" width="12" height="12" rx="1" />
-    </svg>
-  );
-}
-function ShoppingIcon() {
-  return (
-    <svg {...svgProps}>
-      <circle cx="9" cy="21" r="1" />
-      <circle cx="20" cy="21" r="1" />
-      <path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6" />
-    </svg>
-  );
-}
-function BoltIcon() {
-  return (
-    <svg {...svgProps}>
-      <path d="M13 2 3 14h7l-1 8 10-12h-7z" />
-    </svg>
-  );
-}
-function DollarIcon() {
-  return (
-    <svg {...svgProps}>
-      <line x1="12" y1="1" x2="12" y2="23" />
-      <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
-    </svg>
-  );
-}
-function UsersIcon() {
-  return (
-    <svg {...svgProps} width="14" height="14">
-      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
-  );
-}
-function BackIcon() {
-  return (
-    <svg {...svgProps} width="14" height="14">
-      <path d="M19 12H5M12 19l-7-7 7-7" />
-    </svg>
-  );
-}
-function PlusIcon() {
-  return (
-    <svg {...svgProps} width="14" height="14">
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  );
-}
-function PencilIcon() {
-  return (
-    <svg {...svgProps} width="12" height="12">
-      <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-    </svg>
-  );
-}
-function AlertIcon() {
-  return (
-    <svg {...svgProps} width="22" height="22">
-      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-      <line x1="12" y1="9" x2="12" y2="13" />
-      <line x1="12" y1="17" x2="12.01" y2="17" />
-    </svg>
-  );
-}
-function InfoIcon({ size = 22 }: { size?: number } = {}) {
-  return (
-    <svg {...svgProps} width={size} height={size}>
-      <circle cx="12" cy="12" r="10" />
-      <line x1="12" y1="16" x2="12" y2="12" />
-      <line x1="12" y1="8" x2="12.01" y2="8" />
-    </svg>
-  );
-}
