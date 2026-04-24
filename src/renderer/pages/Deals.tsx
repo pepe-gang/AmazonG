@@ -18,6 +18,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Checkbox } from '@/components/ui/checkbox';
 import { DealImageTile } from '@/components/deal-image-tile';
 import { KebabTrigger } from '@/components/kebab-trigger';
 import { cn } from '@/lib/utils';
@@ -134,6 +135,48 @@ export function Deals() {
   // because that's BG's tax-free warehouse state — the only deals we
   // can actually ship to by default.
   const [stateFilter, setStateFilter] = useState<string>('oregon');
+  // Set of dealKeys the user has ticked. Used by the bulk action bar.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Bulk-action progress. While running: { done, total }. null = idle.
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
+
+  // Selection helpers ----------------------------------------------
+  const toggleOne = (dealKey: string, checked: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(dealKey);
+      else next.delete(dealKey);
+      return next;
+    });
+  };
+
+  const runBulkAddToQueue = async (rows: AmazonDeal[]) => {
+    if (rows.length === 0) return;
+    setBulkProgress({ done: 0, total: rows.length });
+    let queued = 0;
+    let failed = 0;
+    let lastError: string | null = null;
+    for (let i = 0; i < rows.length; i++) {
+      const d = rows[i]!;
+      try {
+        await window.autog.dealsTrigger(d.dealId);
+        queued++;
+      } catch (err) {
+        failed++;
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+      setBulkProgress({ done: i + 1, total: rows.length });
+    }
+    setBulkProgress(null);
+    setSelected(new Set());
+    if (failed === 0) {
+      toast.success(`Added ${queued} to AutoBuy queue`);
+    } else if (queued === 0) {
+      toast.error(`Queue failed for all ${failed}`, { description: lastError ?? undefined });
+    } else {
+      toast.warning(`Added ${queued}, ${failed} failed`, { description: lastError ?? undefined });
+    }
+  };
 
   const onHeaderClick = (key: SortKey) => {
     if (key === sortKey) {
@@ -248,10 +291,73 @@ export function Deals() {
       )}
 
       <section className="glass flex flex-1 min-h-0 flex-col overflow-hidden">
+        {(() => {
+          // Selection summary → bulk-action bar. Deals not currently
+          // visible (filtered out by ship-to-state) are kept selected
+          // so switching filters doesn't silently drop them, but the
+          // "N selected" count only reflects what's in view so the
+          // user knows exactly what the bulk action will touch.
+          const selectedInView = visibleDeals.filter((d) => selected.has(d.dealKey));
+          if (selectedInView.length === 0) return null;
+          const running = bulkProgress !== null;
+          return (
+            <div
+              className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/[0.04] bg-accent/30"
+              role="toolbar"
+            >
+              <span className="text-xs text-muted-foreground mr-1">
+                {running
+                  ? `Queuing ${bulkProgress.done}/${bulkProgress.total}…`
+                  : `${selectedInView.length} selected`}
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={running}
+                onClick={() => void runBulkAddToQueue(selectedInView)}
+              >
+                <Send className="h-3 w-3 mr-1" />
+                Add {selectedInView.length} to AutoBuy Queue
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={running}
+                onClick={() => setSelected(new Set())}
+              >
+                Clear
+              </Button>
+            </div>
+          );
+        })()}
         <div className="flex-1 min-h-0 overflow-auto">
           <Table className="table-fixed">
             <TableHeader>
               <TableRow>
+                <TableHead className="w-[36px] pl-4 pr-1">
+                  <Checkbox
+                    aria-label="Select all visible deals"
+                    checked={
+                      visibleDeals.length > 0 &&
+                      visibleDeals.every((d) => selected.has(d.dealKey))
+                        ? true
+                        : visibleDeals.some((d) => selected.has(d.dealKey))
+                          ? 'indeterminate'
+                          : false
+                    }
+                    onCheckedChange={(v) => {
+                      setSelected((prev) => {
+                        const next = new Set(prev);
+                        if (v === true) {
+                          for (const d of visibleDeals) next.add(d.dealKey);
+                        } else {
+                          for (const d of visibleDeals) next.delete(d.dealKey);
+                        }
+                        return next;
+                      });
+                    }}
+                  />
+                </TableHead>
                 <SortableHead
                   className="w-auto px-4"
                   label="Product"
@@ -286,21 +392,21 @@ export function Deals() {
             <TableBody>
               {loading && deals.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
+                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
                     Loading…
                   </TableCell>
                 </TableRow>
               )}
               {!loading && deals.length === 0 && !error && (
                 <TableRow>
-                  <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
+                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
                     No active deals right now. Hit Refresh if you're expecting some.
                   </TableCell>
                 </TableRow>
               )}
               {!loading && deals.length > 0 && visibleDeals.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
+                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
                     No deals ship to {stateFilter.toUpperCase()}.{' '}
                     <button
                       className="text-primary hover:underline"
@@ -318,8 +424,19 @@ export function Deals() {
                   price !== undefined
                     ? computeMargin(price, oldPrice)
                     : { indicator: '', label: '—', className: 'text-muted-foreground' };
+                const isSelected = selected.has(d.dealKey);
                 return (
-                  <TableRow key={d.dealKey} className="hover:bg-accent/30">
+                  <TableRow
+                    key={d.dealKey}
+                    className={cn('hover:bg-accent/30', isSelected && 'bg-accent/20')}
+                  >
+                    <TableCell className="pl-4 pr-1">
+                      <Checkbox
+                        aria-label={`Select ${d.dealTitle}`}
+                        checked={isSelected}
+                        onCheckedChange={(v) => toggleOne(d.dealKey, v === true)}
+                      />
+                    </TableCell>
                     <TableCell className="px-4">
                       <div className="flex items-center gap-3 min-w-0">
                         <DealImageTile imageUrl={d.imageUrl} />
