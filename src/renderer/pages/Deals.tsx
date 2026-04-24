@@ -404,17 +404,17 @@ export function Deals() {
                             onClick={async () => {
                               try {
                                 const r = await window.autog.dealsTrigger(d.dealId);
-                                toast.success('Sent to BetterBG', {
+                                toast.success('Added to AutoBuy queue', {
                                   description: `${d.dealId} · job ${r.jobId.slice(0, 8)}…`,
                                 });
                               } catch (err) {
-                                toast.error('Send failed', {
+                                toast.error('Queue failed', {
                                   description: err instanceof Error ? err.message : String(err),
                                 });
                               }
                             }}
                           >
-                            <Send className="h-3 w-3 mr-2" /> Send to BetterBG
+                            <Send className="h-3 w-3 mr-2" /> Add to AutoBuy Queue
                           </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => void window.autog.openExternal(d.amazonLink)}>
                             <ExternalLink className="h-3 w-3 mr-2" /> Open on Amazon
