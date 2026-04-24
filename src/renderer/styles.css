@@ -178,7 +178,7 @@ a,
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  background: #f1f5f9;
+  background: hsl(220 15% 100% / 0.06);
   border: 1px solid var(--border);
   border-radius: 10px;
 }
@@ -212,8 +212,8 @@ a,
 
 .error-banner {
   background: var(--danger-bg);
-  border: 1px solid #fecaca;
-  color: #991b1b;
+  border: 1px solid hsl(0 75% 62% / 0.30);
+  color: hsl(0 80% 85%);
   padding: 10px 12px;
   border-radius: 8px;
   font-size: 12.5px;
@@ -254,7 +254,7 @@ a,
   align-items: center;
   gap: 10px;
   padding: 4px 10px 4px 4px;
-  background: #f1f5f9;
+  background: hsl(220 15% 100% / 0.06);
   border: 1px solid var(--border);
   border-radius: 10px;
 }
@@ -329,7 +329,7 @@ a,
   font-family: inherit;
 }
 .ghost-btn:hover:not(:disabled) {
-  background: #f1f5f9;
+  background: hsl(220 15% 100% / 0.06);
   border-color: var(--border-strong);
 }
 .ghost-btn:disabled {
@@ -535,7 +535,7 @@ a,
 }
 .count-badge.ready {
   background: var(--success-bg);
-  color: #166534;
+  color: hsl(150 60% 80%);
 }
 
 /* Allowed-prefixes settings panel */
@@ -587,9 +587,9 @@ a,
 }
 .prefix-chip {
   padding: 4px 10px;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  color: #1e3a8a;
+  background: hsl(210 90% 66% / 0.12);
+  border: 1px solid hsl(210 90% 66% / 0.30);
+  color: hsl(210 90% 85%);
   font-size: 12.5px;
   font-weight: 600;
   border-radius: 999px;
@@ -1225,7 +1225,12 @@ a,
   color: var(--text-muted);
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
-  background: #f8fafc;
+  /* Translucent navy that blends with the surrounding .glass section
+   * and stays opaque enough for the sticky header to occlude scrolling
+   * rows behind it. Backdrop-filter gives the "frosted" header feel. */
+  background: hsl(220 25% 10% / 0.92);
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -1240,11 +1245,11 @@ a,
 .jobs-table th[draggable="true"]:active { cursor: grabbing; }
 .jobs-table th.th-dragging {
   opacity: 0.4;
-  background: #eef2ff;
+  background: hsl(210 90% 66% / 0.08);
 }
 .jobs-table th.th-drop-target {
   box-shadow: inset -2px 0 0 var(--primary);
-  background: #eff6ff;
+  background: hsl(210 90% 66% / 0.12);
 }
 .jobs-table th.th-right .th-sort,
 .jobs-table th.th-center .th-sort { width: 100%; }
@@ -1256,7 +1261,9 @@ a,
   vertical-align: middle;
 }
 .jobs-table tr:hover td {
-  background: #f8fafc;
+  /* Same hue as --accent but a touch stronger — visible highlight on the
+   * dark glass without washing the text out. */
+  background: hsl(220 15% 100% / 0.045);
 }
 /* Right-align numeric columns so digits line up across rows. */
 .jobs-table .cell-qty,
@@ -1299,10 +1306,10 @@ a,
 .account-pill {
   display: inline-block;
   padding: 2px 8px;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
+  background: hsl(210 90% 66% / 0.12);
+  border: 1px solid hsl(210 90% 66% / 0.30);
   border-radius: 999px;
-  color: #1e3a8a;
+  color: hsl(210 90% 85%);
   font-size: 12px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -1413,10 +1420,10 @@ a,
   accent-color: var(--primary);
 }
 .jobs-table tr.row-selected td {
-  background: #eff6ff;
+  background: hsl(210 90% 66% / 0.08);
 }
 .jobs-table tr.row-selected:hover td {
-  background: #dbeafe;
+  background: hsl(210 90% 66% / 0.14);
 }
 
 .bulk-bar {
@@ -1477,7 +1484,7 @@ a,
   border-radius: 4px;
   cursor: pointer;
 }
-.action-menu-item:hover:not(:disabled) { background: #f1f5f9; }
+.action-menu-item:hover:not(:disabled) { background: hsl(220 15% 100% / 0.06); }
 .action-menu-item:disabled { color: var(--text-subtle); cursor: not-allowed; }
 .action-menu-danger { color: var(--danger); }
 .action-menu-danger:hover:not(:disabled) { background: var(--danger-bg); }
@@ -1502,7 +1509,7 @@ a,
   cursor: pointer;
   user-select: none;
 }
-.columns-menu-item:hover { background: #f1f5f9; }
+.columns-menu-item:hover { background: hsl(220 15% 100% / 0.06); }
 .columns-menu-item input[type="checkbox"] {
   accent-color: var(--primary);
   cursor: pointer;
@@ -1540,11 +1547,11 @@ a,
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-.chip-blue { background: #dbeafe; color: #1e40af; }
+.chip-blue { background: hsl(210 90% 66% / 0.18); color: hsl(210 90% 80%); }
 .chip-purple { background: var(--purple-bg); color: var(--purple); }
-.chip-gray { background: #f1f5f9; color: #475569; }
+.chip-gray { background: hsl(220 15% 100% / 0.06); color: hsl(220 10% 75%); }
 .chip-mono {
-  background: #f1f5f9;
+  background: hsl(220 15% 100% / 0.06);
   color: #64748b;
   font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
   font-size: 10px;
@@ -1576,11 +1583,11 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   font-size: 11px;
   font-weight: 600;
 }
-.badge-gray { background: #f1f5f9; color: #475569; }
-.badge-blue { background: #dbeafe; color: #1e40af; }
-.badge-green { background: var(--success-bg); color: #166534; }
-.badge-red { background: var(--danger-bg); color: #991b1b; }
-.badge-amber { background: var(--warn-bg); color: #92400e; }
+.badge-gray { background: hsl(220 15% 100% / 0.06); color: hsl(220 10% 75%); }
+.badge-blue { background: hsl(210 90% 66% / 0.18); color: hsl(210 90% 80%); }
+.badge-green { background: var(--success-bg); color: hsl(150 60% 80%); }
+.badge-red { background: var(--danger-bg); color: hsl(0 80% 85%); }
+.badge-amber { background: var(--warn-bg); color: hsl(40 90% 80%); }
 
 /* Logs view (full-page) */
 .logs-view {
@@ -1634,15 +1641,15 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   padding: 10px 14px;
   margin-bottom: 12px;
   border-radius: 8px;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  color: #1e3a8a;
+  background: hsl(210 90% 66% / 0.12);
+  border: 1px solid hsl(210 90% 66% / 0.30);
+  color: hsl(210 90% 85%);
   font-size: 13px;
 }
 .link-inline {
   background: none;
   border: none;
-  color: #2563eb;
+  color: var(--primary);
   font: inherit;
   font-weight: 600;
   text-decoration: underline;
@@ -1650,7 +1657,7 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   padding: 0;
 }
 .link-inline:hover {
-  color: #1d4ed8;
+  color: var(--primary-hover);
 }
 
 /* Snapshot preview in logs view */
@@ -1749,14 +1756,14 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   letter-spacing: 0.02em;
 }
 .buymode-badge.single {
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
-  color: #0369a1;
+  background: hsl(210 90% 66% / 0.12);
+  border: 1px solid hsl(210 90% 66% / 0.30);
+  color: hsl(210 90% 85%);
 }
 .buymode-badge.filler {
   background: var(--purple-bg);
-  border: 1px solid #c4b5fd;
-  color: var(--purple);
+  border: 1px solid hsl(265 70% 70% / 0.35);
+  color: hsl(265 80% 85%);
 }
 
 /* Filler mode panel — locked / coming soon */
@@ -1868,10 +1875,10 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   align-self: flex-start;
   margin-top: 1px;
 }
-.log-level.info { background: #dbeafe; color: #1e40af; }
-.log-level.warn { background: var(--warn-bg); color: #92400e; }
-.log-level.error { background: var(--danger-bg); color: #991b1b; }
-.log-level.debug { background: #f1f5f9; color: #475569; }
+.log-level.info { background: hsl(210 90% 66% / 0.18); color: hsl(210 90% 80%); }
+.log-level.warn { background: var(--warn-bg); color: hsl(40 90% 80%); }
+.log-level.error { background: var(--danger-bg); color: hsl(0 80% 85%); }
+.log-level.debug { background: hsl(220 15% 100% / 0.06); color: hsl(220 10% 75%); }
 .log-message {
   color: var(--text);
   word-break: break-word;
@@ -1901,7 +1908,7 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   margin-bottom: 16px;
   border-radius: 8px;
   background: var(--warn-bg);
-  color: #92400e;
+  color: hsl(40 90% 80%);
   font-size: 13px;
   border: 1px solid #fcd34d;
   box-shadow: var(--shadow-sm);
