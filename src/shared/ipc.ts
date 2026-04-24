@@ -115,6 +115,16 @@ export type Settings = {
    * new profiles and the master cascade control on the settings screen.
    */
   buyWithFillers: boolean;
+  /**
+   * When set, the Dashboard's Failed counter + the failures-by-reason
+   * popover ignore every attempt whose createdAt predates this
+   * timestamp. Used by the popover's Clear action to "reset" the
+   * counter without actually deleting rows server-side (BG's copy of
+   * failed purchases keeps syncing back through listMergedAttempts,
+   * so a local-only row delete would bounce right back). ISO-8601
+   * string; null means "show every failure".
+   */
+  failedHiddenBeforeTs: string | null;
 };
 
 export type AutoGBridge = {

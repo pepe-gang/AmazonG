@@ -482,6 +482,13 @@ function DashboardView(props: {
   onViewLogs: (a: JobAttempt) => void;
 }) {
   const { status, uptimeLabel, attempts, profiles, onViewLogs } = props;
+  const { settings } = useSettings();
+  // Timestamp of the last time the user reset the Failed counter.
+  // Every attempt with a failed status whose createdAt is earlier than
+  // this is excluded from the count + the failures-by-reason
+  // breakdown. The rows themselves still exist (BG re-syncs them);
+  // this is purely a display filter.
+  const failedHiddenBeforeTs = settings?.failedHiddenBeforeTs ?? null;
 
   const accountsCount = profiles.length;
   const accountsReady = profiles.filter((p) => p.enabled && p.loggedIn).length;
@@ -511,20 +518,33 @@ function DashboardView(props: {
   const statusCounts = useMemo(() => {
     const c = { pending: 0, success: 0, cancelled: 0, failed: 0 };
     for (const a of attempts) {
-      c[STATUS_GROUP[a.status]] += 1;
+      const group = STATUS_GROUP[a.status];
+      // Hide pre-reset failures from the counter — the popover's Clear
+      // action stamps settings.failedHiddenBeforeTs when the user wants
+      // to start fresh. Server rows keep flowing in through
+      // listMergedAttempts; we just skip them in the dashboard number.
+      if (
+        group === 'failed' &&
+        failedHiddenBeforeTs !== null &&
+        a.createdAt < failedHiddenBeforeTs
+      ) {
+        continue;
+      }
+      c[group] += 1;
     }
     return c;
-  }, [attempts]);
+  }, [attempts, failedHiddenBeforeTs]);
 
   const failedErrorBreakdown = useMemo(() => {
     const by = new Map<string, number>();
     for (const a of attempts) {
       if (STATUS_GROUP[a.status] !== 'failed') continue;
+      if (failedHiddenBeforeTs !== null && a.createdAt < failedHiddenBeforeTs) continue;
       const key = normalizeFailureError(a.error);
       by.set(key, (by.get(key) ?? 0) + 1);
     }
     return Array.from(by.entries()).sort((a, b) => b[1] - a[1]);
-  }, [attempts]);
+  }, [attempts, failedHiddenBeforeTs]);
 
   const fmt = (n: number) => `${n >= 0 ? '+' : '−'}$${Math.abs(n).toFixed(2)}`;
 
@@ -3323,6 +3343,7 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const { update } = useSettings();
   const wrapRef = useRef<HTMLSpanElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
 
@@ -3395,16 +3416,22 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
                   // confirm prompt ends up visually buried underneath.
                   setOpen(false);
                   setConfirmState({
-                    title: `Clear ${total} failed row${total === 1 ? '' : 's'}?`,
-                    message: 'Resets the Failed counter and the failures-by-reason breakdown. The attempt rows and their logs are deleted locally — this cannot be undone.',
-                    confirmLabel: 'Clear',
+                    title: `Reset Failed counter?`,
+                    message: `Hides the ${total} current failure${total === 1 ? '' : 's'} from the Dashboard counter and the failures-by-reason list. The rows themselves stay in Jobs so logs remain accessible; new failures after this point count normally.`,
+                    confirmLabel: 'Reset',
                     danger: true,
                     onConfirm: async () => {
                       try {
-                        const n = await window.autog.jobsClearFailed();
-                        toast.success(`Cleared ${n} failed row${n === 1 ? '' : 's'}`);
+                        // Stamp "now" so pre-existing failures are
+                        // filtered out of the counter. Also sweep local
+                        // failed rows in the same shot so the Jobs
+                        // table doesn't carry dead rows that BG won't
+                        // re-sync (failed rows with no orderId).
+                        await update({ failedHiddenBeforeTs: new Date().toISOString() });
+                        await window.autog.jobsClearFailed().catch(() => 0);
+                        toast.success(`Reset — hiding ${total} prior failure${total === 1 ? '' : 's'}`);
                       } catch (err) {
-                        toast.error('Clear failed', {
+                        toast.error('Reset failed', {
                           description: err instanceof Error ? err.message : String(err),
                         });
                       }
