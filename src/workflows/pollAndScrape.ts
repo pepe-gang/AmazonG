@@ -764,12 +764,20 @@ async function handleVerifyJob(
     cid,
   );
 
+  // Track the verify-owned page so `finally` can close it without
+  // touching any other tabs in the context (critical for borrowed
+  // sessions where `context.pages()[0]` is the user's own window).
+  let verifyPage: Page | null = null;
   try {
     const session = await getSession(deps, sessions, profile.email, profile.headless);
     if (deps.snapshotOnFailure) await startTracing(session.context);
-    const existing = session.context.pages();
-    const page = existing[0] ?? (await session.newPage());
-    const outcome = await verifyOrder(page, targetOrderId);
+    // Always open a fresh page for the verify work. Reusing
+    // `context.pages()[0]` would navigate a user-owned tab when the
+    // session was borrowed from openOrderSessions, and leave that tab
+    // pointing at the order-details page after the verify finishes
+    // (closeAndForgetSession skips borrowed sessions by design).
+    verifyPage = await session.newPage();
+    const outcome = await verifyOrder(verifyPage, targetOrderId);
 
     if (outcome.kind === 'active') {
       logger.info(
@@ -820,7 +828,7 @@ async function handleVerifyJob(
           cid,
         );
         const cleanup = await runVerifyFillerCleanup(
-          page,
+          verifyPage,
           targetOrderId,
           fillerOrderIds,
           { asin: targetAsin, title: productTitle },
@@ -921,7 +929,7 @@ async function handleVerifyJob(
         { ...logCtx, orderId: targetOrderId, amazonMessage: outcome.message },
         cid,
       );
-      await maybeSnapshot(error, page, activeAttemptId, session, deps, cid, { ...logCtx });
+      await maybeSnapshot(error, verifyPage, activeAttemptId, session, deps, cid, { ...logCtx });
       await deps.jobAttempts
         .update(activeAttemptId, { status: 'failed', error })
         .catch(() => undefined);
@@ -964,6 +972,13 @@ async function handleVerifyJob(
       { ...logCtx, message: 'Closing verify browser window' },
       cid,
     );
+    // Close our own page first so borrowed sessions (user-opened
+    // "View Order" windows) lose the verify tab even though the
+    // context is left alive. For worker-owned sessions the context
+    // close below tears down everything anyway — extra close is a no-op.
+    if (verifyPage) {
+      await verifyPage.close().catch(() => undefined);
+    }
     await closeAndForgetSession(sessions, profile.email);
   }
 }
@@ -1021,11 +1036,13 @@ async function handleFetchTrackingJob(
     cid,
   );
 
+  // Same pattern as handleVerifyJob — use a dedicated page so the
+  // follow-up close only affects our own tab on borrowed sessions.
+  let fetchPage: Page | null = null;
   try {
     const session = await getSession(deps, sessions, profile.email, profile.headless);
-    const existing = session.context.pages();
-    const page = existing[0] ?? (await session.newPage());
-    const outcome = await fetchTracking(page, targetOrderId);
+    fetchPage = await session.newPage();
+    const outcome = await fetchTracking(fetchPage, targetOrderId);
 
     if (outcome.kind === 'tracked') {
       logger.info(
@@ -1193,6 +1210,9 @@ async function handleFetchTrackingJob(
       { ...logCtx, message: 'Closing fetch_tracking browser window' },
       cid,
     );
+    if (fetchPage) {
+      await fetchPage.close().catch(() => undefined);
+    }
     await closeAndForgetSession(sessions, profile.email);
   }
 }
