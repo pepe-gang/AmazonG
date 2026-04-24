@@ -378,7 +378,11 @@ function MainShell({ status }: { status: RendererStatus }) {
       <div className="flex flex-1 min-h-0 w-full">
         <AppSidebar version={appVersion || undefined} />
         <SidebarInset>
-          <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+          {/* No `overflow-hidden` on this outer column — pop-overs /
+              dialogs / dropdowns anchored inside the page need to be
+              able to escape vertically. Inner scroll containers
+              (`.jobs-table-wrap`, logs body) keep their own bounds. */}
+          <div className="flex flex-1 flex-col min-h-0">
             {updateInfo && !updateDismissed && (
               <div
                 className="mx-4 mt-3 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-sm text-amber-100"
@@ -511,7 +515,11 @@ function DashboardView(props: {
   const fmt = (n: number) => `${n >= 0 ? '+' : '−'}$${Math.abs(n).toFixed(2)}`;
 
   return (
-    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0 overflow-hidden">
+    // No `overflow-hidden` here — the inner Jobs section has its own
+    // scroll container (`.jobs-table-wrap`) and clipping this wrapper
+    // also clips absolute-positioned popovers anchored to the stat
+    // tiles above (e.g. FailedErrorPopover).
+    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <StatCard
           icon={<BoltIcon />}
@@ -624,7 +632,7 @@ const DEFAULT_COLUMN_ORDER: JobColumnId[] = [
  * tick the column on (which writes the new order back to settings),
  * the "haven't-seen-it-yet" check stops firing.
  */
-const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail', 'buyMode']);
+const DEFAULT_HIDDEN_COLUMNS = new Set<JobColumnId>(['totalRetail']);
 
 function resolveColumnOrder(saved: string[]): JobColumnId[] {
   const valid = new Set<JobColumnId>(DEFAULT_COLUMN_ORDER);
