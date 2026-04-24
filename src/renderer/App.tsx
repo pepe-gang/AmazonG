@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
@@ -1950,6 +1951,98 @@ function formatTime(iso: string): string {
 }
 
 /* ============================================================
+   Log-line formatting
+   ============================================================ */
+
+/**
+ * Fields that are the same on every log line for a given attempt
+ * (already shown in the drawer header), plus empty/null noise.
+ * Strip them from the key/value tail so lines are scannable.
+ */
+const LOG_REDUNDANT_KEYS = new Set(['jobId', 'profile', 'attemptId']);
+
+/**
+ * Compact a `data` blob into:
+ *  - a single "headline" string (prefer an explicit `message`; fall
+ *    back to blank so the event name carries the line), and
+ *  - the remaining key/value pairs, sorted for stable output.
+ *
+ * Null / undefined / empty-string values are dropped — they're never
+ * interesting and they bloat every scrape.ok line with
+ * `cashbackPct=null, condition=null`.
+ */
+function formatLogData(data: unknown): { message: string | null; pairs: [string, string][] } {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { message: null, pairs: [] };
+  }
+  const obj = data as Record<string, unknown>;
+  let message: string | null = null;
+  const pairs: [string, string][] = [];
+  for (const [key, raw] of Object.entries(obj)) {
+    if (LOG_REDUNDANT_KEYS.has(key)) continue;
+    if (raw === null || raw === undefined || raw === '') continue;
+    if (key === 'message' && typeof raw === 'string') {
+      message = raw;
+      continue;
+    }
+    let value: string;
+    if (typeof raw === 'string') value = raw;
+    else if (typeof raw === 'number' || typeof raw === 'boolean') value = String(raw);
+    else value = JSON.stringify(raw);
+    // Clip runaway long values (e.g. a 500-char error detail) so the
+    // line doesn't wrap for 10 rows. Full detail still lives in the
+    // raw log file + can be surfaced later via a detail view.
+    if (value.length > 160) value = value.slice(0, 157) + '…';
+    pairs.push([key, value]);
+  }
+  return { message, pairs };
+}
+
+function LogLine({ ev }: { ev: LogEvent }) {
+  const { message, pairs } = useMemo(() => formatLogData(ev.data), [ev.data]);
+  return (
+    <div className="flex gap-3 px-3 py-1.5 hover:bg-white/[0.02] rounded">
+      <span className="shrink-0 tabular-nums text-muted-foreground/70 text-[11.5px] font-mono leading-5">
+        {ev.ts.slice(11, 19)}
+      </span>
+      <span
+        className={
+          'shrink-0 h-5 flex items-center px-1.5 rounded text-[10px] font-medium uppercase tracking-wider ' +
+          (ev.level === 'error'
+            ? 'bg-red-500/15 text-red-300'
+            : ev.level === 'warn'
+              ? 'bg-amber-500/15 text-amber-300'
+              : ev.level === 'debug'
+                ? 'bg-white/[0.06] text-muted-foreground'
+                : 'bg-sky-500/15 text-sky-300')
+        }
+      >
+        {ev.level}
+      </span>
+      <div className="flex-1 min-w-0 leading-5">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="font-mono text-[12.5px] text-foreground">{ev.message}</span>
+          {message && (
+            <span className="text-[12.5px] text-foreground/80">{message}</span>
+          )}
+        </div>
+        {pairs.length > 0 && (
+          <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px]">
+            {pairs.map(([k, v]) => (
+              <span key={k} className="text-muted-foreground">
+                <span className="text-muted-foreground/60">{k}</span>
+                <span className="text-muted-foreground/40">=</span>
+                <span className="text-foreground/75">{v}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    Dry-run banner (toggle)
    ============================================================ */
 function LiveModePanel() {
@@ -2128,16 +2221,7 @@ function LogsView({ attempt }: { attempt: JobAttempt }) {
         {logs.length === 0 ? (
           <div className="log-empty">{loading ? 'Loading logs…' : 'No logs recorded for this attempt.'}</div>
         ) : (
-          logs.map((ev, i) => (
-            <div key={i} className="log-line">
-              <span className="log-time">{ev.ts.slice(11, 19)}</span>
-              <span className={`log-level ${ev.level}`}>{ev.level}</span>
-              <span className="log-message">
-                {ev.message}
-                {ev.data ? <span className="log-data"> {JSON.stringify(ev.data)}</span> : null}
-              </span>
-            </div>
-          ))
+          logs.map((ev, i) => <LogLine key={i} ev={ev} />)
         )}
       </div>
     </div>
@@ -3146,18 +3230,38 @@ function normalizeFailureError(raw: string | null | undefined): string {
 
 function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][]; total: number }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLSpanElement | null>(null);
+  const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+
+  // Position the popover in viewport coords each time it opens. Doing
+  // it on open (not on render) means we don't need to listen for
+  // scroll/resize; if the user scrolls with the popover open we just
+  // accept the slight drift — the click-outside handler closes it
+  // soon enough. Simpler than a full Radix Popover install.
+  useEffect(() => {
+    if (!open || !wrapRef.current) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    setCoords({ top: rect.bottom + 6, left: rect.left });
+  }, [open]);
+
+  // Click-outside handler — needs to look at BOTH the trigger wrap and
+  // the popover (which is now portaled elsewhere in the DOM).
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (wrapRef.current?.contains(t)) return;
+      if (popRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [open]);
+
   if (breakdown.length === 0) return null;
   return (
-    <span className="stat-label-info-wrap" ref={ref}>
+    <span className="stat-label-info-wrap" ref={wrapRef}>
       <button
         type="button"
         className="stat-label-info"
@@ -3166,19 +3270,34 @@ function FailedErrorPopover({ breakdown, total }: { breakdown: [string, number][
       >
         <InfoIcon size={14} />
       </button>
-      {open && (
-        <div className="error-breakdown-pop" role="dialog">
-          <div className="error-breakdown-head">Failures by reason</div>
-          <ul className="error-breakdown-list">
-            {breakdown.map(([msg, n]) => (
-              <li key={msg}>
-                <span className="error-breakdown-count">{n}</span>
-                <span className="error-breakdown-msg">{msg}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {open && coords &&
+        createPortal(
+          <div
+            ref={popRef}
+            role="dialog"
+            className="error-breakdown-pop"
+            style={{
+              // position: fixed so ancestor stacking contexts (the
+              // adjacent .glass section's backdrop-filter layer) can't
+              // occlude us. `z-[1000]` keeps us above everything.
+              position: 'fixed',
+              top: coords.top,
+              left: coords.left,
+              zIndex: 1000,
+            }}
+          >
+            <div className="error-breakdown-head">Failures by reason</div>
+            <ul className="error-breakdown-list">
+              {breakdown.map(([msg, n]) => (
+                <li key={msg}>
+                  <span className="error-breakdown-count">{n}</span>
+                  <span className="error-breakdown-msg">{msg}</span>
+                </li>
+              ))}
+            </ul>
+          </div>,
+          document.body,
+        )}
     </span>
   );
 }
