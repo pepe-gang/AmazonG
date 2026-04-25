@@ -267,7 +267,22 @@ export function JobsTable({
       }
     };
     filtered.sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
-    return filtered;
+    // Pin in-flight rows to the very top, independent of the user's
+    // sort. Two buckets get pinned, in this order:
+    //   1. `in_progress` — worker is actively driving Playwright now
+    //   2. `queued`      — BG has the job, worker hasn't claimed yet
+    // Partition is stable so the user's chosen sort still applies
+    // within each group. The Active jobs panel above the table
+    // surfaces the same set with phase pills + live elapsed timers.
+    const inProgress: JobAttempt[] = [];
+    const queued: JobAttempt[] = [];
+    const rest: JobAttempt[] = [];
+    for (const a of filtered) {
+      if (a.status === 'in_progress') inProgress.push(a);
+      else if (a.status === 'queued') queued.push(a);
+      else rest.push(a);
+    }
+    return inProgress.concat(queued, rest);
   }, [attempts, sortKey, sortDir, visibleStatusGroups, accountFilter, search]);
 
   const onSort = (key: SortKey) => {

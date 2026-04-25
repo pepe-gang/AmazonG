@@ -43,9 +43,11 @@ import {
   UsersIcon,
 } from './components/icons.js';
 import { useConfirm } from './components/ConfirmDialog.js';
-import { JobsTable } from './components/JobsTable.js';
 import { LogsView } from './pages/Logs.js';
 import { AccountsView } from './pages/Accounts.js';
+import { PurchasesView } from './pages/Purchases.js';
+import { SettingsView } from './pages/Settings.js';
+import { AccountStatsCard } from './components/AccountStatsCard.js';
 
 const SETUP_GUIDE_URL = 'https://betterbg.vercel.app/dashboard/auto-buy';
 
@@ -418,6 +420,26 @@ function MainShell({ status }: { status: RendererStatus }) {
                   <AccountsView
                     profiles={profiles}
                     workerRunning={status.running}
+                  />
+                }
+              />
+              <Route
+                path="/purchases"
+                element={
+                  <PurchasesView
+                    attempts={attempts}
+                    profiles={profiles}
+                    workerRunning={status.running}
+                    onViewLogs={setLogsAttempt}
+                  />
+                }
+              />
+              <Route
+                path="/settings"
+                element={
+                  <SettingsView
+                    profiles={profiles}
+                    workerRunning={status.running}
                     identity={status.identity}
                   />
                 }
@@ -534,11 +556,11 @@ function DashboardView(props: {
   const fmt = (n: number) => `${n >= 0 ? '+' : '−'}$${Math.abs(n).toFixed(2)}`;
 
   return (
-    // No `overflow-hidden` here — the inner Jobs section has its own
-    // scroll container (`.jobs-table-wrap`) and clipping this wrapper
-    // also clips absolute-positioned popovers anchored to the stat
-    // tiles above (e.g. FailedErrorPopover).
-    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0">
+    // No `overflow-hidden` here — clipping this wrapper also clips
+    // absolute-positioned popovers anchored to the stat tiles (e.g.
+    // FailedErrorPopover). The full purchases table + active-jobs
+    // panel live on the /purchases tab now.
+    <div className="flex flex-1 flex-col gap-3 p-5 min-h-0 overflow-auto">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <StatCard
           icon={<BoltIcon />}
@@ -610,14 +632,7 @@ function DashboardView(props: {
         />
       </div>
 
-      <section className="glass flex flex-1 min-h-0 flex-col overflow-hidden">
-        <JobsTable
-          attempts={attempts}
-          profiles={profiles}
-          onViewLogs={onViewLogs}
-          workerRunning={status.running}
-        />
-      </section>
+      <AccountStatsCard attempts={attempts} profiles={profiles} />
     </div>
   );
 }

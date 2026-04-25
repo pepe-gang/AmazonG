@@ -1,5 +1,5 @@
 import * as React from "react";
-import { LayoutDashboard, Users, Tag, Settings2, Zap } from "lucide-react";
+import { LayoutDashboard, Users, Tag, Settings, ShoppingBag, Zap } from "lucide-react";
 
 import { NavMain } from "@/components/nav-main";
 import {
@@ -12,21 +12,18 @@ import {
 } from "@/components/ui/sidebar";
 
 /**
- * AmazonG's three top-level nav targets. Mirrors Bestie's pattern but
- * folded to AmazonG's scope: a dashboard (jobs + status), Amazon
- * profiles, and settings. Logs are opened as a dialog from the jobs
- * table, not a nav destination.
+ * AmazonG's top-level nav targets. Logs are opened as a dialog from
+ * the jobs table, not a nav destination. Settings split out of
+ * Accounts so the Accounts page is just per-account management and
+ * global toggles live behind their own tab.
  */
 const navItems = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
+  { title: "Purchases", url: "/purchases", icon: ShoppingBag },
   { title: "Deals",     url: "/deals",     icon: Tag },
   { title: "Accounts",  url: "/accounts",  icon: Users },
+  { title: "Settings",  url: "/settings",  icon: Settings },
 ];
-// Intentionally no `Settings` item yet — AccountsView still bundles the
-// settings panels with the accounts list. A later phase splits them
-// and this import is ready to add the entry: { title: "Settings", url:
-// "/settings", icon: Settings2 }.
-void Settings2;
 
 export function AppSidebar({ version, ...props }: React.ComponentProps<typeof Sidebar> & { version?: string }) {
   return (

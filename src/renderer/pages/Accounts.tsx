@@ -1,24 +1,23 @@
 import { useEffect, useState } from 'react';
-import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
-import type { AmazonProfile, RendererStatus } from '../../shared/types.js';
-import { SNAPSHOT_ERROR_GROUPS } from '../../shared/snapshotGroups.js';
+import type { AmazonProfile } from '../../shared/types.js';
 import { useSettings } from '../hooks/useSettings.js';
 import { useConfirm } from '../components/ConfirmDialog.js';
 import { PencilIcon, PlusIcon, UsersIcon } from '../components/icons.js';
-import { formatBytes, formatDate, relDate, shortEmail } from '../lib/format.js';
+import { relDate, shortEmail } from '../lib/format.js';
 
 /* ============================================================
    Accounts view (full page)
+   Per-account management lives here. Global toggles (live mode,
+   prefixes, headless default, auto-start, snapshots, BG link) moved
+   to the Settings page.
    ============================================================ */
 export function AccountsView({
   profiles,
   workerRunning,
-  identity,
 }: {
   profiles: AmazonProfile[];
   workerRunning: boolean;
-  identity: RendererStatus['identity'];
 }) {
   const [lockedToast, setLockedToast] = useState(false);
   const handleLockedClick = () => {
@@ -34,8 +33,8 @@ export function AccountsView({
         >
           <span>🔒</span>
           <span>
-            Account settings are locked while the worker is running. Click <b>Stop</b> in the
-            header to edit accounts, prefixes, or headless mode.
+            Account changes are locked while the worker is running. Click <b>Stop</b> in the
+            header to add, remove, or sign in to accounts.
           </span>
         </div>
       )}
@@ -55,165 +54,14 @@ export function AccountsView({
           handleLockedClick();
         }}
       >
-        <LiveModePanel />
-        <AllowedPrefixesPanel />
-        <HeadlessTogglePanel profiles={profiles} />
-        <AutoStartWorkerPanel />
         <BuyWithFillersPanel />
-        <SnapshotSettingsPanel />
         <AccountsList profiles={profiles} />
-        <BetterBGConnectionPanel identity={identity} workerRunning={workerRunning} />
       </div>
       {lockedToast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 glass-strong px-4 py-2 text-sm rounded-full shadow-lg z-50" role="status">
-          Stop the worker first — settings can't be changed while jobs are polling.
+          Stop the worker first — accounts can't be changed while jobs are polling.
         </div>
       )}
-    </div>
-  );
-}
-
-/* ============================================================
-   Dry-run banner (toggle)
-   ============================================================ */
-function LiveModePanel() {
-  const { settings, busy, update } = useSettings();
-  if (!settings) return null;
-  const live = !settings.buyDryRun;
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Live mode</div>
-          <div className="prefix-sub">
-            When on, real Amazon orders are placed. When off, dry-run — runs the full flow
-            (including saved-address mutations like BG1/BG2) but stops before clicking Place Order.
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={live ? 'Real orders will be placed' : 'Dry-run — no orders placed'}
-        >
-          <Switch
-            checked={live}
-            onCheckedChange={(v) => void update({ buyDryRun: !v })}
-            disabled={busy}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {live ? 'On' : 'Off'}
-          </span>
-        </label>
-      </div>
-    </div>
-  );
-}
-
-/**
- * BetterBG identity + disconnect action. Moved out of the header so
- * the glass top chrome stays focused on worker state (Start/Stop,
- * uptime) and irreversible "detach this device" lives with the other
- * settings. Uses ConfirmDialog for the "really disconnect?" prompt so
- * it matches the glass look of everything else.
- */
-function BetterBGConnectionPanel({
-  identity,
-  workerRunning,
-}: {
-  identity: RendererStatus['identity'];
-  workerRunning: boolean;
-}) {
-  const [busy, setBusy] = useState(false);
-  const { confirm, dialog: confirmDialog } = useConfirm();
-
-  const startDisconnect = () => {
-    confirm({
-      title: 'Disconnect from BetterBG?',
-      message:
-        'The saved Secret Key is removed and this device stops claiming jobs. You\'ll need to paste the key again to reconnect. Your Amazon profiles + their saved sessions are untouched.',
-      confirmLabel: 'Disconnect',
-      danger: true,
-      onConfirm: async () => {
-        setBusy(true);
-        try {
-          await window.autog.identityDisconnect();
-        } finally {
-          setBusy(false);
-        }
-      },
-    });
-  };
-
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div className="min-w-0">
-          <div className="prefix-title">BetterBG connection</div>
-          <div className="prefix-sub">
-            This device is linked to {identity?.userEmail ?? 'your BetterBG account'} via a
-            saved Secret Key. The worker uses that key to claim jobs. Disconnect to unlink
-            the device — you can re-paste the key later to reconnect.
-          </div>
-          {identity?.last4 && (
-            <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-              <span className="uppercase tracking-wider text-[10px]">Key</span>
-              <span className="font-mono text-foreground/70">…{identity.last4}</span>
-              {identity.keyCreatedAt && (
-                <>
-                  <span className="text-muted-foreground/60">·</span>
-                  <span>added {formatDate(identity.keyCreatedAt)}</span>
-                </>
-              )}
-            </div>
-          )}
-        </div>
-        <Button
-          variant="destructive"
-          size="sm"
-          onClick={startDisconnect}
-          disabled={busy || workerRunning}
-          title={
-            workerRunning
-              ? 'Stop the worker first — can\'t disconnect while jobs are polling'
-              : 'Unlink this device from BetterBG'
-          }
-        >
-          Disconnect
-        </Button>
-      </div>
-      {confirmDialog}
-    </div>
-  );
-}
-
-function AutoStartWorkerPanel() {
-  const { settings, busy, update } = useSettings();
-  if (!settings) return null;
-  const on = settings.autoStartWorker;
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Auto-start worker</div>
-          <div className="prefix-sub">
-            When on, the polling worker starts as soon as AmazonG launches (assuming you're
-            connected to BetterBG). Pairs well with leaving the app running in the background —
-            you don't have to click Start every time.
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Worker starts on launch' : 'Worker waits for you to click Start'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={(v) => void update({ autoStartWorker: v })}
-            disabled={busy}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {on ? 'On' : 'Off'}
-          </span>
-        </label>
-      </div>
     </div>
   );
 }
@@ -248,263 +96,6 @@ function BuyWithFillersPanel() {
           </span>
         </label>
       </div>
-    </div>
-  );
-}
-
-function SnapshotSettingsPanel() {
-  const { settings, busy, update } = useSettings();
-  const [diskUsage, setDiskUsage] = useState<{ count: number; bytes: number } | null>(null);
-  const [clearing, setClearing] = useState(false);
-
-  useEffect(() => {
-    void window.autog.snapshotsDiskUsage().then(setDiskUsage);
-  }, []);
-
-  const clearSnapshots = async () => {
-    if (!confirm('Delete all snapshot files (screenshots, HTML, traces)? Job history and logs are kept.')) return;
-    setClearing(true);
-    try {
-      await window.autog.snapshotsClearAll();
-      setDiskUsage({ count: 0, bytes: 0 });
-    } finally {
-      setClearing(false);
-    }
-  };
-
-  if (!settings) return null;
-  const on = settings.snapshotOnFailure;
-  const groups = settings.snapshotGroups ?? [];
-  const allSelected = groups.length === 0;
-
-  const toggleGroup = (id: string) => {
-    if (allSelected) {
-      // Switching from "all" to specific: select everything except the one we're toggling off
-      const next = SNAPSHOT_ERROR_GROUPS.map((g) => g.id).filter((g) => g !== id);
-      void update({ snapshotGroups: next });
-    } else if (groups.includes(id)) {
-      const next = groups.filter((g) => g !== id);
-      void update({ snapshotGroups: next });
-    } else {
-      // If adding this would select all, go back to empty (= all)
-      const next = [...groups, id];
-      if (next.length >= SNAPSHOT_ERROR_GROUPS.length) {
-        void update({ snapshotGroups: [] });
-      } else {
-        void update({ snapshotGroups: next });
-      }
-    }
-  };
-
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Capture snapshots on failure</div>
-          <div className="prefix-sub">
-            When on, AmazonG saves a screenshot and HTML snapshot of the page whenever a checkout
-            error occurs. Snapshots appear in the log viewer for debugging. Stored locally, cleaned
-            up automatically after 30 days.
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Snapshots enabled' : 'Snapshots disabled'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={(v) => void update({ snapshotOnFailure: v })}
-            disabled={busy}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {on ? 'On' : 'Off'}
-          </span>
-        </label>
-      </div>
-      {on && (
-        <div className="snapshot-groups">
-          <div className="snapshot-groups-head">
-            <span className="prefix-sub">Capture errors:</span>
-            <button
-              className="ghost-btn snapshot-all-btn"
-              onClick={() => void update({ snapshotGroups: [] })}
-              disabled={busy || allSelected}
-            >
-              {allSelected ? 'All selected' : 'Select all'}
-            </button>
-          </div>
-          <div className="snapshot-group-list">
-            {SNAPSHOT_ERROR_GROUPS.map((g) => {
-              const checked = allSelected || groups.includes(g.id);
-              return (
-                <label key={g.id} className="snapshot-group-item">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleGroup(g.id)}
-                    disabled={busy}
-                  />
-                  <span>{g.label}</span>
-                </label>
-              );
-            })}
-          </div>
-        </div>
-      )}
-      {diskUsage && diskUsage.count > 0 && (
-        <div className="snapshot-disk">
-          <span className="snapshot-disk-label">
-            {diskUsage.count} snapshot{diskUsage.count !== 1 ? 's' : ''} · {formatBytes(diskUsage.bytes)}
-          </span>
-          <button
-            className="ghost-btn snapshot-clear-btn"
-            onClick={() => void clearSnapshots()}
-            disabled={clearing}
-          >
-            {clearing ? 'Clearing…' : 'Clear all snapshots'}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function HeadlessTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
-  const { settings, busy, update } = useSettings();
-  const [applying, setApplying] = useState(false);
-  if (!settings) return null;
-  // Master toggle state is derived from the per-profile switches. When
-  // there are no profiles yet, fall back to the global default so the user
-  // sees a non-empty state.
-  const on =
-    profiles.length > 0
-      ? profiles.every((p) => p.headless !== false)
-      : settings.headless;
-  const toggle = async () => {
-    const next = !on;
-    setApplying(true);
-    try {
-      // Serialize the per-profile writes — the main-side updateProfile
-      // reads + writes profiles.json, so running them in parallel
-      // clobbers state (last writer wins). Sequential keeps every update.
-      for (const p of profiles) {
-        await window.autog.profilesSetHeadless(p.email, next);
-      }
-      await update({ headless: next });
-    } finally {
-      setApplying(false);
-    }
-  };
-  const anyOff = profiles.some((p) => p.headless === false);
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Headless mode</div>
-          <div className="prefix-sub">
-            When enabled, every account runs Amazon checkouts in hidden Chromium windows. Flip
-            any individual account below to Visible and this master switch turns off automatically.
-            Takes effect on the next worker Start.
-            {anyOff && profiles.length > 0 && (
-              <>
-                {' '}
-                <span className="muted">
-                  ({profiles.filter((p) => p.headless === false).length} of {profiles.length}{' '}
-                  currently visible)
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Headless: all accounts run hidden' : 'At least one account is set to Visible'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={() => void toggle()}
-            disabled={busy || applying}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
-            {on ? 'Headless' : 'Visible'}
-          </span>
-        </label>
-      </div>
-    </div>
-  );
-}
-
-function AllowedPrefixesPanel() {
-  const { settings, busy, update } = useSettings();
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState('');
-  useEffect(() => {
-    if (settings) setDraft(settings.allowedAddressPrefixes.join(', '));
-  }, [settings]);
-
-  const save = async () => {
-    const list = draft
-      .split(',')
-      .map((p) => p.trim())
-      .filter((p) => p.length > 0);
-    await update({ allowedAddressPrefixes: list });
-    setEditing(false);
-  };
-
-  if (!settings) return null;
-
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Allowed House-Number Prefixes</div>
-          <div className="prefix-sub">
-            Checkout only proceeds if the Amazon delivery address's street line starts with one of
-            these house numbers (e.g. <code>13132</code> matches{' '}
-            <code>13132 NE Portland Way</code>). If the current address doesn't match, AmazonG
-            opens the picker and selects the matching saved address.
-          </div>
-        </div>
-        {!editing && (
-          <button className="ghost-btn" onClick={() => setEditing(true)}>
-            Edit
-          </button>
-        )}
-      </div>
-      {editing ? (
-        <div className="prefix-edit">
-          <input
-            type="text"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="13132, 13130, 1146"
-          />
-          <button className="primary-action" onClick={() => void save()} disabled={busy}>
-            Save
-          </button>
-          <button
-            className="ghost-btn"
-            onClick={() => {
-              setEditing(false);
-              setDraft(settings.allowedAddressPrefixes.join(', '));
-            }}
-          >
-            Cancel
-          </button>
-        </div>
-      ) : (
-        <div className="prefix-chips">
-          {settings.allowedAddressPrefixes.length === 0 ? (
-            <span className="prefix-empty">None — address verification is off</span>
-          ) : (
-            settings.allowedAddressPrefixes.map((p) => (
-              <span key={p} className="prefix-chip">
-                {p}
-              </span>
-            ))
-          )}
-        </div>
-      )}
     </div>
   );
 }
