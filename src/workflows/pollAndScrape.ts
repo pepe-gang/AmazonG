@@ -1237,22 +1237,25 @@ async function resolveRolloverAttemptRow(
   profileEmail: string,
   phase: 'verify' | 'fetch_tracking',
 ): Promise<string> {
-  const buyAttemptId = job.buyJobId
-    ? makeAttemptId(job.buyJobId, profileEmail)
-    : null;
+  // Always key the rollover row by the BUY job's id (buyJobId + email)
+  // so listMergedAttempts unifies with the server's AutoBuyPurchase row
+  // (which BG keys by buyJobId + email). Keying by job.id — the verify
+  // / fetch_tracking AutoBuyJob's id — fragments the table: the local
+  // row never merges, leaving stale qty=job.quantity (BG-requested) and
+  // cashbackPct=null in the display while the real values sit on the
+  // unmerged server row.
+  const rolloverJobId = job.buyJobId ?? job.id;
+  const attemptId = makeAttemptId(rolloverJobId, profileEmail);
 
-  if (buyAttemptId) {
-    const bumped = await deps.jobAttempts
-      .update(buyAttemptId, { status: 'in_progress', error: null })
-      .catch(() => null);
-    if (bumped) return buyAttemptId;
-  }
+  const bumped = await deps.jobAttempts
+    .update(attemptId, { status: 'in_progress', error: null })
+    .catch(() => null);
+  if (bumped) return attemptId;
 
-  const attemptId = makeAttemptId(job.id, profileEmail);
   await deps.jobAttempts
     .create({
       attemptId,
-      jobId: job.id,
+      jobId: rolloverJobId,
       amazonEmail: profileEmail,
       phase,
       dealKey: job.dealKey,
