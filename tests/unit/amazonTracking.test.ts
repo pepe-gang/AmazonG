@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -6,6 +6,7 @@ import {
   shipTrackLinksFor,
   trackingIdFromShipTrack,
 } from '@parsers/amazonTracking';
+import { createBGClient } from '@bg/client';
 
 function docOf(html: string): Document {
   return new JSDOM(html).window.document;
@@ -215,5 +216,106 @@ describe('Track page — Arriving (progress bar, no tracking ID)', () => {
 
   it('reflects the orderId scoped to this fixture (sanity)', () => {
     expect(html).toContain(`orderID=${orderId}`);
+  });
+});
+
+/**
+ * Track page — "Shipped with USPS" / tracking ID issued. Real fixture
+ * captured from a live in-transit order. Full-flow test: parse the
+ * page → extract the carrier tracking code → drive bgClient.writeTracking
+ * with the parsed values and assert the BG endpoint was hit with the
+ * correct profile (amazonEmail) and trackingIds payload.
+ *
+ * The point of this test is to lock in the contract between the parser
+ * and the BG-side auto-submit hook. The BG server resolves the buyinggroup
+ * routing via AmazonAccount.bgAccountId keyed on (userId, amazonEmail) —
+ * so as long as AmazonG hits POST /api/autog/purchases/tracking with the
+ * right amazonEmail + trackingIds, the BG side handles forwarding to
+ * buyinggroup.com under the right profile.
+ */
+describe('Track page — In-transit (tracking ID issued)', () => {
+  const html = fixture('track/in-transit-with-tracking.html');
+  const doc = docOf(html);
+  const orderId = '111-0626654-9453031';
+  const expectedTrackingId = '9361289716363403821530';
+
+  it('trackingIdFromShipTrack reads the USPS code from .pt-delivery-card-trackingId', () => {
+    expect(trackingIdFromShipTrack(doc)).toBe(expectedTrackingId);
+  });
+
+  it('reflects the orderId + trackingId on the fixture (sanity)', () => {
+    // The page-state JSON carries both — confirms the fixture wasn't
+    // truncated mid-capture and the parser is reading the same code
+    // Amazon's own widget sees.
+    expect(html).toContain(`"orderId":"${orderId}"`);
+    expect(html).toContain(`"trackingId":"${expectedTrackingId}"`);
+  });
+
+  describe('end-to-end → BG writeTracking', () => {
+    beforeEach(() => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, updated: 1, bgSubmission: { status: 'submitted', bgAccountId: 'bg_abc' } }),
+      });
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('posts the parsed tracking ID to BG scoped to the right Amazon profile', async () => {
+      // Drive the actual chain a worker would: parse the fixture for the
+      // tracking ID, then hand it to the BG client. The amazonEmail is
+      // the profile key — that's what BG's auto-submit hook uses to
+      // resolve which BGAccount to forward to.
+      const trackingId = trackingIdFromShipTrack(doc);
+      expect(trackingId).toBe(expectedTrackingId);
+
+      const client = createBGClient('https://bg.test', 'apikey-xyz');
+      await client.writeTracking('job-123', 'shopper@example.com', [trackingId!], 1);
+
+      const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('https://bg.test/api/autog/purchases/tracking');
+      expect(init.method).toBe('POST');
+
+      // Authed under the AutoG bearer token — BG's authAutoG resolves
+      // userId from this, and userId + amazonEmail is the routing key.
+      const headers = init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe('Bearer apikey-xyz');
+      expect(headers['Content-Type']).toBe('application/json');
+
+      // Body carries the profile (amazonEmail), the parsed tracking
+      // code, and the purchasedCount opportunistic heal. Anything more
+      // would be over-specifying — anything less and BG's auto-submit
+      // wouldn't know which buyinggroup.com account to forward to.
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({
+        jobId: 'job-123',
+        amazonEmail: 'shopper@example.com',
+        trackingIds: [expectedTrackingId],
+        purchasedCount: 1,
+      });
+    });
+
+    it('omits purchasedCount when not provided (avoids clobbering BG-side counts)', async () => {
+      // Pre-0.5.5 healed rows aside, normal fetch_tracking passes shouldn't
+      // overwrite the server's authoritative purchasedCount — only send
+      // it when the caller explicitly opts in.
+      const client = createBGClient('https://bg.test', 'apikey-xyz');
+      await client.writeTracking('job-456', 'shopper@example.com', [expectedTrackingId]);
+
+      const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(init.body as string);
+      expect(body).not.toHaveProperty('purchasedCount');
+      expect(body).toEqual({
+        jobId: 'job-456',
+        amazonEmail: 'shopper@example.com',
+        trackingIds: [expectedTrackingId],
+      });
+    });
   });
 });
