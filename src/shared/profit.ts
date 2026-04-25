@@ -42,7 +42,14 @@ export function retailPrice(a: JobAttempt): number | null {
  * profit for a row whose outcome isn't final.
  */
 export function computeProfit(a: JobAttempt): number | null {
-  if (a.status !== 'verified') return null;
+  // Both 'verified' (AmazonG-local terminology after the verify-phase
+  // pass succeeds) and 'completed' (BG's terminology for the same final
+  // state, persisted on AutoBuyPurchase.status and what comes back via
+  // listMergedAttempts) count as the success terminal. The two
+  // vocabularies exist for historical reasons; until the BG-side enum
+  // is unified to AmazonG's, treat both as Success here so server-merged
+  // rows aren't silently excluded from profit totals.
+  if (a.status !== 'verified' && a.status !== 'completed') return null;
   const retail = retailPrice(a);
   const payout = typeof a.price === 'number' ? a.price : null;
   const qty = typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : null;

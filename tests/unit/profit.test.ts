@@ -117,12 +117,22 @@ describe('computeProfit', () => {
     'queued',
     'in_progress',
     'awaiting_verification',
-    'completed',
     'cancelled_by_amazon',
     'failed',
     'dry_run_success',
-  ])('returns null for status=%s (only verified counts)', (status) => {
+  ])('returns null for status=%s (non-success terminal)', (status) => {
     expect(computeProfit(attempt({ status }))).toBeNull();
+  });
+
+  it('counts profit for status=completed (BG terminology — same final state as verified)', () => {
+    // BG persists the post-verify success terminal as 'completed', and
+    // listMergedAttempts lets server status win on the merge. Without
+    // this, every server-merged success row would be silently excluded
+    // from the all-time profit total.
+    const p = computeProfit(
+      attempt({ status: 'completed', price: 110, cost: '$100.00', cashbackPct: 5, quantity: 1 }),
+    );
+    expect(p).toBeCloseTo(15, 10);
   });
 
   it('returns null when payout (price) is missing', () => {
