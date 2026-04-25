@@ -133,9 +133,9 @@ export type JobStatusReport = {
 };
 
 export type FetchTrackingOutcome =
-  | { kind: 'tracked'; trackingIds: string[] }
-  | { kind: 'partial'; trackingIds: string[] }
-  | { kind: 'not_shipped' }
+  | { kind: 'tracked'; trackingIds: string[]; paymentRevisionRequired?: boolean }
+  | { kind: 'partial'; trackingIds: string[]; paymentRevisionRequired?: boolean }
+  | { kind: 'not_shipped'; paymentRevisionRequired?: boolean }
   | { kind: 'retry'; reason: 'verify_error' | 'verify_timeout' }
   | { kind: 'cancelled'; reason: string };
 

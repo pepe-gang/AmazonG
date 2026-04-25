@@ -29,7 +29,7 @@ function fixture(name: string): string {
  */
 describe('countActiveCartDeleteButtons (cart fixture)', () => {
   it('counts exactly the 10 Active-Cart delete buttons', () => {
-    const doc = docOf(fixture('cart-mixed-active-saved.html'));
+    const doc = docOf(fixture('cart/mixed-active-saved.html'));
     expect(countActiveCartDeleteButtons(doc)).toBe(10);
   });
 
@@ -37,7 +37,7 @@ describe('countActiveCartDeleteButtons (cart fixture)', () => {
     // Sanity: the page has 20 delete buttons in total (10 Active + 10 Saved).
     // The parser must only count Active. If this ever equals 20, the
     // clearCart loop would wipe out items the user parked for later.
-    const doc = docOf(fixture('cart-mixed-active-saved.html'));
+    const doc = docOf(fixture('cart/mixed-active-saved.html'));
     const totalDeletes = doc.querySelectorAll('input[value="Delete"]').length;
     expect(totalDeletes).toBe(20);
     expect(countActiveCartDeleteButtons(doc)).toBe(10);
@@ -66,14 +66,14 @@ describe('isTargetInActiveCart (cart fixture)', () => {
   const TARGET_ABSENT = 'B0XXXXXXXX';
 
   it('returns true when ASIN is in the Active section', () => {
-    const doc = docOf(fixture('cart-mixed-active-saved.html'));
+    const doc = docOf(fixture('cart/mixed-active-saved.html'));
     expect(isTargetInActiveCart(doc, TARGET_ACTIVE_ONLY)).toBe(true);
   });
 
   it('returns true when ASIN is in BOTH Active and Saved — scoped hit still counts', () => {
     // The MacBook is in both sections. The function must find it via
     // the Active scope, not "anywhere on the page".
-    const doc = docOf(fixture('cart-mixed-active-saved.html'));
+    const doc = docOf(fixture('cart/mixed-active-saved.html'));
     expect(isTargetInActiveCart(doc, TARGET_IN_BOTH)).toBe(true);
   });
 
@@ -81,17 +81,17 @@ describe('isTargetInActiveCart (cart fixture)', () => {
     // This is the test that protects against "user saved the item for
     // later → Buy Now step was skipped → no target actually in cart at
     // checkout → 0% cashback charge" bugs.
-    const doc = docOf(fixture('cart-mixed-active-saved.html'));
+    const doc = docOf(fixture('cart/mixed-active-saved.html'));
     expect(isTargetInActiveCart(doc, TARGET_SAVED_ONLY)).toBe(false);
   });
 
   it('returns false for an ASIN that does not exist on the page', () => {
-    const doc = docOf(fixture('cart-mixed-active-saved.html'));
+    const doc = docOf(fixture('cart/mixed-active-saved.html'));
     expect(isTargetInActiveCart(doc, TARGET_ABSENT)).toBe(false);
   });
 
   it('returns true (any-row fallback) when asin is null and Active has items', () => {
-    const doc = docOf(fixture('cart-mixed-active-saved.html'));
+    const doc = docOf(fixture('cart/mixed-active-saved.html'));
     expect(isTargetInActiveCart(doc, null)).toBe(true);
   });
 
@@ -138,7 +138,7 @@ describe('clearCart logical walkthrough (cart fixture)', () => {
   // counts 10 deletions to perform, and the count monotonically drops
   // to 0 as each Active row is removed from the DOM.
   it('reports 10 → 0 as Active rows are removed one-by-one', () => {
-    const doc = docOf(fixture('cart-mixed-active-saved.html'));
+    const doc = docOf(fixture('cart/mixed-active-saved.html'));
     const counts: number[] = [];
     for (let i = 0; i < 12; i++) {
       counts.push(countActiveCartDeleteButtons(doc));
@@ -163,7 +163,7 @@ describe('clearCart logical walkthrough (cart fixture)', () => {
   });
 
   it('leaves Saved-for-Later untouched after Active is emptied', () => {
-    const doc = docOf(fixture('cart-mixed-active-saved.html'));
+    const doc = docOf(fixture('cart/mixed-active-saved.html'));
     const savedBefore = doc.querySelectorAll(
       '[data-name="Saved Cart"] [data-asin]',
     ).length;

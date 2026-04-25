@@ -174,6 +174,38 @@ export function isVerifyCardChallenge(doc: Document): boolean {
   return headings.some((h) => VERIFY_CARD_HEADING_RE.test(h.textContent ?? ''));
 }
 
+/**
+ * "Payment revision needed" detector for Amazon's order-details page.
+ * When the customer's payment method failed (declined card, expired
+ * card, etc.) Amazon doesn't cancel the order — it parks it in a
+ * "needs payment revision" state with a Revise Payment button. The
+ * order remains active and CAN proceed once the customer fixes
+ * payment, so verifyOrder still classifies it as `active`. This
+ * detector exists so the worker can emit a *warning* log alongside
+ * the active outcome, surfacing the issue in the row's logs without
+ * changing the buy / verify / fetch_tracking flow.
+ *
+ * AND of two signals to avoid false positives:
+ *   1) the heading text "Payment revision needed" (not just
+ *      "Payment" in unrelated copy)
+ *   2) a Revise Payment link / URL pointing at /revisepayments/...
+ *
+ * Both must be present. Either alone is too weak — random help-page
+ * copy can mention "payment revision", and the URL slug shows up in
+ * other contexts. The pair is specific to the actual interstitial.
+ */
+export const PAYMENT_REVISION_HEADING_RE = /payment\s+revision\s+needed/i;
+export const REVISE_PAYMENT_HREF_RE = /\/revisepayments?\b/i;
+
+export function isPaymentRevisionRequired(doc: Document): boolean {
+  const text = doc.body?.textContent ?? '';
+  if (!PAYMENT_REVISION_HEADING_RE.test(text)) return false;
+  const reviseLink = Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href]')).some(
+    (a) => REVISE_PAYMENT_HREF_RE.test(a.getAttribute('href') ?? ''),
+  );
+  return reviseLink;
+}
+
 /** Shared title-prefix builder. Chewbacca's /spc strips ASINs from the DOM,
  *  so target-row lookups fall back to matching the product title. First
  *  ~40 chars is usually unique; strip quotes/backslashes so the substring

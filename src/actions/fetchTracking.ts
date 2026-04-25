@@ -36,12 +36,16 @@ export async function fetchTracking(
 
   // verify.kind === 'active' — the page is on order-details. Enumerate
   // ship-track links scoped to THIS order (list pages leak other orders).
+  // Propagate verifyOrder's paymentRevisionRequired flag through every
+  // active-derived outcome so the worker can emit the warning whether we
+  // end up with no shipments, partial codes, or full coverage.
+  const paymentRevisionRequired = verify.paymentRevisionRequired === true;
   const html = await page.content();
   const orderDoc = new JSDOM(html).window.document;
   const urls = shipTrackLinksFor(orderDoc, orderId);
 
   if (urls.length === 0) {
-    return { kind: 'not_shipped' };
+    return { kind: 'not_shipped', ...(paymentRevisionRequired ? { paymentRevisionRequired } : {}) };
   }
 
   const trackingIds: string[] = [];
@@ -59,12 +63,12 @@ export async function fetchTracking(
     // Every ship-track link existed but none surfaced a code — treat as
     // not_shipped (Amazon sometimes renders the Track button before the
     // carrier has issued a label).
-    return { kind: 'not_shipped' };
+    return { kind: 'not_shipped', ...(paymentRevisionRequired ? { paymentRevisionRequired } : {}) };
   }
   if (missing > 0) {
-    return { kind: 'partial', trackingIds };
+    return { kind: 'partial', trackingIds, ...(paymentRevisionRequired ? { paymentRevisionRequired } : {}) };
   }
-  return { kind: 'tracked', trackingIds };
+  return { kind: 'tracked', trackingIds, ...(paymentRevisionRequired ? { paymentRevisionRequired } : {}) };
 }
 
 async function readTrackingId(page: Page, url: string): Promise<string | null> {

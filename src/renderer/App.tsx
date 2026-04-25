@@ -229,14 +229,16 @@ function MainShell({ status }: { status: RendererStatus }) {
   const [attempts, setAttempts] = useState<JobAttempt[]>([]);
   const [busy, setBusy] = useState(false);
   const [appVersion, setAppVersion] = useState<string>('');
-  const [updateInfo, setUpdateInfo] = useState<{ latest: string } | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<{ latest: string; downloadUrl: string | null } | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   useEffect(() => {
     void window.autog.appVersion().then(setAppVersion);
     // Check for updates on mount + every 6 hours
     const check = () => {
       void window.autog.versionCheck().then((r) => {
-        if (r.updateAvailable && r.latest) setUpdateInfo({ latest: r.latest });
+        if (r.updateAvailable && r.latest) {
+          setUpdateInfo({ latest: r.latest, downloadUrl: r.downloadUrl });
+        }
       }).catch(() => undefined);
     };
     check();
@@ -378,15 +380,16 @@ function MainShell({ status }: { status: RendererStatus }) {
                 role="status"
               >
                 <span className="flex-1">
-                  <b>AmazonG v{updateInfo.latest}</b> is available (you have v{appVersion}).
-                  Download the latest from the{' '}
+                  <b>AmazonG v{updateInfo.latest}</b> is available (you have v{appVersion}).{' '}
                   <button
                     className="underline hover:text-amber-50"
                     onClick={() =>
-                      void window.autog.openExternal('https://betterbg.vercel.app/dashboard/auto-buy')
+                      void window.autog.openExternal(
+                        updateInfo.downloadUrl ?? 'https://betterbg.vercel.app/dashboard/auto-buy',
+                      )
                     }
                   >
-                    BetterBG setup guide
+                    {updateInfo.downloadUrl ? 'Download now' : 'Open the BetterBG setup guide'}
                   </button>
                   .
                 </span>

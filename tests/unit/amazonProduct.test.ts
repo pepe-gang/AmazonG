@@ -172,7 +172,7 @@ describe('findIsPrime', () => {
   });
 
   it('rejects Prime on the real B0BFC7WQ6R fixture (badges only in used accordion)', () => {
-    const path = join(process.cwd(), 'fixtures', 'B0BFC7WQ6R.html');
+    const path = join(process.cwd(), 'fixtures', 'product', 'B0BFC7WQ6R.html');
     if (!existsSync(path)) return;
     const html = readFileSync(path, 'utf8');
     expect(findIsPrime(docOf(html))).toBe(false);
@@ -217,21 +217,21 @@ describe('findIsPrime', () => {
   });
 
   it('detects Prime on the real B0FWD1MS82 fixture (visible badge)', () => {
-    const path = join(process.cwd(), 'fixtures', 'B0FWD1MS82.html');
+    const path = join(process.cwd(), 'fixtures', 'product', 'B0FWD1MS82.html');
     if (!existsSync(path)) return;
     const html = readFileSync(path, 'utf8');
     expect(findIsPrime(docOf(html))).toBe(true);
   });
 
   it('detects Prime on the real B0DZ751XN6 fixture (#prime-badge in active buybox)', () => {
-    const path = join(process.cwd(), 'fixtures', 'B0DZ751XN6.html');
+    const path = join(process.cwd(), 'fixtures', 'product', 'B0DZ751XN6.html');
     if (!existsSync(path)) return;
     const html = readFileSync(path, 'utf8');
     expect(findIsPrime(docOf(html))).toBe(true);
   });
 
   it('rejects Prime on the real B0GQVDGCD2 fixture (icon hidden in badge-slot)', () => {
-    const path = join(process.cwd(), 'fixtures', 'B0GQVDGCD2.html');
+    const path = join(process.cwd(), 'fixtures', 'product', 'B0GQVDGCD2.html');
     if (!existsSync(path)) return;
     const html = readFileSync(path, 'utf8');
     expect(findIsPrime(docOf(html))).toBe(false);
@@ -295,7 +295,7 @@ describe('findBuyBlocker', () => {
   });
 
   it('extracts from the real B0DZ75TN5F fixture', () => {
-    const path = join(process.cwd(), 'fixtures', 'B0DZ75TN5F.html');
+    const path = join(process.cwd(), 'fixtures', 'product', 'B0DZ75TN5F.html');
     if (!existsSync(path)) return;
     const html = readFileSync(path, 'utf8');
     const got = findBuyBlocker(docOf(html));
@@ -303,7 +303,7 @@ describe('findBuyBlocker', () => {
   });
 
   it('extracts from B0CD1JTBSC even though the widget is active=false', () => {
-    const path = join(process.cwd(), 'fixtures', 'B0CD1JTBSC.html');
+    const path = join(process.cwd(), 'fixtures', 'product', 'B0CD1JTBSC.html');
     if (!existsSync(path)) return;
     const html = readFileSync(path, 'utf8');
     const got = findBuyBlocker(docOf(html));

@@ -61,6 +61,8 @@ const bridge: AutoGBridge = {
       email: string;
       requireMinCashback: boolean;
     }>,
+  autoEnqueueStatus: () =>
+    ipcRenderer.invoke(IPC.autoEnqueueStatus) as ReturnType<AutoGBridge['autoEnqueueStatus']>,
 
   jobsList: () => ipcRenderer.invoke(IPC.jobsList) as Promise<JobAttempt[]>,
   jobsLogs: (attemptId) =>

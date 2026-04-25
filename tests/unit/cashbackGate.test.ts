@@ -113,7 +113,7 @@ describe('evaluateCashbackGate', () => {
       // strict gate (floor=6) this fails because 5 < 6; with a
       // permissive account it should pass and record 5%, so the buy
       // goes through and the dashboard reflects the actual rate.
-      const html = fixture('spc-no-cashback-line-amex.html');
+      const html = fixture('spc/no-cashback-line-amex.html');
       const doc = new JSDOM(html).window.document;
       const pageCashbackPct = findCashbackPct(doc);
       expect(pageCashbackPct).toBe(5);

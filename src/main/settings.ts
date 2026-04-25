@@ -23,6 +23,16 @@ const DEFAULTS: Settings = {
   buyWithFillers: false,
   failedHiddenBeforeTs: null,
   hiddenAttemptIds: [],
+  autoEnqueueEnabled: false,
+  autoEnqueueIntervalHours: 24,
+  autoEnqueueShipToFilter: 'oregon',
+  // Default floor: -3.5% lets through every deal where the cashback
+  // closes most of the retail-vs-payout gap. BG-side reactor commits at
+  // -5% so this is a conservative inset that filters obvious losers
+  // without rejecting marginal deals the user might still want.
+  autoEnqueueMinMarginPct: -3.5,
+  autoEnqueueMaxPerTick: 75,
+  autoEnqueueLastRunAt: null,
 };
 
 function filePath(): string {

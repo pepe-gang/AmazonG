@@ -1,7 +1,19 @@
 import type { Page } from 'playwright';
+import { JSDOM } from 'jsdom';
+import { isPaymentRevisionRequired } from '../parsers/amazonCheckout.js';
 
 export type VerifyOrderOutcome =
-  | { kind: 'active'; orderId: string }
+  | {
+      kind: 'active';
+      orderId: string;
+      /** Amazon's payment-method charge failed and the order is parked
+       *  in a "Revise Payment" state. Order is still active and CAN
+       *  proceed once the customer fixes payment, so the outcome stays
+       *  `active`; this flag exists for the caller to emit a warning
+       *  log so the row's diagnostics surface "needs payment revision"
+       *  instead of looking quietly stuck-pending. */
+      paymentRevisionRequired?: boolean;
+    }
   | { kind: 'cancelled'; orderId: string }
   | { kind: 'timeout'; orderId: string }
   | { kind: 'error'; orderId: string; message: string };
@@ -83,5 +95,19 @@ export async function verifyOrder(
   if (result.kind === 'error') {
     return { kind: 'error', orderId, message: result.message };
   }
-  return { kind: result.kind, orderId };
+  if (result.kind !== 'active') {
+    return { kind: result.kind, orderId };
+  }
+  // Active path — also check for the "Payment revision needed" state.
+  // Amazon doesn't cancel the order when a card declines; it parks it
+  // with a Revise Payment button. Order stays `active` (it can still
+  // ship once payment is fixed), but we surface the flag so the
+  // caller can emit a warning log.
+  const html = await page.content().catch(() => null);
+  const paymentRevisionRequired = html
+    ? isPaymentRevisionRequired(new JSDOM(html).window.document)
+    : false;
+  return paymentRevisionRequired
+    ? { kind: 'active', orderId, paymentRevisionRequired: true }
+    : { kind: 'active', orderId };
 }

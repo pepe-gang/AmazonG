@@ -339,6 +339,48 @@ async function runVerifyFillerCleanup(
  * cleanup on those outcomes loses our chance to act before fillers
  * ship.
  */
+/**
+ * Resolve the buy-attempt row for a verify- or fetch_tracking-phase
+ * job and pull the filler context (filler order ids + Amazon's
+ * actual product title) that was persisted at buy time. The buy
+ * attempt is keyed by `buyJobId + email` so a verify or
+ * fetch_tracking job rolling forward against the original buy can
+ * find the right row; falls back to `activeAttemptId` when the BG
+ * payload doesn't carry a `buyJobId` (e.g. some legacy paths).
+ *
+ * Returns empty arrays / null when the row isn't on disk locally
+ * (best-effort store reads — never throws). Callers gate their
+ * cleanup work on `fillerOrderIds.length > 0`.
+ */
+/** Format the "N filler order(s) still uncancelled: id1, id2" error
+ *  fragment used in both the verify-active and verify-cancelled
+ *  paths. Returns null when nothing failed. */
+function formatUncancelledFillerError(failed: string[]): string | null {
+  if (failed.length === 0) return null;
+  return `${failed.length} filler order(s) still uncancelled: ${failed.join(', ')}`;
+}
+
+async function loadFillerBuyContext(
+  deps: Deps,
+  job: AutoGJob,
+  profileEmail: string,
+  activeAttemptId: string,
+): Promise<{
+  buyAttemptId: string;
+  fillerOrderIds: string[];
+  productTitle: string | null;
+}> {
+  const buyAttemptId = job.buyJobId
+    ? makeAttemptId(job.buyJobId, profileEmail)
+    : activeAttemptId;
+  const attempt = await deps.jobAttempts.get(buyAttemptId).catch(() => null);
+  return {
+    buyAttemptId,
+    fillerOrderIds: attempt?.fillerOrderIds ?? [],
+    productTitle: attempt?.productTitle ?? null,
+  };
+}
+
 async function runVerifyFillerCleanupSweep(
   deps: Deps,
   page: Page,
@@ -351,13 +393,12 @@ async function runVerifyFillerCleanupSweep(
   cid: string,
 ): Promise<void> {
   try {
-    const buyAttemptId = job.buyJobId
-      ? makeAttemptId(job.buyJobId, profileEmail)
-      : activeAttemptId;
-    const attemptForContext = await deps.jobAttempts
-      .get(buyAttemptId)
-      .catch(() => null);
-    const fillerOrderIds = attemptForContext?.fillerOrderIds ?? [];
+    const { fillerOrderIds } = await loadFillerBuyContext(
+      deps,
+      job,
+      profileEmail,
+      activeAttemptId,
+    );
     if (fillerOrderIds.length === 0) return;
     logger.info(
       `job.verify.${outcomeKind}.filler.cleanup.start`,
@@ -934,6 +975,21 @@ async function handleVerifyJob(
         },
         cid,
       );
+      // Surface "Payment revision needed" as a warning when Amazon
+      // parks the order awaiting a re-charge. The order is still
+      // active and the customer's row stays `verified` — this log
+      // is purely informational so View Log makes the issue visible.
+      if (outcome.paymentRevisionRequired) {
+        logger.warn(
+          'job.verify.payment_revision',
+          {
+            ...logCtx,
+            orderId: targetOrderId,
+            message: `⚠ Payment revision needed on ${targetOrderId} — Amazon will re-attempt the charge; customer can fix the payment method on amazon.com to speed it up`,
+          },
+          cid,
+        );
+      }
       await deps.jobAttempts
         .update(activeAttemptId, {
           status: 'verified',
@@ -949,16 +1005,12 @@ async function handleVerifyJob(
       // order is successfully placed regardless, we just logged what
       // went wrong with the cancellations.
       if (job.viaFiller) {
-        // Load the buy attempt to pull the stashed filler context
-        // (fillerOrderIds + productTitle) that was persisted at buy time.
-        const buyAttemptId = job.buyJobId
-          ? makeAttemptId(job.buyJobId, profile.email)
-          : activeAttemptId;
-        const attemptForContext = await deps.jobAttempts
-          .get(buyAttemptId)
-          .catch(() => null);
-        const fillerOrderIds = attemptForContext?.fillerOrderIds ?? [];
-        const productTitle = attemptForContext?.productTitle ?? null;
+        const { fillerOrderIds, productTitle } = await loadFillerBuyContext(
+          deps,
+          job,
+          profile.email,
+          activeAttemptId,
+        );
         const targetAsin = parseAsinFromUrl(job.productUrl);
         logger.info(
           'job.verify.filler.cleanup.start',
@@ -1002,11 +1054,8 @@ async function handleVerifyJob(
           !cleanup.targetOrderCleaned
         ) {
           const errorParts: string[] = [];
-          if (cleanup.fillerOrdersFailed.length > 0) {
-            errorParts.push(
-              `${cleanup.fillerOrdersFailed.length} filler order(s) still uncancelled: ${cleanup.fillerOrdersFailed.join(', ')}`,
-            );
-          }
+          const fillerError = formatUncancelledFillerError(cleanup.fillerOrdersFailed);
+          if (fillerError) errorParts.push(fillerError);
           if (!cleanup.targetOrderCleaned && cleanup.targetCleanError) {
             errorParts.push(`target-order clean failed: ${cleanup.targetCleanError}`);
           }
@@ -1058,13 +1107,12 @@ async function handleVerifyJob(
       // target is already cancelled, nothing to clean.
       let cancelledFillerError: string | null = null;
       if (job.viaFiller) {
-        const buyAttemptId = job.buyJobId
-          ? makeAttemptId(job.buyJobId, profile.email)
-          : activeAttemptId;
-        const attemptForContext = await deps.jobAttempts
-          .get(buyAttemptId)
-          .catch(() => null);
-        const fillerOrderIds = attemptForContext?.fillerOrderIds ?? [];
+        const { fillerOrderIds } = await loadFillerBuyContext(
+          deps,
+          job,
+          profile.email,
+          activeAttemptId,
+        );
         if (fillerOrderIds.length > 0) {
           logger.info(
             'job.verify.cancelled.filler.cleanup.start',
@@ -1086,8 +1134,8 @@ async function handleVerifyJob(
             },
             cid,
           );
-          if (cleanup.fillerOrdersFailed.length > 0) {
-            cancelledFillerError = `${cleanup.fillerOrdersFailed.length} filler order(s) still uncancelled: ${cleanup.fillerOrdersFailed.join(', ')}`;
+          cancelledFillerError = formatUncancelledFillerError(cleanup.fillerOrdersFailed);
+          if (cancelledFillerError !== null) {
             // Append to the row's error so the dashboard surfaces
             // both the target cancellation and any leftover fillers.
             // fillerOrderIds is left intact as the buy-time audit.
@@ -1290,13 +1338,12 @@ async function handleFetchTrackingJob(
     // (3) → verify (3) → fetch_tracking (3), the customer's exposure
     // to uncancellable fillers is minimized.
     if (job.viaFiller) {
-      const buyAttemptId = job.buyJobId
-        ? makeAttemptId(job.buyJobId, profile.email)
-        : activeAttemptId;
-      const buyAttempt = await deps.jobAttempts
-        .get(buyAttemptId)
-        .catch(() => null);
-      const fillerOrderIds = buyAttempt?.fillerOrderIds ?? [];
+      const { fillerOrderIds } = await loadFillerBuyContext(
+        deps,
+        job,
+        profile.email,
+        activeAttemptId,
+      );
       if (fillerOrderIds.length > 0) {
         logger.info(
           'job.fetchTracking.filler.cleanup.start',
@@ -1327,6 +1374,28 @@ async function handleFetchTrackingJob(
     }
 
     const outcome = await fetchTracking(fetchPage, targetOrderId);
+
+    // Hoisted ahead of the outcome dispatch so the warning fires
+    // exactly once regardless of which active-derived outcome we
+    // ended up with (tracked / partial / not_shipped). Same
+    // motivation as the verify-phase warning: surface a stuck-on-
+    // payment order in View Log without changing the outcome.
+    if (
+      (outcome.kind === 'tracked' ||
+        outcome.kind === 'partial' ||
+        outcome.kind === 'not_shipped') &&
+      outcome.paymentRevisionRequired
+    ) {
+      logger.warn(
+        'job.fetchTracking.payment_revision',
+        {
+          ...logCtx,
+          orderId: targetOrderId,
+          message: `⚠ Payment revision needed on ${targetOrderId} — Amazon will re-attempt the charge; customer can fix the payment method on amazon.com to speed it up`,
+        },
+        cid,
+      );
+    }
 
     if (outcome.kind === 'tracked') {
       logger.info(

@@ -27,6 +27,11 @@ import { BGApiError } from '../shared/errors.js';
 import { loadIdentity, saveIdentity, clearIdentity } from './identity.js';
 import { loadSettings, saveSettings } from './settings.js';
 import {
+  startAutoEnqueueScheduler,
+  stopAutoEnqueueScheduler,
+  getAutoEnqueueStatus,
+} from './autoEnqueueScheduler.js';
+import {
   loadProfiles,
   newProfile,
   removeProfile as removeProfileFn,
@@ -564,6 +569,12 @@ app.whenReady().then(async () => {
     });
   }
 
+  // Background scheduler always runs while the app is open. It checks
+  // its own enabled flag inside each tick, so starting it here costs
+  // nothing when the feature is off. The getApiKey closure tracks the
+  // live `apiKey` so connect/disconnect cycles don't need to restart it.
+  startAutoEnqueueScheduler({ getApiKey: () => apiKey });
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -623,6 +634,7 @@ let quittingCleanly = false;
 app.on('before-quit', async (e) => {
   if (quittingCleanly) return;
   e.preventDefault();
+  stopAutoEnqueueScheduler();
   try {
     await closeAllChromiumSessions();
   } catch (err) {
@@ -700,16 +712,24 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.versionCheck, async () => {
     const current = app.getVersion();
-    if (!apiKey) return { updateAvailable: false, latest: null, current };
+    const platformKey =
+      process.platform === 'darwin' ? 'darwin' :
+      process.platform === 'win32' ? 'win32' :
+      process.platform === 'linux' ? 'linux' : null;
+    if (!apiKey) return { updateAvailable: false, latest: null, current, downloadUrl: null };
     try {
       const settings = await loadSettings();
       const bg = createBGClient(settings.bgBaseUrl, apiKey);
       const info = await bg.checkVersion();
-      if (!info.latestVersion) return { updateAvailable: false, latest: null, current };
+      if (!info.latestVersion) {
+        return { updateAvailable: false, latest: null, current, downloadUrl: null };
+      }
       const updateAvailable = compareSemver(info.latestVersion, current) > 0;
-      return { updateAvailable, latest: info.latestVersion, current };
+      const urls = info.downloadUrls ?? {};
+      const downloadUrl = (platformKey && urls[platformKey]) || urls.darwin || null;
+      return { updateAvailable, latest: info.latestVersion, current, downloadUrl };
     } catch {
-      return { updateAvailable: false, latest: null, current };
+      return { updateAvailable: false, latest: null, current, downloadUrl: null };
     }
   });
 
@@ -840,6 +860,8 @@ function registerIpcHandlers(): void {
       return bg.setAmazonAccountRequireMinCashback(email, requireMinCashback);
     },
   );
+
+  ipcMain.handle(IPC.autoEnqueueStatus, () => getAutoEnqueueStatus());
 
   ipcMain.handle(IPC.jobsList, () => listMergedAttempts());
   ipcMain.handle(IPC.jobsLogs, (_e, attemptId: string) => storeReadLogs(attemptId));

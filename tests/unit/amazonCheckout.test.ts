@@ -9,6 +9,7 @@ import {
   isBeforeYouGoInterstitial,
   isDeliveryOptionsChangedBanner,
   isVerifyCardChallenge,
+  isPaymentRevisionRequired,
   parseOrderConfirmation,
   findCheckoutCashbackPct,
   readTargetCashbackFromDom,
@@ -94,7 +95,7 @@ describe('parseOrderConfirmation', () => {
   });
 
   it('reads quantity from a real thankyou fixture (qty=3)', () => {
-    const doc = docOf(fixture('thankyou-106-4510031-4901860.html'));
+    const doc = docOf(fixture('thankyou/106-4510031-4901860.html'));
     const r = parseOrderConfirmation(
       doc,
       'https://www.amazon.com/gp/buy/thankyou/handlers/display.html?purchaseId=106-4510031-4901860',
@@ -103,7 +104,7 @@ describe('parseOrderConfirmation', () => {
   });
 
   it('returns null from a real thankyou fixture (qty=1, badge omitted)', () => {
-    const doc = docOf(fixture('thankyou-106-3412656-3967431-qty1.html'));
+    const doc = docOf(fixture('thankyou/106-3412656-3967431-qty1.html'));
     const r = parseOrderConfirmation(
       doc,
       'https://www.amazon.com/gp/buy/thankyou/handlers/display.html?purchaseId=106-3412656-3967431',
@@ -112,7 +113,7 @@ describe('parseOrderConfirmation', () => {
   });
 
   it('reads quantity from a real thankyou fixture (qty=5)', () => {
-    const doc = docOf(fixture('thankyou-106-9503967-6167453-qty5.html'));
+    const doc = docOf(fixture('thankyou/106-9503967-6167453-qty5.html'));
     const r = parseOrderConfirmation(
       doc,
       'https://www.amazon.com/gp/buy/thankyou/handlers/display.html?purchaseId=106-9503967-6167453',
@@ -123,7 +124,7 @@ describe('parseOrderConfirmation', () => {
 
 describe('isBeforeYouGoInterstitial', () => {
   it('detects the BYG "Need anything else?" page in a real fixture', () => {
-    const doc = docOf(fixture('spc-byg-need-anything-else.html'));
+    const doc = docOf(fixture('spc/byg-need-anything-else.html'));
     expect(isBeforeYouGoInterstitial(doc)).toBe(true);
   });
 
@@ -133,14 +134,14 @@ describe('isBeforeYouGoInterstitial', () => {
   });
 
   it('BYG_BUTTON_SELECTOR matches the Continue to checkout anchor in the fixture', () => {
-    const doc = docOf(fixture('spc-byg-need-anything-else.html'));
+    const doc = docOf(fixture('spc/byg-need-anything-else.html'));
     const btn = doc.querySelector(BYG_BUTTON_SELECTOR);
     expect(btn).not.toBeNull();
     expect((btn?.textContent ?? '').trim()).toBe('Continue to checkout');
   });
 
   it('BYG_HEADER_SELECTOR matches the page header container', () => {
-    const doc = docOf(fixture('spc-byg-need-anything-else.html'));
+    const doc = docOf(fixture('spc/byg-need-anything-else.html'));
     expect(doc.querySelector(BYG_HEADER_SELECTOR)).not.toBeNull();
   });
 });
@@ -155,7 +156,7 @@ describe('findCheckoutCashbackPct', () => {
     expect(findCheckoutCashbackPct(doc)).toBeNull();
   });
   it('reads 6% back from a real /spc fixture', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     expect(findCheckoutCashbackPct(doc)).toBe(6);
   });
 });
@@ -199,7 +200,7 @@ describe('readTargetCashbackFromDom (MacBook /spc fixture)', () => {
     'Apple 2025 MacBook Pro Laptop with Apple M5 chip with 10-core CPU and 10-core GPU';
 
   it('locates the MacBook row via title fallback (no ASIN in any href)', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     // Precondition: there genuinely is no /dp/<asin> anchor.
     expect(doc.querySelector(`a[href*="${ASIN}"]`)).toBeNull();
 
@@ -208,7 +209,7 @@ describe('readTargetCashbackFromDom (MacBook /spc fixture)', () => {
   });
 
   it('walks up to the correct shipping-group scope (Arriving + % back)', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
     if (!hit.found) throw new Error('target must be found');
 
@@ -223,7 +224,7 @@ describe('readTargetCashbackFromDom (MacBook /spc fixture)', () => {
   });
 
   it('detects that 6% is AVAILABLE in the target group (bodyMatches + scopeMatches)', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
     if (!hit.found) throw new Error('target must be found');
 
@@ -236,7 +237,7 @@ describe('readTargetCashbackFromDom (MacBook /spc fixture)', () => {
     // the actually-selected delivery option does NOT earn cashback. Placing
     // the order now would give 0%, not 6%. The caller treats pct=null as a
     // hard failure, which is the safety invariant the user asked for.
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
     if (!hit.found) throw new Error('target must be found');
 
@@ -249,7 +250,7 @@ describe('readTargetCashbackFromDom (MacBook /spc fixture)', () => {
     // Simulate what pickBestCashbackDelivery does: flip the checked state
     // from Standard → Amazon Day in the target's shipping group. After the
     // click, the gate must pass with pct=6.
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const MACBOOK_GROUP =
       'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-4769208-4621834:29c5bcd2-051b-4068-93c5-805128ac6872';
     const groupRadios = Array.from(
@@ -275,7 +276,7 @@ describe('readTargetCashbackFromDom (MacBook /spc fixture)', () => {
   });
 
   it('returns found=false with diagnostics when the target is nowhere on the page', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const hit = readTargetCashbackFromDom(doc, 'B0XXXXXXXX', 'Totally Fake Product Title Here XYZ');
     if (hit.found) throw new Error('target should not be found');
     expect(hit.diag.asinInBody).toBe(false);
@@ -291,7 +292,7 @@ describe('computeCashbackRadioPlans (MacBook /spc fixture)', () => {
     'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-4769208-4621834:0ec222d7-598a-4208-8a90-3e6f31448a7a';
 
   it('plans a click on the 6% Amazon Day radio in the MacBook shipping group', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const plans = computeCashbackRadioPlans(doc, 6);
 
     const macbookPlan = plans.find((p) => p.name === MACBOOK_GROUP);
@@ -305,7 +306,7 @@ describe('computeCashbackRadioPlans (MacBook /spc fixture)', () => {
   });
 
   it('also plans a click in the other shipping group (both default to 0%)', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const plans = computeCashbackRadioPlans(doc, 6);
 
     const otherPlan = plans.find((p) => p.name === OTHER_GROUP);
@@ -315,7 +316,7 @@ describe('computeCashbackRadioPlans (MacBook /spc fixture)', () => {
   });
 
   it('returns exactly 2 plans (one per delivery-option group) on this fixture', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const plans = computeCashbackRadioPlans(doc, 6);
     expect(plans.length).toBe(2);
   });
@@ -323,7 +324,7 @@ describe('computeCashbackRadioPlans (MacBook /spc fixture)', () => {
   it('plans nothing when the 6%-back radio is ALREADY checked in each group', () => {
     // Flip BOTH groups so Amazon Day is already selected. Picker should
     // be a no-op in that state — mirrors the post-click steady state.
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     for (const groupName of [MACBOOK_GROUP, OTHER_GROUP]) {
       const group = Array.from(
         doc.querySelectorAll(`input[type="radio"][name="${groupName}"]`),
@@ -342,13 +343,13 @@ describe('computeCashbackRadioPlans (MacBook /spc fixture)', () => {
   });
 
   it('plans nothing when minPct is higher than any available option', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const plans = computeCashbackRadioPlans(doc, 10);
     expect(plans).toEqual([]);
   });
 
   it('skips address/payment radio groups', () => {
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const plans = computeCashbackRadioPlans(doc, 6);
     // None of the plans should target payment/address radios — their
     // names match the exclusion regex.
@@ -384,7 +385,7 @@ describe('computeCashbackRadioPlans (MacBook /spc fixture)', () => {
  */
 describe('isDeliveryOptionsChangedBanner (delivery-options-changed fixture)', () => {
   it('detects the banner on the real fixture', () => {
-    const doc = docOf(fixture('spc-delivery-options-changed-B0F3GWXLTS.html'));
+    const doc = docOf(fixture('spc/delivery-options-changed-B0F3GWXLTS.html'));
     expect(isDeliveryOptionsChangedBanner(doc)).toBe(true);
   });
 
@@ -392,7 +393,7 @@ describe('isDeliveryOptionsChangedBanner (delivery-options-changed fixture)', ()
     // If the selector drifted to match any purchase-level message in the
     // SSR template, this happy-path /spc would false-positive and the
     // runtime would enter recovery on every order. Pin the negative.
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     expect(isDeliveryOptionsChangedBanner(doc)).toBe(false);
   });
 
@@ -404,7 +405,7 @@ describe('isDeliveryOptionsChangedBanner (delivery-options-changed fixture)', ()
   it('DELIVERY_OPTIONS_CHANGED_SELECTOR matches the real banner element', () => {
     // Runtime helper and parser share this constant — drifting one
     // without the other would silently disable recovery. Pin the pair.
-    const doc = docOf(fixture('spc-delivery-options-changed-B0F3GWXLTS.html'));
+    const doc = docOf(fixture('spc/delivery-options-changed-B0F3GWXLTS.html'));
     const el = doc.querySelector(DELIVERY_OPTIONS_CHANGED_SELECTOR);
     expect(el).not.toBeNull();
     expect((el?.textContent ?? '').replace(/\s+/g, ' ')).toMatch(
@@ -434,7 +435,7 @@ describe('isDeliveryOptionsChangedBanner (delivery-options-changed fixture)', ()
  */
 describe('isVerifyCardChallenge (verify-your-card fixture)', () => {
   it('detects the PMTS verify-card challenge on the real fixture', () => {
-    const doc = docOf(fixture('spc-verify-your-card.html'));
+    const doc = docOf(fixture('spc/verify-your-card.html'));
     expect(isVerifyCardChallenge(doc)).toBe(true);
   });
 
@@ -442,7 +443,7 @@ describe('isVerifyCardChallenge (verify-your-card fixture)', () => {
     // If either the form-class selector or the heading regex drifted into
     // matching unrelated /spc markup, every healthy buy would falsely fail
     // with "Verify your card". Pin the negative against a real /spc fixture.
-    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     expect(isVerifyCardChallenge(doc)).toBe(false);
   });
 
@@ -503,7 +504,7 @@ describe('readTargetCashbackFromDom (fillers-cart /spc fixture, 6% already check
 
   it('returns pct=6 — the currently-checked Amazon Day radio is read correctly', () => {
     // Top-level contract: if this passes the gate lets Place Order run.
-    const doc = docOf(fixture('spc-fillers-macbook-B0FWD726XF-checked-6pct.html'));
+    const doc = docOf(fixture('spc/fillers-macbook-B0FWD726XF-checked-6pct.html'));
     const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
     if (!hit.found) throw new Error('target must be found');
     expect(hit.pct).toBe(6);
@@ -512,7 +513,7 @@ describe('readTargetCashbackFromDom (fillers-cart /spc fixture, 6% already check
   });
 
   it('walk reaches the shared shipping-group container (has delivery radios)', () => {
-    const doc = docOf(fixture('spc-fillers-macbook-B0FWD726XF-checked-6pct.html'));
+    const doc = docOf(fixture('spc/fillers-macbook-B0FWD726XF-checked-6pct.html'));
     const hit = readTargetCashbackFromDom(doc, ASIN, TITLE);
     if (!hit.found) throw new Error('target must be found');
     expect(hit.groupFound).toBe(true);
@@ -531,7 +532,7 @@ describe('readTargetCashbackFromDom (fillers-cart /spc fixture, 6% already check
     // With the recovery/picker logic downstream: if this returns a plan,
     // the bot would try to re-click the same radio it's already on,
     // churning for no reason.
-    const doc = docOf(fixture('spc-fillers-macbook-B0FWD726XF-checked-6pct.html'));
+    const doc = docOf(fixture('spc/fillers-macbook-B0FWD726XF-checked-6pct.html'));
     const plans = computeCashbackRadioPlans(doc, 6);
     expect(plans).toEqual([]);
   });
@@ -581,7 +582,7 @@ describe('readTargetCashbackFromDom (split-shipping fillers cart, 6% checked)', 
   it('returns pct=6 for the target (Switch 2 in Group B with Amazon Day checked)', () => {
     // Core contract. If this returns null/undefined, the bot would
     // spuriously trip the BG1/BG2 toggle even though 6% is already met.
-    const doc = docOf(fixture('spc-fillers-split-switch2-B0F3GWXLTS-6pct.html'));
+    const doc = docOf(fixture('spc/fillers-split-switch2-B0F3GWXLTS-6pct.html'));
     const hit = readTargetCashbackFromDom(doc, TARGET_ASIN, TARGET_TITLE);
     if (!hit.found) throw new Error('target must be found');
     expect(hit.pct).toBe(6);
@@ -597,7 +598,7 @@ describe('readTargetCashbackFromDom (split-shipping fillers cart, 6% checked)', 
   it('computeCashbackRadioPlans is a no-op — 6% is already the checked option in Group B', () => {
     // Guards against a regression where the picker re-clicks an already
     // selected radio and stalls the checkout in a re-render loop.
-    const doc = docOf(fixture('spc-fillers-split-switch2-B0F3GWXLTS-6pct.html'));
+    const doc = docOf(fixture('spc/fillers-split-switch2-B0F3GWXLTS-6pct.html'));
     const plans = computeCashbackRadioPlans(doc, 6);
     expect(plans).toEqual([]);
   });
@@ -607,7 +608,7 @@ describe('readTargetCashbackFromDom (split-shipping fillers cart, 6% checked)', 
     // doesn't participate in the 6%-back offer. This fixture captures
     // the full adversarial layout — useful context when the scope-walk
     // behavior is reviewed later.
-    const doc = docOf(fixture('spc-fillers-split-switch2-B0F3GWXLTS-6pct.html'));
+    const doc = docOf(fixture('spc/fillers-split-switch2-B0F3GWXLTS-6pct.html'));
     const SOLO_GROUP =
       'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-0716602-1613867:35aece34-45a4-4e0a-9887-c5354d0fd1b5';
     const soloRadios = Array.from(
@@ -639,7 +640,7 @@ describe('readTargetCashbackFromDom (split-shipping fillers cart, 6% checked)', 
     // startsWith always returned false and the anchor was never found.
     // With the testid fallback AND the shorter-shared-prefix match,
     // the parser now locates the target regardless.
-    const doc = docOf(fixture('spc-fillers-split-switch2-B0F3GWXLTS-6pct.html'));
+    const doc = docOf(fixture('spc/fillers-split-switch2-B0F3GWXLTS-6pct.html'));
     const LONG_PDP_TITLE =
       'Nintendo Switch 2 System Bundle with Mario Kart World and Carrying Case';
     const hit = readTargetCashbackFromDom(doc, TARGET_ASIN, LONG_PDP_TITLE);
@@ -652,7 +653,7 @@ describe('readTargetCashbackFromDom (split-shipping fillers cart, 6% checked)', 
     // AND there are no /dp/<asin> hrefs (Chewbacca). Historical
     // behavior was `found: false → gate fails → BG1/BG2 toggle`. The
     // testid pin now saves this case.
-    const doc = docOf(fixture('spc-fillers-split-switch2-B0F3GWXLTS-6pct.html'));
+    const doc = docOf(fixture('spc/fillers-split-switch2-B0F3GWXLTS-6pct.html'));
     // Sanity: confirm no /dp/<asin> anchor exists (pin the Chewbacca
     // property that motivates the testid fallback).
     expect(doc.querySelector(`a[href*="${TARGET_ASIN}"]`)).toBeNull();
@@ -668,7 +669,7 @@ describe('readTargetCashbackFromDom (split-shipping fillers cart, 6% checked)', 
     // a regression that accidentally routed to the blocker variant
     // (aok-hidden + disabled) fails a parser-level test instead of a
     // silent "why didn't it click" production bug.
-    const doc = docOf(fixture('spc-fillers-split-switch2-B0F3GWXLTS-6pct.html'));
+    const doc = docOf(fixture('spc/fillers-split-switch2-B0F3GWXLTS-6pct.html'));
     const live = doc.querySelector<HTMLElement>(
       '#submitOrderButtonId:not(.aok-hidden) input[name="placeYourOrder1"]:not([disabled])',
     );
@@ -684,7 +685,7 @@ describe('computeCashbackRadioPlans (delivery-options-changed fixture)', () => {
     // This is the precondition that makes recovery necessary. If this
     // ever regresses to "1 checked", a future caller might assume the
     // wiped state is the normal post-click state and skip re-picking.
-    const doc = docOf(fixture('spc-delivery-options-changed-B0F3GWXLTS.html'));
+    const doc = docOf(fixture('spc/delivery-options-changed-B0F3GWXLTS.html'));
     const groupRadios = Array.from(
       doc.querySelectorAll(
         `input[type="radio"][name="${WIPED_GROUP}"]`,
@@ -699,7 +700,7 @@ describe('computeCashbackRadioPlans (delivery-options-changed fixture)', () => {
     // The recovery action the runtime will execute. Same plan shape as
     // the happy-path MacBook fixture — the wiped state doesn't require
     // any special-case parser code.
-    const doc = docOf(fixture('spc-delivery-options-changed-B0F3GWXLTS.html'));
+    const doc = docOf(fixture('spc/delivery-options-changed-B0F3GWXLTS.html'));
     const plans = computeCashbackRadioPlans(doc, 6);
     const plan = plans.find((p) => p.name === WIPED_GROUP);
     expect(plan).toBeDefined();
@@ -718,7 +719,7 @@ describe('computeCashbackRadioPlans (delivery-options-changed fixture)', () => {
     // render, but the radio is now checked. The cashback picker must be
     // a no-op in that state so the second Place Order click isn't
     // preceded by a pointless re-click of the same radio.
-    const doc = docOf(fixture('spc-delivery-options-changed-B0F3GWXLTS.html'));
+    const doc = docOf(fixture('spc/delivery-options-changed-B0F3GWXLTS.html'));
     const amazonDay = doc.querySelector<HTMLInputElement>(
       `input[type="radio"][name="${WIPED_GROUP}"][value="second-nominated-day"]`,
     );
@@ -736,7 +737,7 @@ describe('findCancelItemsLinkOnOrderDetails', () => {
     // Real order-details page captured for filler order 114-2706026-4049019
     // — the case where the direct cancel-items URL silently failed but
     // the order-details page still exposes a "Cancel items" link.
-    const doc = docOf(fixture('order-details-cancellable-filler.html'));
+    const doc = docOf(fixture('order-details/cancellable-filler.html'));
     const r = findCancelItemsLinkOnOrderDetails(doc);
     expect(r.cancelHref).not.toBeNull();
     expect(r.cancelHref).toMatch(
@@ -778,5 +779,87 @@ describe('findCancelItemsLinkOnOrderDetails', () => {
     `);
     const r = findCancelItemsLinkOnOrderDetails(doc);
     expect(r.cancelHref).toBe('/some/other/path?orderID=999');
+  });
+});
+
+/**
+ * Payment-revision detector tests. Real fixture is an order-details
+ * page where Amazon couldn't charge the customer's card and parked
+ * the order in a "Revise Payment" state. The order is still active
+ * (CAN proceed once the payment is fixed), so verifyOrder still
+ * classifies it as `active` — this detector exists purely so the
+ * worker can emit a *warning* log surfacing the issue without
+ * changing buy / verify / fetch_tracking flow.
+ */
+describe('isPaymentRevisionRequired (order-details fixture)', () => {
+  it('detects payment-revision state on the real fixture', () => {
+    // orderID=114-7374303-0391443 — captured from a live order whose
+    // card declined; page shows "Payment revision needed" heading +
+    // a "Revise Payment" button linking to /revisepayments/...
+    const doc = docOf(fixture('order-details/payment-revision.html'));
+    expect(isPaymentRevisionRequired(doc)).toBe(true);
+  });
+
+  it('returns false on a happy-path /spc page (no payment issue)', () => {
+    // Negative control — a healthy /spc fixture should not trip the
+    // detector. The page mentions "Payment" in nav/help copy but has
+    // neither the heading nor the Revise Payment link.
+    const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
+    expect(isPaymentRevisionRequired(doc)).toBe(false);
+  });
+
+  it('returns false on the order-details cancel-items fixture (different state)', () => {
+    // Negative control — same page family (order-details) but a
+    // healthy "you can still cancel items" version, not the
+    // payment-revision interstitial.
+    const doc = docOf(fixture('order-details/cancellable-filler.html'));
+    expect(isPaymentRevisionRequired(doc)).toBe(false);
+  });
+
+  it('returns false on a Track-page state (different page entirely)', () => {
+    // Negative control — Track pages contain payment-card chrome in
+    // the header but no "Payment revision needed" heading. Locks in
+    // that the detector doesn't widen across page types.
+    const doc = docOf(fixture('track/order-received.html'));
+    expect(isPaymentRevisionRequired(doc)).toBe(false);
+  });
+
+  it('returns false when only the heading text is present (no Revise Payment link)', () => {
+    // Defensive: arbitrary page copy that mentions "payment revision
+    // needed" but has no link to /revisepayments shouldn't trip the
+    // detector. AND of two signals is what makes this safe.
+    const doc = docOf(`
+      <html><body>
+        <h2>Payment revision needed</h2>
+        <p>(but there's no Revise Payment link on this page)</p>
+        <a href="/some/help/article">Learn more</a>
+      </body></html>
+    `);
+    expect(isPaymentRevisionRequired(doc)).toBe(false);
+  });
+
+  it('returns false when only the Revise Payment link is present (no heading text)', () => {
+    // Defensive: bare link to /revisepayments without the heading
+    // also shouldn't trip — could be a generic help-center entry.
+    const doc = docOf(`
+      <html><body>
+        <h2>Some unrelated heading</h2>
+        <a href="/your-account/orders/revisepayments?orderId=999">Revise Payment</a>
+      </body></html>
+    `);
+    expect(isPaymentRevisionRequired(doc)).toBe(false);
+  });
+
+  it('detects when both signals are present, even if heading capitalization varies', () => {
+    // Synthetic positive — both signals, mixed-case heading. Locks in
+    // the case-insensitive heading match.
+    const doc = docOf(`
+      <html><body>
+        <h2>Payment Revision Needed</h2>
+        <p>Update your payment method to continue this order.</p>
+        <a href="/your-account/orders/revisepayments?orderId=999&ref_=foo" class="a-button-text">Revise Payment</a>
+      </body></html>
+    `);
+    expect(isPaymentRevisionRequired(doc)).toBe(true);
   });
 });

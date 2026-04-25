@@ -45,6 +45,11 @@ export const IPC = {
   /** Toggle the cashback gate for one Amazon account on BG. Returns the
    *  updated setting row so the caller can reconcile optimistic state. */
   profilesSetRequireMinCashback: 'profiles:set-require-min-cashback',
+  /** Live status of the scheduled auto-enqueue feature: enabled flag,
+   *  configured interval, last/next run timestamps, and the in-memory
+   *  result of the most recent tick (queued/skipped/failed counts). The
+   *  Deals page polls this so the user can see "next run in 2h". */
+  autoEnqueueStatus: 'auto-enqueue:status',
 
   jobsList: 'jobs:list',
   jobsLogs: 'jobs:logs',
@@ -144,6 +149,43 @@ export type Settings = {
    * id is no longer in either local or server lists.
    */
   hiddenAttemptIds: string[];
+  /**
+   * Scheduled auto-enqueue: when on, the main process periodically
+   * fetches the live BG deals catalog and enqueues every active,
+   * non-expired deal that the user hasn't already attempted within the
+   * dedup window. Selection-free by design — the rule is evergreen, so
+   * new deals that show up between ticks are picked up automatically
+   * on the next run. See src/main/autoEnqueueScheduler.ts.
+   */
+  autoEnqueueEnabled: boolean;
+  /** Run cadence for the scheduler. Bounds: 1–168 (one hour to one week). */
+  autoEnqueueIntervalHours: number;
+  /**
+   * Ship-to-state filter applied before enqueue (lowercased, e.g.
+   * 'oregon'). 'all' disables the filter. Independent of the Deals
+   * page's UI filter so the schedule isn't accidentally narrowed by
+   * an ephemeral viewing choice.
+   */
+  autoEnqueueShipToFilter: string;
+  /**
+   * Margin floor (inclusive). Deals with `marginPct >= this` are
+   * eligible; deals below are dropped. Margin is `(payout - retail) /
+   * retail * 100`, so values are typically negative (payout less than
+   * retail) and the cashback closes the gap. A floor of -3.5 means
+   * "let through every deal where retail is at most 3.5% above
+   * payout"; -100 disables the filter; 0 only passes break-even or
+   * profitable-by-payout-alone deals.
+   */
+  autoEnqueueMinMarginPct: number;
+  /**
+   * Hard cap on how many deals one tick may enqueue. Guards against a
+   * surge of new BG deals queueing dozens of buys at once. On normal
+   * days where only a handful of deals trickle in, the cap is never
+   * reached.
+   */
+  autoEnqueueMaxPerTick: number;
+  /** Epoch ms of the last successful tick. null = never run. */
+  autoEnqueueLastRunAt: number | null;
 };
 
 /**
@@ -178,7 +220,12 @@ export type AutoGBridge = {
   settingsSet(partial: Partial<Settings>): Promise<Settings>;
   openExternal(url: string): Promise<void>;
   appVersion(): Promise<string>;
-  versionCheck(): Promise<{ updateAvailable: boolean; latest: string | null; current: string }>;
+  versionCheck(): Promise<{
+    updateAvailable: boolean;
+    latest: string | null;
+    current: string;
+    downloadUrl: string | null;
+  }>;
   profilesList(): Promise<AmazonProfile[]>;
   profilesAdd(email: string, displayName?: string): Promise<AmazonProfile[]>;
   profilesRemove(email: string): Promise<AmazonProfile[]>;
@@ -200,6 +247,19 @@ export type AutoGBridge = {
   }>;
   profilesRemoteSettings(): Promise<Record<string, { requireMinCashback: boolean }>>;
   profilesSetRequireMinCashback(email: string, requireMinCashback: boolean): Promise<{ email: string; requireMinCashback: boolean }>;
+  autoEnqueueStatus(): Promise<{
+    enabled: boolean;
+    intervalHours: number;
+    lastRunAt: number | null;
+    nextRunAt: number | null;
+    lastResult: {
+      runAt: number;
+      queued: number;
+      skipped: number;
+      failed: number;
+      error: string | null;
+    } | null;
+  }>;
   jobsList(): Promise<JobAttempt[]>;
   jobsLogs(attemptId: string): Promise<LogEvent[]>;
   jobsClearAll(): Promise<void>;

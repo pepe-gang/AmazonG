@@ -57,9 +57,11 @@ export function SettingsView({
       >
         <LiveModePanel />
         <AllowedPrefixesPanel />
-        <HeadlessTogglePanel profiles={profiles} />
         <AutoStartWorkerPanel />
-        <SnapshotSettingsPanel />
+        <DebuggingModeGroup>
+          <HeadlessTogglePanel profiles={profiles} />
+          <SnapshotSettingsPanel />
+        </DebuggingModeGroup>
         <BetterBGConnectionPanel identity={identity} workerRunning={workerRunning} />
       </div>
       {lockedToast && (
@@ -67,6 +69,33 @@ export function SettingsView({
           Stop the worker first — settings can't be changed while jobs are polling.
         </div>
       )}
+    </div>
+  );
+}
+
+/* ============================================================
+   Debugging Mode group
+   ============================================================
+   Visual container that groups the developer / debugging toggles
+   ("Headless mode", "Capture snapshots on failure") under one
+   labeled box. Pure layout — children render as the same panels
+   they did before, just nested inside a glass container with a
+   header. No state, no behavior change.
+*/
+function DebuggingModeGroup({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Debugging Mode</div>
+          <div className="prefix-sub">
+            Toggles useful for inspecting checkout runs and capturing what
+            went wrong on a failure. Off by default for normal day-to-day
+            operation.
+          </div>
+        </div>
+      </div>
+      <div className="flex flex-col gap-3 mt-3">{children}</div>
     </div>
   );
 }
