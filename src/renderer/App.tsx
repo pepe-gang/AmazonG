@@ -255,7 +255,40 @@ function MainShell({ status }: { status: RendererStatus }) {
     void window.autog.profilesList().then(setProfiles);
     const offJobs = window.autog.onJobs(setAttempts);
     void window.autog.jobsList().then(setAttempts);
-    const tick = setInterval(() => setUptimeTick((n) => n + 1), 1000);
+    // Uptime tick — drives the "Running 12s" pill in the header. Pause
+    // when the window is backgrounded: the user can't see the timer,
+    // and the every-second re-render forces the GPU compositor to
+    // re-blur every glass surface (heavy on M-series fans). Resumes on
+    // visibilitychange. Catches up the missed seconds in one bump.
+    let tick: ReturnType<typeof setInterval> | null = null;
+    const startTick = () => {
+      if (tick !== null) return;
+      tick = setInterval(() => setUptimeTick((n) => n + 1), 1000);
+    };
+    const stopTick = () => {
+      if (tick === null) return;
+      clearInterval(tick);
+      tick = null;
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        stopTick();
+        // Pause perpetual CSS animations (aurora drift + animate-ping
+        // halos). Same motivation as the tick: don't burn GPU
+        // compositing animations the user can't see. CSS rule lives
+        // in index.css under `.bg-paused`.
+        document.body.classList.add('bg-paused');
+      } else {
+        document.body.classList.remove('bg-paused');
+        // Bump once on resume so the visible label reflects current
+        // wall time before the next interval fires.
+        setUptimeTick((n) => n + 1);
+        startTick();
+      }
+    };
+    if (!document.hidden) startTick();
+    else document.body.classList.add('bg-paused');
+    document.addEventListener('visibilitychange', onVisibility);
     // Server-state poll: picks up cross-device changes and verify-phase
     // flips that happen on the BetterBG worker without a local trigger.
     const serverPoll = setInterval(() => {
@@ -265,7 +298,9 @@ function MainShell({ status }: { status: RendererStatus }) {
       off();
       offProfiles();
       offJobs();
-      clearInterval(tick);
+      stopTick();
+      document.removeEventListener('visibilitychange', onVisibility);
+      document.body.classList.remove('bg-paused');
       clearInterval(serverPoll);
     };
   }, []);

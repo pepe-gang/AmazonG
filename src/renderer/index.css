@@ -105,8 +105,10 @@
   --row-height-sm: 44px;
   --row-height-lg: 64px;
 
-  /* Glass-specific tokens */
-  --glass-blur: 52px;
+  /* Glass-specific tokens. Blur radius scales quadratically on GPU
+     cost — 20px is ~7× cheaper than 52px and visually still reads as
+     glass (Apple's own translucent surfaces sit in the 18-24px range). */
+  --glass-blur: 20px;
   --glass-saturation: 140%;
   --glass-bg: hsl(220 25% 12% / 0.55);
   --glass-border: hsl(220 25% 100% / 0.05);
@@ -274,6 +276,15 @@
     body::before { animation: none; }
   }
 
+  /* GPU savings: when the renderer is backgrounded (window minimized,
+     hidden, or on another macOS Space), pause every perpetual
+     animation. Chromium would otherwise keep compositing the aurora
+     drift and `animate-ping` halos full-tilt — the M-series GPU
+     stays warm for nothing. The .bg-paused class is flipped by the
+     visibilitychange handler in App.tsx. */
+  body.bg-paused::before { animation-play-state: paused; }
+  body.bg-paused .animate-ping { animation-play-state: paused; }
+
   /* Sober typography for glass — restraint over weight */
   h1, h2, h3 {
     letter-spacing: -0.02em;
@@ -323,7 +334,7 @@
 
 @utility glass-inner {
   background: hsl(220 15% 100% / 0.02);
-  backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(12px) saturate(160%);
   border: 1px solid var(--glass-border);
   border-radius: calc(var(--radius) - 4px);
   box-shadow: 0 1px 2px 0 hsl(230 40% 4% / 0.2);
@@ -339,7 +350,7 @@
 
 @utility glass-strong {
   background: hsl(220 25% 8% / 0.82);
-  backdrop-filter: blur(40px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
   border: 1px solid var(--glass-border);
   box-shadow:
     inset 0 1px 0 0 var(--glass-highlight),

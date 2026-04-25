@@ -482,8 +482,8 @@ a,
   padding: 10px 12px;
   /* Glass-strong recipe — matches the rest of the overlay surfaces. */
   background: hsl(220 25% 8% / 0.92);
-  backdrop-filter: blur(40px) saturate(160%);
-  -webkit-backdrop-filter: blur(40px) saturate(160%);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
   border: 1px solid hsl(220 25% 100% / 0.08);
   border-radius: 10px;
   box-shadow:
@@ -550,8 +550,8 @@ a,
 /* Allowed-prefixes settings panel */
 .prefix-panel {
   background: hsl(220 25% 12% / 0.55);
-  backdrop-filter: blur(52px) saturate(140%);
-  -webkit-backdrop-filter: blur(52px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
   border: 1px solid hsl(220 25% 100% / 0.05);
   border-radius: 12px;
   padding: 16px 18px;
@@ -763,8 +763,8 @@ a,
   align-items: center;
   gap: 12px;
   background: hsl(220 25% 12% / 0.55);
-  backdrop-filter: blur(52px) saturate(140%);
-  -webkit-backdrop-filter: blur(52px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
   border: 1px solid hsl(220 25% 100% / 0.05);
   border-radius: 12px;
   padding: 16px 18px;
