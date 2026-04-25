@@ -148,23 +148,31 @@ function isTerminalCancelReason(reason: string): boolean {
   );
 }
 
-async function runVerifyFillerCleanup(
+/**
+ * Filler-only cancel pass. Walks `fillerOrderIds` and tries to cancel
+ * each one with up to 3 attempts and an 8s backoff between attempts.
+ * Terminal-reason exits (Amazon refuses, redirected away, etc.) skip
+ * the rest of the retry budget for that specific order.
+ *
+ * Used by both:
+ *   - `runVerifyFillerCleanup` (verify phase, target order is active)
+ *   - the cancelled-target branch in `handleVerifyJob` (Amazon
+ *     cancelled the target, but the filler items the buy fan-out
+ *     dropped into separate orders may still be live — we cancel
+ *     those so the customer isn't on the hook for items they didn't
+ *     intend to buy).
+ */
+async function cancelFillerOrdersOnly(
   page: Page,
-  targetOrderId: string,
   fillerOrderIds: string[],
-  target: { asin: string | null; title: string | null },
   cid: string,
 ): Promise<{
   fillerOrdersCancelled: string[];
   fillerOrdersFailed: string[];
-  targetOrderCleaned: boolean;
-  targetCleanError: string | null;
 }> {
   const MAX_TRIES = 3;
   const fillerOrdersCancelled: string[] = [];
   const fillerOrdersFailed: string[] = [];
-
-  // 1. Retry cancel on each filler-only order.
   for (const fillerOrderId of fillerOrderIds) {
     let cancelled = false;
     let terminalRefusal = false;
@@ -204,6 +212,26 @@ async function runVerifyFillerCleanup(
       );
     }
   }
+  return { fillerOrdersCancelled, fillerOrdersFailed };
+}
+
+async function runVerifyFillerCleanup(
+  page: Page,
+  targetOrderId: string,
+  fillerOrderIds: string[],
+  target: { asin: string | null; title: string | null },
+  cid: string,
+): Promise<{
+  fillerOrdersCancelled: string[];
+  fillerOrdersFailed: string[];
+  targetOrderCleaned: boolean;
+  targetCleanError: string | null;
+}> {
+  const MAX_TRIES = 3;
+
+  // 1. Cancel the filler-only orders (orders that do NOT contain the target).
+  const { fillerOrdersCancelled, fillerOrdersFailed } =
+    await cancelFillerOrdersOnly(page, fillerOrderIds, cid);
 
   // 2. Clean the target order — cancel everything except the target.
   let targetOrderCleaned = false;
@@ -846,9 +874,13 @@ async function handleVerifyJob(
           },
           cid,
         );
-        // Persist any remaining uncancelled filler orders on the
-        // attempt so a future sweep (or a human) can see which
-        // orders slipped through — rather than losing that info.
+        // Surface any cleanup failures on the row's `error` field so a
+        // human can follow up. We KEEP `fillerOrderIds` intact as the
+        // immutable buy-time audit list — the user can still see every
+        // filler order that came out of this purchase. The `error`
+        // string carries the specific subset that's still uncancelled
+        // (drives manual follow-up). Only update if there's something
+        // to report.
         if (
           cleanup.fillerOrdersFailed.length > 0 ||
           !cleanup.targetOrderCleaned
@@ -864,14 +896,8 @@ async function handleVerifyJob(
           }
           await deps.jobAttempts
             .update(activeAttemptId, {
-              fillerOrderIds: cleanup.fillerOrdersFailed,
               error: errorParts.join(' | '),
             })
-            .catch(() => undefined);
-        } else {
-          // All clean — empty the persisted list.
-          await deps.jobAttempts
-            .update(activeAttemptId, { fillerOrderIds: [] })
             .catch(() => undefined);
         }
       }
@@ -906,12 +932,67 @@ async function handleVerifyJob(
           orderId: targetOrderId,
         })
         .catch(() => undefined);
+
+      // Filler cleanup on cancelled target. Even though the target
+      // order was cancelled by Amazon, the buy fan-out may have
+      // dropped filler items into separate orders that are still
+      // live. Cancel those so the customer isn't on the hook for
+      // items they didn't intend to buy. Skips the "clean non-target
+      // items from target order" step that the active path runs —
+      // target is already cancelled, nothing to clean.
+      let cancelledFillerError: string | null = null;
+      if (job.viaFiller) {
+        const buyAttemptId = job.buyJobId
+          ? makeAttemptId(job.buyJobId, profile.email)
+          : activeAttemptId;
+        const attemptForContext = await deps.jobAttempts
+          .get(buyAttemptId)
+          .catch(() => null);
+        const fillerOrderIds = attemptForContext?.fillerOrderIds ?? [];
+        if (fillerOrderIds.length > 0) {
+          logger.info(
+            'job.verify.cancelled.filler.cleanup.start',
+            { ...logCtx, targetOrderId, fillerOrderIdCount: fillerOrderIds.length },
+            cid,
+          );
+          const cleanup = await cancelFillerOrdersOnly(
+            verifyPage,
+            fillerOrderIds,
+            cid,
+          );
+          logger.info(
+            'job.verify.cancelled.filler.cleanup.done',
+            {
+              ...logCtx,
+              targetOrderId,
+              fillerOrdersCancelled: cleanup.fillerOrdersCancelled.length,
+              fillerOrdersFailed: cleanup.fillerOrdersFailed.length,
+            },
+            cid,
+          );
+          if (cleanup.fillerOrdersFailed.length > 0) {
+            cancelledFillerError = `${cleanup.fillerOrdersFailed.length} filler order(s) still uncancelled: ${cleanup.fillerOrdersFailed.join(', ')}`;
+            // Append to the row's error so the dashboard surfaces
+            // both the target cancellation and any leftover fillers.
+            // fillerOrderIds is left intact as the buy-time audit.
+            await deps.jobAttempts
+              .update(activeAttemptId, {
+                error: `order was cancelled by Amazon · ${cancelledFillerError}`,
+              })
+              .catch(() => undefined);
+          }
+        }
+      }
+
       await reportSafe(
         deps,
         job.id,
         {
           status: 'cancelled',
-          error: 'order was cancelled by Amazon',
+          error:
+            cancelledFillerError !== null
+              ? `order was cancelled by Amazon · ${cancelledFillerError}`
+              : 'order was cancelled by Amazon',
           placedOrderId: targetOrderId,
           placedEmail: profile.email,
         },
@@ -1042,6 +1123,58 @@ async function handleFetchTrackingJob(
   try {
     const session = await getSession(deps, sessions, profile.email, profile.headless);
     fetchPage = await session.newPage();
+
+    // Filler retry sweep. Amazon's preship-cancel queue is eventually-
+    // consistent and sometimes silently rejects pre-ship cancels we
+    // attempted right after placement or 10 min later in verify. By
+    // the time fetch_tracking runs (~6h after buy), Amazon has had
+    // plenty of time to make any pending cancels actually cancellable.
+    //
+    // We re-attempt every filler order from the buy-time audit list
+    // unconditionally. Already-cancelled orders short-circuit fast:
+    // openCancelPage returns 'not on cancel-items page after
+    // navigation — order likely already cancelled or shipped' which
+    // isTerminalCancelReason catches → single request per order, no
+    // wasted retries. So with ~9 total attempts spread across buy
+    // (3) → verify (3) → fetch_tracking (3), the customer's exposure
+    // to uncancellable fillers is minimized.
+    if (job.viaFiller) {
+      const buyAttemptId = job.buyJobId
+        ? makeAttemptId(job.buyJobId, profile.email)
+        : activeAttemptId;
+      const buyAttempt = await deps.jobAttempts
+        .get(buyAttemptId)
+        .catch(() => null);
+      const fillerOrderIds = buyAttempt?.fillerOrderIds ?? [];
+      if (fillerOrderIds.length > 0) {
+        logger.info(
+          'job.fetchTracking.filler.cleanup.start',
+          { ...logCtx, fillerOrderIdCount: fillerOrderIds.length },
+          cid,
+        );
+        const cleanup = await cancelFillerOrdersOnly(
+          fetchPage,
+          fillerOrderIds,
+          cid,
+        );
+        logger.info(
+          'job.fetchTracking.filler.cleanup.done',
+          {
+            ...logCtx,
+            fillerOrdersCancelled: cleanup.fillerOrdersCancelled.length,
+            fillerOrdersFailed: cleanup.fillerOrdersFailed.length,
+          },
+          cid,
+        );
+        // Don't overwrite the row's error here — verify already
+        // surfaced any uncancelled subset, and fetch_tracking's job
+        // is to capture tracking, not to manage diagnostics. If the
+        // sweep happened to succeed where verify failed, the error
+        // string from verify is now stale, but that's acceptable
+        // (next manual click on the row would re-verify and refresh).
+      }
+    }
+
     const outcome = await fetchTracking(fetchPage, targetOrderId);
 
     if (outcome.kind === 'tracked') {

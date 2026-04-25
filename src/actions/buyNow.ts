@@ -1182,7 +1182,12 @@ export async function toggleBGNameAndRetry(
   }
   emit.step('step.buy.cashback.toggle.edit', { index: opened.index });
 
-  // 3. Wait for the edit modal and toggle (BG1) ↔ (BG2).
+  // 3. Wait for the edit modal and toggle (BG1) ↔ (BG2). If the saved
+  //    address name has neither suffix yet, append " (BG1)" to make
+  //    this a BG1/BG2-eligible address — first-time setup. The
+  //    allowedAddressPrefixes gate above already filtered to BG
+  //    warehouse addresses, so we're not mutating random saved
+  //    addresses. Subsequent runs flip (BG1)↔(BG2) normally.
   const toggled = await page
     .evaluate(async () => {
       const d = Date.now() + 8_000;
@@ -1198,9 +1203,21 @@ export async function toggleBGNameAndRetry(
 
       const current = input.value ?? '';
       let next: string;
-      if (/\(BG2\)/.test(current)) next = current.replace(/\(BG2\)/, '(BG1)');
-      else if (/\(BG1\)/.test(current)) next = current.replace(/\(BG1\)/, '(BG2)');
-      else return { ok: false as const, reason: 'no_bg_suffix', current };
+      let action: 'flip' | 'add';
+      if (/\(BG2\)/.test(current)) {
+        next = current.replace(/\(BG2\)/, '(BG1)');
+        action = 'flip';
+      } else if (/\(BG1\)/.test(current)) {
+        next = current.replace(/\(BG1\)/, '(BG2)');
+        action = 'flip';
+      } else {
+        // First-time setup: append " (BG1)". Trim trailing whitespace
+        // to avoid double-spacing on names like "John Doe " → "John
+        // Doe (BG1)" (not "John Doe  (BG1)").
+        const trimmed = current.replace(/\s+$/, '');
+        next = trimmed.length > 0 ? `${trimmed} (BG1)` : '(BG1)';
+        action = 'add';
+      }
 
       // Find the modal/popover that contains the input. Amazon reuses the
       // SAME id `checkout-primary-continue-button-id` for both the modal's
@@ -1293,9 +1310,10 @@ export async function toggleBGNameAndRetry(
           from: current,
           to: next,
           reconfirmed,
+          action,
         };
       }
-      return { ok: true as const, from: current, to: next, reconfirmed };
+      return { ok: true as const, from: current, to: next, reconfirmed, action };
     })
     .catch((err) => ({ ok: false as const, reason: 'toggle_eval_error', detail: String(err) }));
   if (!toggled.ok) {
@@ -1304,6 +1322,7 @@ export async function toggleBGNameAndRetry(
   emit.step('step.buy.cashback.toggle.submit', {
     from: toggled.from,
     to: toggled.to,
+    action: toggled.action,
     reconfirmed: toggled.reconfirmed,
   });
 
