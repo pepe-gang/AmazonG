@@ -1298,11 +1298,7 @@ async function handleVerifyJob(
     // (where we keep the window open on some failure modes so the user
     // can inspect), verify runs are fully headless in spirit — the user
     // never needs to see the order-details page, only the outcome.
-    logger.info(
-      'job.verify.cleanup',
-      { ...logCtx, message: 'Closing verify browser window' },
-      cid,
-    );
+    //
     // Close our own page first so borrowed sessions (user-opened
     // "View Order" windows) lose the verify tab even though the
     // context is left alive. For worker-owned sessions the context
@@ -1609,11 +1605,6 @@ async function handleFetchTrackingJob(
       .catch(() => undefined);
     await reportSafe(deps, job.id, { status: 'failed', error }, cid);
   } finally {
-    logger.info(
-      'job.fetchTracking.cleanup',
-      { ...logCtx, message: 'Closing fetch_tracking browser window' },
-      cid,
-    );
     if (fetchPage) {
       await fetchPage.close().catch(() => undefined);
     }
@@ -1823,16 +1814,6 @@ async function runForProfile(
       // flow, which is visually noisy and eats memory. The failure
       // reason is captured in the attempt row + snapshot, so nothing
       // is lost by closing.
-      logger.info(
-        'job.profile.fail.cleanup',
-        {
-          jobId: job.id,
-          profile,
-          reason: report.reason,
-          message: `Closing browser window after verify failure (${report.reason})`,
-        },
-        cid,
-      );
       await closeAndForgetSession(sessions, profile);
       return failed(profile, error);
     }
@@ -1887,16 +1868,6 @@ async function runForProfile(
           cashbackPct: info.cashbackPct,
         })
         .catch(() => undefined);
-      logger.info(
-        'job.profile.fail.cleanup',
-        {
-          jobId: job.id,
-          profile,
-          stage: buy.stage,
-          message: `Closing browser window after buy failure (${buy.stage})`,
-        },
-        cid,
-      );
       await closeAndForgetSession(sessions, profile);
       return failed(profile, error);
     }
@@ -1916,15 +1887,6 @@ async function runForProfile(
       );
       // Close the session so the visible browser window goes away. Next
       // job for this profile will reopen a fresh session.
-      logger.info(
-        'job.profile.dryrun.cleanup',
-        {
-          jobId: job.id,
-          profile,
-          message: 'Closing browser window after dry-run success',
-        },
-        cid,
-      );
       await closeAndForgetSession(sessions, profile);
     } else {
       logger.info(
@@ -1941,15 +1903,6 @@ async function runForProfile(
       );
       // Close the session so the visible browser window goes away on
       // successful live placements (mirrors dry-run cleanup).
-      logger.info(
-        'job.profile.placed.cleanup',
-        {
-          jobId: job.id,
-          profile,
-          message: 'Closing browser window after successful order placement',
-        },
-        cid,
-      );
       await closeAndForgetSession(sessions, profile);
     }
 
