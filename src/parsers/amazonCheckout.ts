@@ -1,5 +1,5 @@
 import type { OrderConfirmation } from '../shared/types.js';
-import { parsePrice, findCashbackPct } from './amazonProduct.js';
+import { parsePrice } from './amazonProduct.js';
 
 /**
  * Extract the order id + final price from Amazon's "thank you" / confirmation
@@ -87,15 +87,6 @@ function readFinalPriceText(doc: Document): string | null {
   const body = (doc.body?.textContent ?? '').replace(/\s+/g, ' ');
   const m = body.match(/(?:order\s*total|grand\s*total)\s*[:\-]?\s*(\$[\d,]+\.\d{2})/i);
   return m?.[1] ?? null;
-}
-
-/**
- * Read the cashback percentage as shown on the checkout page. Amazon
- * typically surfaces the offer here even when it's absent from the product
- * page. Same regex strategy as the product-page parser.
- */
-export function findCheckoutCashbackPct(doc: Document): number | null {
-  return findCashbackPct(doc);
 }
 
 /**

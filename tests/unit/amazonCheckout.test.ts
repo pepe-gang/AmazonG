@@ -11,12 +11,12 @@ import {
   isVerifyCardChallenge,
   isPaymentRevisionRequired,
   parseOrderConfirmation,
-  findCheckoutCashbackPct,
   readTargetCashbackFromDom,
   buildTitlePrefix,
   computeCashbackRadioPlans,
   findCancelItemsLinkOnOrderDetails,
 } from '@parsers/amazonCheckout';
+import { findCashbackPct } from '@parsers/amazonProduct';
 
 function docOf(html: string): Document {
   return new JSDOM(html).window.document;
@@ -146,18 +146,18 @@ describe('isBeforeYouGoInterstitial', () => {
   });
 });
 
-describe('findCheckoutCashbackPct', () => {
+describe('findCashbackPct on checkout pages', () => {
   it('returns the largest N% back found', () => {
     const doc = docOf('<html><body>Earn 10% back on this purchase. Prime members: 12% back</body></html>');
-    expect(findCheckoutCashbackPct(doc)).toBe(12);
+    expect(findCashbackPct(doc)).toBe(12);
   });
   it('returns null when absent', () => {
     const doc = docOf('<html><body>no cashback here</body></html>');
-    expect(findCheckoutCashbackPct(doc)).toBeNull();
+    expect(findCashbackPct(doc)).toBeNull();
   });
   it('reads 6% back from a real /spc fixture', () => {
     const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
-    expect(findCheckoutCashbackPct(doc)).toBe(6);
+    expect(findCashbackPct(doc)).toBe(6);
   });
 });
 

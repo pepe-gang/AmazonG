@@ -13,8 +13,6 @@ import type { JobAttempt, LogEvent } from '../shared/types.js';
 import { snapshotDir, clearAllSnapshots } from '../browser/snapshot.js';
 import { pickIdsToEvict } from './jobStoreRingBuffer.js';
 
-export { makeAttemptId, sanitizeProfileKey } from '../shared/sanitize.js';
-
 type Stored = {
   attempts: Record<string, JobAttempt>;
 };
