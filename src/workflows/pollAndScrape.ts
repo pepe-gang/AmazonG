@@ -740,10 +740,10 @@ async function handleJob(
       { jobId: job.id, error: err instanceof Error ? err.message : String(err) },
       cid,
     );
-    return [];
+    return { accounts: [], bgAccounts: [] };
   });
   const requireMinByEmail = new Map<string, boolean>(
-    accountOverrides.map((a) => [a.email.toLowerCase(), a.requireMinCashback]),
+    accountOverrides.accounts.map((a) => [a.email.toLowerCase(), a.requireMinCashback]),
   );
   const effectiveMinByEmail = new Map<string, number>(
     eligible.map((p) => {

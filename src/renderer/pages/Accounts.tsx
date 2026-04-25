@@ -128,15 +128,23 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   // buys). We only carry them in renderer state for the toggle UX —
   // source of truth stays server-side. Email keys are lowercased.
   const [remoteSettings, setRemoteSettings] = useState<
-    Record<string, { requireMinCashback: boolean }>
+    Record<string, { requireMinCashback: boolean; bgAccountId: string | null }>
   >({});
+  // The user's BGAccount list — drives the per-account "Submit
+  // tracking to" dropdown. Empty list when the user hasn't connected
+  // any BG account yet (the dropdown disables itself).
+  const [bgAccounts, setBgAccounts] = useState<
+    { id: string; label: string; username: string }[]
+  >([]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const map = await window.autog.profilesRemoteSettings();
-        if (!cancelled) setRemoteSettings(map ?? {});
+        const r = await window.autog.profilesRemoteSettings();
+        if (cancelled) return;
+        setRemoteSettings(r?.settings ?? {});
+        setBgAccounts(r?.bgAccounts ?? []);
       } catch {
         // Quiet failure — if BG is offline the toggle falls back to
         // "require" (default true) visually. Buy flow already fails
@@ -151,13 +159,42 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   const toggleRequireMinCashback = async (email: string) => {
     const key = email.toLowerCase();
     const current = remoteSettings[key]?.requireMinCashback ?? true;
+    const currentBgAccountId = remoteSettings[key]?.bgAccountId ?? null;
     const next = !current;
     // Optimistic update — flip immediately, roll back on PATCH failure.
-    setRemoteSettings((prev) => ({ ...prev, [key]: { requireMinCashback: next } }));
+    setRemoteSettings((prev) => ({
+      ...prev,
+      [key]: { requireMinCashback: next, bgAccountId: currentBgAccountId },
+    }));
     try {
       await window.autog.profilesSetRequireMinCashback(email, next);
     } catch (err) {
-      setRemoteSettings((prev) => ({ ...prev, [key]: { requireMinCashback: current } }));
+      setRemoteSettings((prev) => ({
+        ...prev,
+        [key]: { requireMinCashback: current, bgAccountId: currentBgAccountId },
+      }));
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const setBgAccount = async (email: string, bgAccountId: string | null) => {
+    const key = email.toLowerCase();
+    const current = remoteSettings[key];
+    const requireMinCashback = current?.requireMinCashback ?? true;
+    const previous = current?.bgAccountId ?? null;
+    if (previous === bgAccountId) return;
+    // Optimistic.
+    setRemoteSettings((prev) => ({
+      ...prev,
+      [key]: { requireMinCashback, bgAccountId },
+    }));
+    try {
+      await window.autog.profilesSetBgAccount(email, bgAccountId);
+    } catch (err) {
+      setRemoteSettings((prev) => ({
+        ...prev,
+        [key]: { requireMinCashback, bgAccountId: previous },
+      }));
       showToast(err instanceof Error ? err.message : String(err));
     }
   };
@@ -553,6 +590,58 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                           <span className="text-xs font-medium text-foreground/80">
                             Require ≥ 6% CB
                           </span>
+                        </label>
+                      );
+                    })()}
+                    {(() => {
+                      // Per-account "Submit tracking to" dropdown. Behavior
+                      // by BG-account count:
+                      //   0  → disabled, hint to add a BG account on the dashboard
+                      //   1  → auto-display the only choice; no real picker
+                      //   N  → dropdown with the user's BG accounts; null = "Select…"
+                      const current =
+                        remoteSettings[p.email.toLowerCase()]?.bgAccountId ?? null;
+                      const onlyOne = bgAccounts.length === 1;
+                      const noneAvailable = bgAccounts.length === 0;
+                      // Effective selection — when there's exactly one BG
+                      // account, the resolver always uses it even if no
+                      // explicit value is set, so the UI mirrors that
+                      // ("auto-fill"). When there are many, null reads as
+                      // "Select…" so the user knows to pick.
+                      const effective = onlyOne ? bgAccounts[0]!.id : current;
+                      return (
+                        <label
+                          className="flex items-center gap-2"
+                          title={
+                            noneAvailable
+                              ? 'Add a BG account on the BetterBG dashboard first'
+                              : onlyOne
+                                ? `All tracking submitted via ${bgAccounts[0]!.label}`
+                                : 'Where carrier tracking captured for buys on this Amazon account gets submitted on buyinggroup.com'
+                          }
+                        >
+                          <span className="text-xs font-medium text-foreground/80">
+                            Submit to
+                          </span>
+                          <select
+                            value={effective ?? ''}
+                            disabled={noneAvailable || onlyOne}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              void setBgAccount(p.email, v === '' ? null : v);
+                            }}
+                            className="text-xs bg-white/[0.03] border border-white/10 rounded-md px-2 py-1 text-foreground/90 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:border-white/30"
+                          >
+                            {noneAvailable && <option value="">No BG account</option>}
+                            {!onlyOne && !noneAvailable && (
+                              <option value="">Select…</option>
+                            )}
+                            {bgAccounts.map((bg) => (
+                              <option key={bg.id} value={bg.id}>
+                                {bg.label}
+                              </option>
+                            ))}
+                          </select>
                         </label>
                       );
                     })()}

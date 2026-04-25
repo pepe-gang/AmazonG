@@ -1282,10 +1282,13 @@ a,
 .jobs-table .cell-profit { text-align: right; }
 .jobs-table .cell-qty { text-align: center; }
 .jobs-table .cell-status { text-align: center; }
-/* Top-align cells that may have multiple lines (item title + chips,
-   account email + name) so they hang from the top. */
-.jobs-table .cell-item,
-.jobs-table .cell-account { vertical-align: top; }
+/* Top-align the item cell (title + chip stack hang from the top so
+   long titles wrap downward predictably). The account cell uses the
+   table's default middle alignment so when a row is made tall by a
+   multi-tracking-id tracking column, the email pill + display name
+   sit centered next to the tracking list instead of clinging to the
+   top of an otherwise empty row. */
+.jobs-table .cell-item { vertical-align: top; }
 .cell-date {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;

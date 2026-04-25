@@ -52,6 +52,21 @@ export type AmazonAccountSetting = {
   /** When false, skip the worker's min-cashback gate for this account
    *  (user flipped the toggle on the web dashboard). Default true. */
   requireMinCashback: boolean;
+  /** Per-Amazon-account routing for buyinggroup.com tracking submission.
+   *  When tracking is captured for an order placed on this account, BG
+   *  will submit those carrier codes to this BGAccount on bg.com. Null
+   *  falls back to "user's only BGAccount" when there's exactly one,
+   *  else the row is marked skipped_no_route for manual handling. */
+  bgAccountId: string | null;
+};
+
+/** A BG account (buyinggroup.com login) the user has connected to BG.
+ *  Populated by GET /api/autog/amazon-accounts so AmazonG's per-account
+ *  dropdown can render without a second IPC round-trip. */
+export type BGAccountInfo = {
+  id: string;
+  label: string;
+  username: string;
 };
 
 export type BGClient = {
@@ -106,10 +121,16 @@ export type BGClient = {
   /**
    * Fetch per-Amazon-account settings configured on BG's web dashboard.
    * Worker calls this each claim cycle to pick up toggle changes without
-   * needing a restart. Returns an empty list on auth failure so a misconfigured
-   * key can't silently flip the cashback gate off for every account.
+   * needing a restart. Also returns the user's BGAccount list so the
+   * Accounts-tab dropdown for tracking-submit routing can populate
+   * without a second round-trip. Returns empty arrays on auth failure
+   * so a misconfigured key can't silently flip the cashback gate off
+   * for every account.
    */
-  listAmazonAccounts(): Promise<AmazonAccountSetting[]>;
+  listAmazonAccounts(): Promise<{
+    accounts: AmazonAccountSetting[];
+    bgAccounts: BGAccountInfo[];
+  }>;
   /**
    * Update the per-Amazon-account cashback-gate toggle from AmazonG's
    * Accounts UI. BG keys by email inside the AutoG key's user scope —
@@ -119,6 +140,16 @@ export type BGClient = {
   setAmazonAccountRequireMinCashback(
     email: string,
     requireMinCashback: boolean,
+  ): Promise<AmazonAccountSetting>;
+  /**
+   * Set or clear the per-Amazon-account tracking-submit routing target.
+   * Pass `null` to clear (the resolver then falls through to single-
+   * BGAccount auto-fill or skipped_no_route). Server verifies the
+   * BGAccount belongs to the calling user before writing.
+   */
+  setAmazonAccountBgAccount(
+    email: string,
+    bgAccountId: string | null,
   ): Promise<AmazonAccountSetting>;
 };
 
@@ -278,11 +309,14 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
     },
 
     async listAmazonAccounts() {
-      const r = await request<{ accounts: AmazonAccountSetting[] }>(
-        '/api/autog/amazon-accounts',
-        { method: 'GET' },
-      );
-      return Array.isArray(r?.accounts) ? r.accounts : [];
+      const r = await request<{
+        accounts: AmazonAccountSetting[];
+        bgAccounts: BGAccountInfo[];
+      }>('/api/autog/amazon-accounts', { method: 'GET' });
+      return {
+        accounts: Array.isArray(r?.accounts) ? r.accounts : [],
+        bgAccounts: Array.isArray(r?.bgAccounts) ? r.bgAccounts : [],
+      };
     },
 
     async setAmazonAccountRequireMinCashback(email, requireMinCashback) {
@@ -291,6 +325,20 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         {
           method: 'POST',
           body: JSON.stringify({ email, requireMinCashback }),
+        },
+      );
+      if (!r) {
+        throw new BGApiError(500, '/api/autog/amazon-accounts', 'empty response');
+      }
+      return r;
+    },
+
+    async setAmazonAccountBgAccount(email, bgAccountId) {
+      const r = await request<AmazonAccountSetting>(
+        '/api/autog/amazon-accounts',
+        {
+          method: 'POST',
+          body: JSON.stringify({ email, bgAccountId }),
         },
       );
       if (!r) {

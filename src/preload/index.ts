@@ -53,14 +53,18 @@ const bridge: AutoGBridge = {
   dealsTrigger: (dealId) =>
     ipcRenderer.invoke(IPC.dealsTrigger, dealId) as ReturnType<AutoGBridge['dealsTrigger']>,
   profilesRemoteSettings: () =>
-    ipcRenderer.invoke(IPC.profilesRemoteSettings) as Promise<
-      Record<string, { requireMinCashback: boolean }>
+    ipcRenderer.invoke(IPC.profilesRemoteSettings) as ReturnType<
+      AutoGBridge['profilesRemoteSettings']
     >,
   profilesSetRequireMinCashback: (email, requireMinCashback) =>
     ipcRenderer.invoke(IPC.profilesSetRequireMinCashback, email, requireMinCashback) as Promise<{
       email: string;
       requireMinCashback: boolean;
     }>,
+  profilesSetBgAccount: (email, bgAccountId) =>
+    ipcRenderer.invoke(IPC.profilesSetBgAccount, email, bgAccountId) as ReturnType<
+      AutoGBridge['profilesSetBgAccount']
+    >,
   autoEnqueueStatus: () =>
     ipcRenderer.invoke(IPC.autoEnqueueStatus) as ReturnType<AutoGBridge['autoEnqueueStatus']>,
 

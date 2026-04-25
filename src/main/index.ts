@@ -880,15 +880,23 @@ function registerIpcHandlers(): void {
   // rather than the AmazonG install. Renderer paints the Accounts UI
   // from this map; flips PATCH back to BG and refresh the cache.
   ipcMain.handle(IPC.profilesRemoteSettings, async () => {
-    if (!apiKey) return {};
+    if (!apiKey) return { settings: {}, bgAccounts: [] };
     const settings = await loadSettings();
     const bg = createBGClient(settings.bgBaseUrl, apiKey);
-    const rows = await bg.listAmazonAccounts().catch(() => []);
-    const map: Record<string, { requireMinCashback: boolean }> = {};
-    for (const r of rows) {
-      map[r.email.toLowerCase()] = { requireMinCashback: r.requireMinCashback };
+    const r = await bg
+      .listAmazonAccounts()
+      .catch(() => ({ accounts: [], bgAccounts: [] }));
+    const map: Record<
+      string,
+      { requireMinCashback: boolean; bgAccountId: string | null }
+    > = {};
+    for (const a of r.accounts) {
+      map[a.email.toLowerCase()] = {
+        requireMinCashback: a.requireMinCashback,
+        bgAccountId: a.bgAccountId,
+      };
     }
-    return map;
+    return { settings: map, bgAccounts: r.bgAccounts };
   });
 
   ipcMain.handle(
@@ -898,6 +906,17 @@ function registerIpcHandlers(): void {
       const settings = await loadSettings();
       const bg = createBGClient(settings.bgBaseUrl, apiKey);
       return bg.setAmazonAccountRequireMinCashback(email, requireMinCashback);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.profilesSetBgAccount,
+    async (_e, email: string, bgAccountId: string | null) => {
+      if (!apiKey) throw new Error('not connected to BG');
+      const settings = await loadSettings();
+      const bg = createBGClient(settings.bgBaseUrl, apiKey);
+      const r = await bg.setAmazonAccountBgAccount(email, bgAccountId);
+      return { email: r.email, bgAccountId: r.bgAccountId };
     },
   );
 

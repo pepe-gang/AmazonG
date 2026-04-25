@@ -39,12 +39,18 @@ export const IPC = {
    *  scoped to the authed user, invisible to any other AutoG key. */
   dealsTrigger: 'deals:trigger',
   /** Fetch the per-Amazon-account remote settings map from BG (keyed by
-   *  email → { requireMinCashback }). Renderer calls this when the
-   *  Accounts tab mounts to paint the toggles with the live state. */
+   *  email → { requireMinCashback, bgAccountId }) plus the user's
+   *  list of BGAccounts (so the per-account dropdown can render).
+   *  Renderer calls this when the Accounts tab mounts to paint the
+   *  toggles + dropdown with the live state. */
   profilesRemoteSettings: 'profiles:remote-settings',
   /** Toggle the cashback gate for one Amazon account on BG. Returns the
    *  updated setting row so the caller can reconcile optimistic state. */
   profilesSetRequireMinCashback: 'profiles:set-require-min-cashback',
+  /** Set or clear the per-Amazon-account tracking-submit routing target
+   *  (`AmazonAccount.bgAccountId` on BG). Pass null to clear; the
+   *  resolver then falls through to single-BGAccount auto-fill. */
+  profilesSetBgAccount: 'profiles:set-bg-account',
   /** Live status of the scheduled auto-enqueue feature: enabled flag,
    *  configured interval, last/next run timestamps, and the in-memory
    *  result of the most recent tick (queued/skipped/failed counts). The
@@ -267,8 +273,18 @@ export type AutoGBridge = {
     price: string | null;
     oldPrice: string | null;
   }>;
-  profilesRemoteSettings(): Promise<Record<string, { requireMinCashback: boolean }>>;
+  profilesRemoteSettings(): Promise<{
+    /** Map of lowercased email → per-account remote settings. */
+    settings: Record<string, { requireMinCashback: boolean; bgAccountId: string | null }>;
+    /** User's BGAccount list for the per-account dropdown. Empty when
+     *  the user hasn't connected any BG accounts yet. */
+    bgAccounts: { id: string; label: string; username: string }[];
+  }>;
   profilesSetRequireMinCashback(email: string, requireMinCashback: boolean): Promise<{ email: string; requireMinCashback: boolean }>;
+  profilesSetBgAccount(email: string, bgAccountId: string | null): Promise<{
+    email: string;
+    bgAccountId: string | null;
+  }>;
   autoEnqueueStatus(): Promise<{
     enabled: boolean;
     intervalHours: number;
