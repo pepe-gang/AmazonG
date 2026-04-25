@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -284,6 +285,31 @@ export function JobsTable({
     }
     return inProgress.concat(queued, rest);
   }, [attempts, sortKey, sortDir, visibleStatusGroups, accountFilter, search]);
+
+  // Row virtualization. Only the visible rows + a small overscan are
+  // mounted in the DOM at any given time — the rest live as a single
+  // sized spacer above and below. Drops the JobsTable's render cost
+  // from O(rows) to O(viewport) on every `evt:jobs` update, which is
+  // the biggest renderer-CPU win when the table grows past ~50 rows.
+  // Uses native <table> layout (column widths align across rows) by
+  // padding via two empty <tr>s rather than absolute-positioning rows.
+  const scrollWrapRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: visible.length,
+    getScrollElement: () => scrollWrapRef.current,
+    // Best guess at a typical row height; rows with multi-line cells
+    // (multi-tracking, long titles) measure themselves via
+    // `measureElement` and the virtualizer adjusts.
+    estimateSize: () => 64,
+    overscan: 6,
+  });
+  const virtualRows = virtualizer.getVirtualItems();
+  const totalSize = virtualizer.getTotalSize();
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0]!.start : 0;
+  const paddingBottom =
+    virtualRows.length > 0
+      ? totalSize - virtualRows[virtualRows.length - 1]!.end
+      : 0;
 
   const onSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -602,7 +628,7 @@ export function JobsTable({
         </div>
       )}
 
-      <div className="flex-1 min-h-0 overflow-auto jobs-table-wrap">
+      <div ref={scrollWrapRef} className="flex-1 min-h-0 overflow-auto jobs-table-wrap">
         {attempts.length === 0 ? (
           <div className="flex items-center justify-center min-h-[200px] text-sm text-muted-foreground text-center px-8">
             {workerRunning
@@ -672,46 +698,70 @@ export function JobsTable({
               </tr>
             </thead>
             <tbody>
-              {visible.map((a) => (
-                <tr key={a.attemptId} className={selected.has(a.attemptId) ? 'row-selected' : undefined}>
-                  <td className="cell-select">
-                    <input
-                      type="checkbox"
-                      aria-label={`Select row ${a.dealTitle ?? a.attemptId}`}
-                      checked={selected.has(a.attemptId)}
-                      onChange={(e) => {
-                        const next = new Set(selected);
-                        if (e.target.checked) next.add(a.attemptId);
-                        else next.delete(a.attemptId);
-                        setSelected(next);
-                      }}
-                    />
-                  </td>
-                  {columnOrder.map((id) => (
-                    <JobsCell
-                      key={id}
-                      id={id}
-                      a={a}
-                      accountLabel={accountLabelByEmail.get(a.amazonEmail.toLowerCase()) ?? null}
-                      onOpenProductUrl={(url) => void window.autog.openExternal(url)}
-                      onOpenOrder={() => void openOrderInProfile(a.amazonEmail, a.orderId!)}
-                      onOpenFillerOrder={(oid) => void openOrderInProfile(a.amazonEmail, oid)}
-                    />
-                  ))}
-                  <td className="cell-actions">
-                    {a.status === 'cancelled_by_amazon' && (
-                      <RebuyButton
-                        attempt={a}
-                        onToast={(msg) => {
-                          setOrderToast(msg);
-                          setTimeout(() => setOrderToast(null), 5000);
+              {paddingTop > 0 && (
+                <tr aria-hidden="true">
+                  <td
+                    colSpan={columnOrder.length + 2}
+                    style={{ height: paddingTop, padding: 0, border: 'none' }}
+                  />
+                </tr>
+              )}
+              {virtualRows.map((vi) => {
+                const a = visible[vi.index]!;
+                return (
+                  <tr
+                    key={a.attemptId}
+                    data-index={vi.index}
+                    ref={virtualizer.measureElement}
+                    className={selected.has(a.attemptId) ? 'row-selected' : undefined}
+                  >
+                    <td className="cell-select">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select row ${a.dealTitle ?? a.attemptId}`}
+                        checked={selected.has(a.attemptId)}
+                        onChange={(e) => {
+                          const next = new Set(selected);
+                          if (e.target.checked) next.add(a.attemptId);
+                          else next.delete(a.attemptId);
+                          setSelected(next);
                         }}
                       />
-                    )}
-                    <ViewLogButton onViewLogs={() => onViewLogs(a)} />
-                  </td>
+                    </td>
+                    {columnOrder.map((id) => (
+                      <JobsCell
+                        key={id}
+                        id={id}
+                        a={a}
+                        accountLabel={accountLabelByEmail.get(a.amazonEmail.toLowerCase()) ?? null}
+                        onOpenProductUrl={(url) => void window.autog.openExternal(url)}
+                        onOpenOrder={() => void openOrderInProfile(a.amazonEmail, a.orderId!)}
+                        onOpenFillerOrder={(oid) => void openOrderInProfile(a.amazonEmail, oid)}
+                      />
+                    ))}
+                    <td className="cell-actions">
+                      {a.status === 'cancelled_by_amazon' && (
+                        <RebuyButton
+                          attempt={a}
+                          onToast={(msg) => {
+                            setOrderToast(msg);
+                            setTimeout(() => setOrderToast(null), 5000);
+                          }}
+                        />
+                      )}
+                      <ViewLogButton onViewLogs={() => onViewLogs(a)} />
+                    </td>
+                  </tr>
+                );
+              })}
+              {paddingBottom > 0 && (
+                <tr aria-hidden="true">
+                  <td
+                    colSpan={columnOrder.length + 2}
+                    style={{ height: paddingBottom, padding: 0, border: 'none' }}
+                  />
                 </tr>
-              ))}
+              )}
             </tbody>
           </table>
         )}

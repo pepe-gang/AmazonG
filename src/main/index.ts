@@ -99,8 +99,11 @@ async function broadcastProfiles(list?: AmazonProfile[]): Promise<void> {
 }
 
 // Coalesce job-list broadcasts so a fan-out across N profiles doesn't
-// fire 2N+ full-list IPC sends. Trailing 100ms timer is enough for the
-// renderer to look smooth while collapsing burst updates.
+// fire 2N+ full-list IPC sends. 250ms trailing timer collapses burst
+// updates further than the previous 100ms — not perceptibly less
+// "live" to the user, but ~2.5× fewer renderer wake-ups (and the
+// JobsTable re-renders + re-blurs that come with each one) during
+// fan-outs across multiple profiles.
 let jobsBroadcastTimer: NodeJS.Timeout | null = null;
 function scheduleBroadcastJobs(): void {
   if (jobsBroadcastTimer) return;
@@ -109,7 +112,7 @@ function scheduleBroadcastJobs(): void {
     void listMergedAttempts()
       .then((list) => mainWindow?.webContents.send(IPC.evtJobs, list))
       .catch(() => undefined);
-  }, 100);
+  }, 250);
 }
 
 function toNumOrNull(v: string | null | undefined): number | null {
@@ -401,6 +404,17 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // Chromium's spellcheck runs a background dictionary load + scan
+      // on every editable text input. AmazonG only has the search bar,
+      // a few prefix inputs, and account-label inputs — none of them
+      // need spellcheck. Default-true cost is small but constant; off
+      // is free and shaves a process worker.
+      spellcheck: false,
+      // Default is true; setting explicitly so a future copy-paste of
+      // this block doesn't accidentally flip it. Throttling means a
+      // hidden window's setInterval / requestAnimationFrame go nearly
+      // idle — load-bearing for our paused-when-hidden contract.
+      backgroundThrottling: true,
     },
   });
 
@@ -1057,22 +1071,50 @@ function registerIpcHandlers(): void {
     IPC.jobsVerifyOrder,
     async (_e, attemptId: string) => {
       // Look up the attempt → resolve email + orderId → run verifyOrder in
-      // a fresh headless session. If the worker is running and holding the
+      // a fresh session. If the worker is running and holding the
       // profile's userDataDir lock, return 'busy' so the renderer toasts a
       // clear "stop the worker" message instead of throwing a raw lock
       // error.
-      const list = await storeListAttempts();
-      const a = list.find((x) => x.attemptId === attemptId);
+      // Try local store first, fall back to the server-merged list for
+      // rows synced from BG that never ran through this worker
+      // (cross-device buys, fresh installs). Without the fallback, the
+      // user gets a confusing "attempt not found" on a row that's right
+      // in front of them.
+      let a = (await storeListAttempts()).find((x) => x.attemptId === attemptId);
+      let serverOnly = false;
+      if (!a) {
+        a = (await listMergedAttempts()).find((x) => x.attemptId === attemptId);
+        serverOnly = !!a;
+      }
       if (!a) return { kind: 'error' as const, message: 'attempt not found' };
       if (!a.orderId) return { kind: 'error' as const, message: 'no order id on this row' };
       const email = a.amazonEmail;
       const orderId = a.orderId;
 
+      // Mirror server-only rows into the local store so the post-verify
+      // storeUpdateAttempt lands. Without this, the row's status would
+      // never flip to 'verified' / 'cancelled_by_amazon' locally even
+      // though the verify ran successfully.
+      if (serverOnly) {
+        await storeCreateAttempt({
+          ...a,
+          trackingIds: a.trackingIds ?? null,
+        }).catch(() => undefined);
+      }
+
+      // Respect per-profile headless preference (fall back to global
+      // setting). Mirrors jobsFetchTracking — useful when the user has
+      // toggled an account to Visible to debug a flow.
+      const profiles = await loadProfiles();
+      const profile = profiles.find((p) => p.email.toLowerCase() === email.toLowerCase());
+      const settings = await loadSettings();
+      const headless = profile?.headless ?? settings.headless;
+
       let session: DriverSession | null = null;
       try {
         session = await openSession(email, {
           userDataRoot: profileDir(),
-          headless: true,
+          headless,
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

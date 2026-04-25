@@ -27,7 +27,7 @@ import type {
 } from '@shared/types';
 import { computeProfit } from '@shared/profit';
 import { STATUS_GROUP } from './lib/jobsColumns.js';
-import { formatUptime, relTime } from './lib/format.js';
+import { formatUptime } from './lib/format.js';
 import { useSettings } from './hooks/useSettings.js';
 import {
   AppIcon,
@@ -227,7 +227,6 @@ function MainShell({ status }: { status: RendererStatus }) {
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [profiles, setProfiles] = useState<AmazonProfile[]>([]);
   const [attempts, setAttempts] = useState<JobAttempt[]>([]);
-  const [uptimeTick, setUptimeTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const [appVersion, setAppVersion] = useState<string>('');
   const [updateInfo, setUpdateInfo] = useState<{ latest: string } | null>(null);
@@ -255,39 +254,16 @@ function MainShell({ status }: { status: RendererStatus }) {
     void window.autog.profilesList().then(setProfiles);
     const offJobs = window.autog.onJobs(setAttempts);
     void window.autog.jobsList().then(setAttempts);
-    // Uptime tick — drives the "Running 12s" pill in the header. Pause
-    // when the window is backgrounded: the user can't see the timer,
-    // and the every-second re-render forces the GPU compositor to
-    // re-blur every glass surface (heavy on M-series fans). Resumes on
-    // visibilitychange. Catches up the missed seconds in one bump.
-    let tick: ReturnType<typeof setInterval> | null = null;
-    const startTick = () => {
-      if (tick !== null) return;
-      tick = setInterval(() => setUptimeTick((n) => n + 1), 1000);
-    };
-    const stopTick = () => {
-      if (tick === null) return;
-      clearInterval(tick);
-      tick = null;
-    };
+    // Pause perpetual CSS animations (aurora drift + animate-ping
+    // halos) when the window is hidden. The 1s uptime tick used to
+    // live here too — it's been moved into <UptimeText /> so it only
+    // re-renders that one component instead of MainShell + every
+    // routed page.
     const onVisibility = () => {
-      if (document.hidden) {
-        stopTick();
-        // Pause perpetual CSS animations (aurora drift + animate-ping
-        // halos). Same motivation as the tick: don't burn GPU
-        // compositing animations the user can't see. CSS rule lives
-        // in index.css under `.bg-paused`.
-        document.body.classList.add('bg-paused');
-      } else {
-        document.body.classList.remove('bg-paused');
-        // Bump once on resume so the visible label reflects current
-        // wall time before the next interval fires.
-        setUptimeTick((n) => n + 1);
-        startTick();
-      }
+      if (document.hidden) document.body.classList.add('bg-paused');
+      else document.body.classList.remove('bg-paused');
     };
-    if (!document.hidden) startTick();
-    else document.body.classList.add('bg-paused');
+    if (document.hidden) document.body.classList.add('bg-paused');
     document.addEventListener('visibilitychange', onVisibility);
     // Server-state poll: picks up cross-device changes and verify-phase
     // flips that happen on the BetterBG worker without a local trigger.
@@ -298,7 +274,6 @@ function MainShell({ status }: { status: RendererStatus }) {
       off();
       offProfiles();
       offJobs();
-      stopTick();
       document.removeEventListener('visibilitychange', onVisibility);
       document.body.classList.remove('bg-paused');
       clearInterval(serverPoll);
@@ -329,19 +304,9 @@ function MainShell({ status }: { status: RendererStatus }) {
 
   // Disconnect moved into AccountsView — kept out of the header so the
   // top chrome stays focused on worker state (Start/Stop + uptime).
-
-  const uptimeLabel = useMemo(() => {
-    if (!stats.startedAt) return '—';
-    void uptimeTick;
-    return formatUptime(Date.now() - stats.startedAt);
-  }, [stats.startedAt, uptimeTick]);
-
-  const lastJobLabel = useMemo(() => {
-    if (!stats.lastJobAt) return '—';
-    void uptimeTick;
-    const diff = Math.max(0, Date.now() - new Date(stats.lastJobAt).getTime());
-    return relTime(diff);
-  }, [stats.lastJobAt, uptimeTick]);
+  // (Uptime label is rendered by <UptimeText /> below — it owns its own
+  // 1s interval so the per-second tick doesn't re-render this whole
+  // shell + every routed page.)
 
   const accountsCount = profiles.length;
   const accountsReady = profiles.filter((p) => p.enabled && p.loggedIn).length;
@@ -384,7 +349,7 @@ function MainShell({ status }: { status: RendererStatus }) {
               />
             </span>
             <span className="tabular-nums text-foreground/90">
-              {status.running ? uptimeLabel : 'Idle'}
+              {status.running ? <UptimeText startedAt={stats.startedAt} /> : 'Idle'}
             </span>
           </div>
           <Button
@@ -442,7 +407,7 @@ function MainShell({ status }: { status: RendererStatus }) {
                 element={
                   <DashboardView
                     status={status}
-                    uptimeLabel={uptimeLabel}
+                    startedAt={stats.startedAt}
                     attempts={attempts}
                     profiles={profiles}
                     onViewLogs={setLogsAttempt}
@@ -518,12 +483,12 @@ function MainShell({ status }: { status: RendererStatus }) {
    ============================================================ */
 function DashboardView(props: {
   status: RendererStatus;
-  uptimeLabel: string;
+  startedAt: number | null;
   attempts: JobAttempt[];
   profiles: AmazonProfile[];
   onViewLogs: (a: JobAttempt) => void;
 }) {
-  const { status, uptimeLabel, attempts, profiles, onViewLogs } = props;
+  const { status, startedAt, attempts, profiles, onViewLogs } = props;
   const { settings } = useSettings();
   // Timestamp of the last time the user reset the Failed counter.
   // Every attempt with a failed status whose createdAt is earlier than
@@ -608,7 +573,7 @@ function DashboardView(props: {
               value: status.running ? 'Running' : 'Idle',
               valueClass: status.running ? 'green' : 'muted',
             },
-            { label: 'Uptime', value: uptimeLabel, valueClass: 'muted' },
+            { label: 'Uptime', value: status.running ? <UptimeText startedAt={startedAt} /> : '—', valueClass: 'muted' },
             {
               label: 'Amazon accounts',
               value: `${accountsReady} of ${accountsCount}`,
@@ -670,6 +635,50 @@ function DashboardView(props: {
       <AccountStatsCard attempts={attempts} profiles={profiles} />
     </div>
   );
+}
+
+/**
+ * Renders the worker's uptime as a live string ("12s", "3m 04s",
+ * "1h 02m"). Owns its own 1s interval — extracted from MainShell so
+ * the per-second tick re-renders only this one span instead of the
+ * whole shell + every routed page (which used to drag the JobsTable's
+ * useMemos and StatCard subtrees through a tick they didn't need).
+ *
+ * Pauses when the window is hidden via the `visibilitychange` event,
+ * so a backgrounded AmazonG isn't burning CPU updating an invisible
+ * label. Bumps once on resume so the visible label catches up before
+ * the next tick fires.
+ */
+function UptimeText({ startedAt }: { startedAt: number | null }) {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (startedAt === null) return;
+    let id: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (id !== null) return;
+      id = setInterval(() => force((n) => n + 1), 1000);
+    };
+    const stop = () => {
+      if (id === null) return;
+      clearInterval(id);
+      id = null;
+    };
+    const onVis = () => {
+      if (document.hidden) stop();
+      else {
+        force((n) => n + 1);
+        start();
+      }
+    };
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [startedAt]);
+  if (startedAt === null) return <>—</>;
+  return <>{formatUptime(Date.now() - startedAt)}</>;
 }
 
 function applyLogsToStats(prev: Stats, batch: LogEvent[]): Stats {

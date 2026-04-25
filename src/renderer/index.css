@@ -254,18 +254,6 @@
     animation: aurora-drift 32s ease-in-out infinite alternate;
   }
 
-  /* Subtle film grain */
-  body::after {
-    content: "";
-    position: fixed;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    opacity: 0.04;
-    mix-blend-mode: overlay;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.8'/></svg>");
-  }
-
   @keyframes aurora-drift {
     0%   { transform: translate(0, 0) scale(1); }
     50%  { transform: translate(-3%, 2%) scale(1.05); }
