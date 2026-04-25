@@ -48,6 +48,14 @@ import type { AmazonProfile, IdentityInfo, RendererStatus } from '../shared/type
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 app.setName('AmazonG');
+// Override the OS-level process label so the macOS dock / Activity
+// Monitor / Cmd-Tab show "AmazonG" instead of the underlying
+// "Electron" binary name. Only matters in dev (`npm run dev`) where
+// no .app wrapper exists; the packaged build's Info.plist already
+// supplies CFBundleName from package.json's productName. Setting
+// process.title is cheap and idempotent — also makes ps + top read
+// "AmazonG" which is nicer for debugging.
+process.title = 'AmazonG';
 
 // When packaged, Playwright needs to find the Chromium binary that
 // electron-builder bundled under `Resources/playwright-browsers`. The
@@ -389,9 +397,21 @@ function profileDir(): string {
 const ONBOARDING_SIZE = { width: 500, height: 580 } as const;
 const APP_SIZE = { width: 1800, height: 1150 } as const;
 
+/** Icon path for dev runs only. Packaged builds get the icon from
+ *  the .app bundle (electron-builder bakes resources/icon.icns into
+ *  Contents/Resources/), so we don't need to set anything at runtime
+ *  there. Returns null when packaged or when the file is missing,
+ *  letting callers no-op cleanly. */
+function devIconPath(): string | null {
+  if (app.isPackaged) return null;
+  const p = join(__dirname, '../../resources/icon.png');
+  return existsSync(p) ? p : null;
+}
+
 function createWindow(): void {
   const connected = identity !== null;
   const size = connected ? APP_SIZE : ONBOARDING_SIZE;
+  const icon = devIconPath();
   mainWindow = new BrowserWindow({
     width: size.width,
     height: size.height,
@@ -404,6 +424,7 @@ function createWindow(): void {
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 14 },
     backgroundColor: '#f8fafc',
+    ...(icon ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -516,6 +537,14 @@ async function startWorkerNow(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  // Dev-mode dock icon. Packaged builds inherit the icon from the
+  // .app bundle's Info.plist; running `npm run dev` doesn't, so the
+  // dock would otherwise show the generic Electron mark.
+  const devIcon = devIconPath();
+  if (devIcon && process.platform === 'darwin') {
+    app.dock?.setIcon(devIcon);
+  }
+
   addLogSink((ev) => {
     mainWindow?.webContents.send(IPC.evtLog, ev);
   });
