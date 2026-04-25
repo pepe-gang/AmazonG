@@ -18,6 +18,7 @@ import {
   effectivePriceTolerance,
   verifyProductDetailed,
 } from '../parsers/productConstraints.js';
+import { DEFAULT_MISSING_CASHBACK_PCT } from '../shared/cashbackGate.js';
 import {
   BYG_BUTTON_SELECTOR,
   BYG_HEADER_SELECTOR,
@@ -49,6 +50,14 @@ type BuyWithFillersOptions = {
    * retry (coming in a later slice).
    */
   minCashbackPct: number;
+  /**
+   * Per-account toggle (default true). When false, the cashback gate
+   * is skipped entirely — buy proceeds regardless of the target's
+   * /spc cashback line, and a missing reading defaults to
+   * DEFAULT_MISSING_CASHBACK_PCT (5%) so the recorded value isn't
+   * null. See shared/cashbackGate.ts.
+   */
+  requireMinCashback: boolean;
   /**
    * When true, stop immediately before the final "Place Order" click.
    * All other mutations (cart edits, address swap, BG name toggle) still
@@ -580,7 +589,25 @@ export async function buyWithFillers(
   {
     // Below: targetAsin is narrowed to string (non-null) by the early return above.
     let cb = await verifyTargetCashback(page, targetAsin, info.title, opts.minCashbackPct);
-    if (!cb.ok) {
+    if (!cb.ok && !opts.requireMinCashback) {
+      // Permissive account: skip the cashback gate entirely. Record the
+      // observed pct (or 5% default when /spc didn't show a line) and
+      // proceed to Place Order. No BG1/BG2 toggle, no failure.
+      const substituted = cb.pct ?? DEFAULT_MISSING_CASHBACK_PCT;
+      logger.info(
+        'step.fillerBuy.spc.cashback.permissive',
+        {
+          targetAsin,
+          pageReadingPct: cb.pct,
+          substitutedPct: substituted,
+          fellBackToDefault: cb.pct === null,
+          reason: cb.reason,
+          minRequired: opts.minCashbackPct,
+        },
+        cid,
+      );
+      targetCashbackPct = substituted;
+    } else if (!cb.ok) {
       // 11. BG1/BG2 name-toggle retry. Some BG warehouse addresses
       //     unlock higher cashback when the delivery name alternates
       //     between "(BG1)" and "(BG2)" suffixes — Amazon re-evaluates
@@ -937,6 +964,16 @@ export async function buyWithFillers(
       },
       cid,
     );
+    // Safety-net buffer: even after waitForCancelOutcome resolves,
+    // Amazon's cancel pipeline (server-side state propagation,
+    // tracking beacons, etc.) can lag a few seconds behind the
+    // visible confirmation banner. Sit on the page for a beat before
+    // returning so the caller in pollAndScrape's `finally` doesn't
+    // race ahead and close the browser context while a cancel is
+    // still settling. Cheap (3s on a path that already took 30+s)
+    // and observed to fix "click cancel → page closed → cancel never
+    // registered" in user reports.
+    await page.waitForTimeout(3_000);
   }
 
   logger.info(

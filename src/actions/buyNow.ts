@@ -7,14 +7,20 @@ import { findCashbackPct, parsePrice } from '../parsers/amazonProduct.js';
 import {
   DELIVERY_OPTIONS_CHANGED_SELECTOR,
   computeCashbackRadioPlans,
+  isVerifyCardChallenge,
   parseOrderConfirmation,
 } from '../parsers/amazonCheckout.js';
 import { effectivePriceTolerance } from '../parsers/productConstraints.js';
 import type { BuyResult } from '../shared/types.js';
+import { evaluateCashbackGate } from '../shared/cashbackGate.js';
 
 type BuyOptions = {
   dryRun: boolean;
   minCashbackPct: number;
+  /** Per-account toggle (default true). When false, the cashback gate
+   *  is skipped entirely and a missing on-page reading defaults to
+   *  DEFAULT_MISSING_CASHBACK_PCT (5%). See shared/cashbackGate.ts. */
+  requireMinCashback: boolean;
   maxPrice: number | null;
   allowedAddressPrefixes: string[];
   correlationId?: string;
@@ -200,15 +206,27 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       });
     }
 
-    // 7. Checkout[2]: cashback gate. If below minimum, try the BG1/BG2
-    //    name-toggle workaround before giving up.
-    let cashbackPct = await readCashbackOnPage(page);
-    step('step.buy.cashback', {
-      pct: cashbackPct,
-      minRequired: opts.minCashbackPct,
-      pass: cashbackPct !== null && cashbackPct >= opts.minCashbackPct,
+    // 7. Checkout[2]: cashback gate.
+    //    Strict accounts (requireMinCashback=true): if below minimum,
+    //    run the BG1/BG2 name-toggle workaround once and re-evaluate.
+    //    Permissive accounts (requireMinCashback=false): skip the gate
+    //    and default a null reading to DEFAULT_MISSING_CASHBACK_PCT
+    //    so the recorded cashbackPct isn't null. See cashbackGate.ts.
+    const pageCashbackPct = await readCashbackOnPage(page);
+    let gate = evaluateCashbackGate({
+      pageCashbackPct,
+      requireMinCashback: opts.requireMinCashback,
+      minCashbackPct: opts.minCashbackPct,
     });
-    if (cashbackPct === null || cashbackPct < opts.minCashbackPct) {
+    step('step.buy.cashback', {
+      pct: pageCashbackPct,
+      effectivePct: gate.cashbackPct,
+      minRequired: opts.minCashbackPct,
+      requireMinCashback: opts.requireMinCashback,
+      fellBackToDefault: gate.kind === 'pass' && gate.fellBackToDefault,
+      pass: gate.kind === 'pass',
+    });
+    if (gate.kind === 'fail') {
       // Dry-run still runs the BG1/BG2 toggle (it's part of the workflow we
       // need to verify). The ONLY thing dry-run skips is the final Place
       // Order click. Saved-address mutations are intentional.
@@ -220,18 +238,21 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       if (!toggled.ok) {
         return fail('cashback_gate', toggled.reason, toggled.detail);
       }
-      cashbackPct = toggled.cashbackPct;
+      gate = evaluateCashbackGate({
+        pageCashbackPct: toggled.cashbackPct,
+        requireMinCashback: opts.requireMinCashback,
+        minCashbackPct: opts.minCashbackPct,
+      });
       step('step.buy.cashback.retry.ok', {
-        pct: cashbackPct,
+        pct: toggled.cashbackPct,
+        effectivePct: gate.cashbackPct,
         minRequired: opts.minCashbackPct,
       });
-      if (cashbackPct === null || cashbackPct < opts.minCashbackPct) {
-        return fail(
-          'cashback_gate',
-          cashbackPct === null ? 'cashback missing' : `cashback ${cashbackPct}%`,
-        );
+      if (gate.kind === 'fail') {
+        return fail('cashback_gate', gate.reason);
       }
     }
+    let cashbackPct: number | null = gate.cashbackPct;
 
     // 8. Dry-run gate — stop before clicking Place Order. Treat as a
     //    POSITIVE outcome: every check passed, the only thing skipped was
@@ -752,6 +773,22 @@ export async function waitForCheckout(
     }
 
     await page.waitForTimeout(500);
+  }
+  // Timeout fall-through. Before returning the generic "never appeared"
+  // message, snapshot the current page once and run pure detectors against
+  // it — surfaces a better diagnostic when /spc parked us on a known-bad
+  // interstitial (e.g. PMTS "Verify your card" card-address-challenge,
+  // which renders in place of the Place Order button when an address
+  // change tripped a payment-side fraud check). The 30s timeout remains
+  // the catch-all for genuinely unrelated failures.
+  try {
+    const html = await page.content();
+    const doc = new JSDOM(html).window.document;
+    if (isVerifyCardChallenge(doc)) {
+      return { ok: false, reason: 'Verify your card' };
+    }
+  } catch {
+    // ignore — fall through to the generic message
   }
   return { ok: false, reason: 'Place Order button never appeared in 30s' };
 }

@@ -8,11 +8,13 @@ import {
   DELIVERY_OPTIONS_CHANGED_SELECTOR,
   isBeforeYouGoInterstitial,
   isDeliveryOptionsChangedBanner,
+  isVerifyCardChallenge,
   parseOrderConfirmation,
   findCheckoutCashbackPct,
   readTargetCashbackFromDom,
   buildTitlePrefix,
   computeCashbackRadioPlans,
+  findCancelItemsLinkOnOrderDetails,
 } from '@parsers/amazonCheckout';
 
 function docOf(html: string): Document {
@@ -412,6 +414,62 @@ describe('isDeliveryOptionsChangedBanner (delivery-options-changed fixture)', ()
 });
 
 /**
+ * Fixture: live /spc capture where Amazon, instead of rendering the Place
+ * Order button, parked us at the PMTS card-address-challenge ("Verify your
+ * card") interstitial — a payment-side fraud check triggered by a recent
+ * shipping-address change. The buy is unrecoverable from the worker's
+ * side; the detector only exists to surface a clearer error than the
+ * generic "Place Order button never appeared in 30s" 30s-timeout fallback.
+ *
+ * Markup signature (relevant fragment from the fixture):
+ *
+ *   <span class="pmts-cc-address-challenge pmts-cc-address-challenge-form">
+ *     <div class="a-box a-alert a-alert-info ...">
+ *       <h4 class="a-alert-heading">Verify your card</h4>
+ *       ...
+ *     </div>
+ *     <input ... name="0h_PU_..._addCreditCardNumber" ...>
+ *     <button aria-label="Verify card" ...>Verify card</button>
+ *   </span>
+ */
+describe('isVerifyCardChallenge (verify-your-card fixture)', () => {
+  it('detects the PMTS verify-card challenge on the real fixture', () => {
+    const doc = docOf(fixture('spc-verify-your-card.html'));
+    expect(isVerifyCardChallenge(doc)).toBe(true);
+  });
+
+  it('returns false on a happy-path /spc (no challenge — negative control)', () => {
+    // If either the form-class selector or the heading regex drifted into
+    // matching unrelated /spc markup, every healthy buy would falsely fail
+    // with "Verify your card". Pin the negative against a real /spc fixture.
+    const doc = docOf(fixture('spc-macbook-B0FWD726XF-6pct.html'));
+    expect(isVerifyCardChallenge(doc)).toBe(false);
+  });
+
+  it('returns false on an unrelated page', () => {
+    const doc = docOf('<html><body>Place your order</body></html>');
+    expect(isVerifyCardChallenge(doc)).toBe(false);
+  });
+
+  it('requires BOTH the challenge form wrapper AND the heading', () => {
+    // The wrapper class alone (without the active "Verify your card"
+    // heading) should NOT trip the detector — Amazon ships PMTS scaffold
+    // markup in non-challenge states too.
+    const wrapperOnly = docOf(
+      '<html><body><span class="pmts-cc-address-challenge-form"></span></body></html>',
+    );
+    expect(isVerifyCardChallenge(wrapperOnly)).toBe(false);
+
+    // Conversely, the heading text alone (without the PMTS wrapper) is
+    // ambiguous — could appear in promo copy or unrelated alert content.
+    const headingOnly = docOf(
+      '<html><body><h4 class="a-alert-heading">Verify your card</h4></body></html>',
+    );
+    expect(isVerifyCardChallenge(headingOnly)).toBe(false);
+  });
+});
+
+/**
  * Fixture: live /spc captured 2026-04-23 for a FILLERS cart. Target is the
  * MacBook (B0FWD726XF) sharing one shipping group with 9 filler items —
  * all 10 delivered together. The 6% Amazon Day radio is ALREADY the
@@ -670,5 +728,55 @@ describe('computeCashbackRadioPlans (delivery-options-changed fixture)', () => {
 
     const plans = computeCashbackRadioPlans(doc, 6);
     expect(plans.find((p) => p.name === WIPED_GROUP)).toBeUndefined();
+  });
+});
+
+describe('findCancelItemsLinkOnOrderDetails', () => {
+  it('finds the Cancel items link on a real order-details fixture', () => {
+    // Real order-details page captured for filler order 114-2706026-4049019
+    // — the case where the direct cancel-items URL silently failed but
+    // the order-details page still exposes a "Cancel items" link.
+    const doc = docOf(fixture('order-details-cancellable-filler.html'));
+    const r = findCancelItemsLinkOnOrderDetails(doc);
+    expect(r.cancelHref).not.toBeNull();
+    expect(r.cancelHref).toMatch(
+      /\/progress-tracker\/package\/preship\/cancel-items\?orderID=114-2706026-4049019/,
+    );
+    // Real fixture has empty `<div data-component="cancelled">` template
+    // scaffolding but no actual cancellation copy — must not be flagged.
+    expect(r.alreadyCancelled).toBe(false);
+  });
+
+  it('returns null when no cancel link is present (already shipped)', () => {
+    const doc = docOf(`
+      <html><body>
+        <a href="/gp/your-account/ship-track?orderId=123">Track package</a>
+        <a href="/review/review-your-purchases?asins=ABC">Write a product review</a>
+      </body></html>
+    `);
+    const r = findCancelItemsLinkOnOrderDetails(doc);
+    expect(r.cancelHref).toBeNull();
+    expect(r.alreadyCancelled).toBe(false);
+  });
+
+  it('detects already-cancelled banner', () => {
+    const doc = docOf(`
+      <html><body>
+        <div data-component="cancelled">This order has been cancelled.</div>
+      </body></html>
+    `);
+    const r = findCancelItemsLinkOnOrderDetails(doc);
+    expect(r.alreadyCancelled).toBe(true);
+    expect(r.cancelHref).toBeNull();
+  });
+
+  it('falls back to text match when href is unrecognized', () => {
+    const doc = docOf(`
+      <html><body>
+        <a href="/some/other/path?orderID=999">Cancel items</a>
+      </body></html>
+    `);
+    const r = findCancelItemsLinkOnOrderDetails(doc);
+    expect(r.cancelHref).toBe('/some/other/path?orderID=999');
   });
 });

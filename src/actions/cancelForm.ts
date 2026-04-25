@@ -61,10 +61,43 @@ export type SubmittedResult =
  * selected items") — try id/name selectors first, fall back to label
  * match. Returns `clicked: true` with the selector used, or
  * `clicked: false` if nothing matched.
+ *
+ * Tees up listeners for the form-POST response and the resulting
+ * navigation BEFORE firing the click — Amazon's cancel form is a
+ * classic synchronous form submit, so the click triggers a navigation
+ * whose response carries the actual server-side cancel ack. The
+ * caller (waitForCancelOutcome) consumes those promises to block
+ * until the round-trip completes; without them, an in-page click
+ * returns immediately and the page can be torn down before Amazon
+ * has even received the POST.
  */
 export async function clickRequestCancellation(
   page: Page,
 ): Promise<SubmittedResult> {
+  // Arm the network listener before the click so we don't miss the
+  // response. Matches the cancel POST regardless of which exact
+  // endpoint Amazon's A/B variant uses today (cancel-items, cancel,
+  // confirm-cancel, etc.). Stored on the page so waitForCancelOutcome
+  // can await it after the click without us threading state through
+  // the public return type.
+  const responsePromise = page
+    .waitForResponse(
+      (resp) => /cancel/i.test(resp.url()) && resp.request().method() === 'POST',
+      { timeout: 20_000 },
+    )
+    .catch(() => undefined);
+  // Also watch for the post-submit navigation — some Amazon variants
+  // GET-redirect after the POST, others render the result inline.
+  const navigationPromise = page
+    .waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 })
+    .catch(() => undefined);
+  // Stash on page so waitForCancelOutcome can drain them. Using a
+  // private symbol-ish key avoids leaking to the Page typedef.
+  (page as unknown as { __cancelInflight?: Array<Promise<unknown>> }).__cancelInflight = [
+    responsePromise,
+    navigationPromise,
+  ];
+
   return page
     .evaluate(() => {
       const selectorCandidates = [
@@ -108,13 +141,42 @@ export async function clickRequestCancellation(
 }
 
 /**
- * After clicking submit, wait up to 15s for Amazon to either confirm
- * the cancellation OR surface its "Unable to cancel requested items"
- * refusal banner. Returns early as soon as either outcome is
- * detectable. Best-effort — silently continues if the poll times out.
+ * After clicking submit, wait for Amazon's cancel POST round-trip to
+ * complete AND for the resulting page to either confirm the
+ * cancellation or surface its "Unable to cancel requested items"
+ * refusal banner. Returns early as soon as the outcome is detectable.
+ * Best-effort — silently continues if any individual signal times out.
+ *
+ * The order matters:
+ *   1. Drain the network/navigation promises armed in
+ *      clickRequestCancellation. This blocks until Amazon has actually
+ *      received the POST and produced a response. Without this, the
+ *      DOM-text poll can match against a stale page or race the
+ *      navigation, and the caller can tear the page down before the
+ *      POST hits the wire.
+ *   2. Wait for domcontentloaded on whatever page we ended up on.
+ *   3. Poll the body text for the success/refusal banner — covers
+ *      inline re-renders and SPA confirmations that don't trigger a
+ *      full navigation.
  */
 export async function waitForCancelOutcome(page: Page): Promise<void> {
+  // 1. Drain in-flight cancel POST + navigation promises armed by
+  //    clickRequestCancellation. These are the most reliable signal
+  //    that Amazon actually received and processed the cancel.
+  const inflight =
+    (page as unknown as { __cancelInflight?: Array<Promise<unknown>> })
+      .__cancelInflight ?? [];
+  if (inflight.length > 0) {
+    await Promise.allSettled(inflight);
+    // Clear so subsequent calls (e.g. retry attempts) re-arm fresh.
+    (page as unknown as { __cancelInflight?: Array<Promise<unknown>> })
+      .__cancelInflight = undefined;
+  }
+
+  // 2. Whatever page we landed on, give it a chance to parse.
   await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+
+  // 3. Poll for the visible outcome banner — handles inline rerenders.
   await page
     .waitForFunction(
       () => {
@@ -126,6 +188,15 @@ export async function waitForCancelOutcome(page: Page): Promise<void> {
       undefined,
       { timeout: 15_000, polling: 500 },
     )
+    .catch(() => undefined);
+
+  // 4. Final settle — networkidle catches any straggler XHR (Amazon
+  //    sometimes fires a tracking beacon AFTER the confirmation
+  //    banner renders, and tearing the page down mid-beacon has been
+  //    observed to invalidate the cancel server-side). Short timeout
+  //    so we don't hang on long-poll connections.
+  await page
+    .waitForLoadState('networkidle', { timeout: 5_000 })
     .catch(() => undefined);
 }
 

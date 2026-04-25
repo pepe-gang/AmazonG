@@ -133,6 +133,47 @@ export function isDeliveryOptionsChangedBanner(doc: Document): boolean {
   return doc.querySelector(DELIVERY_OPTIONS_CHANGED_SELECTOR) !== null;
 }
 
+/**
+ * Selectors / labels that uniquely identify Amazon's "Verify your card"
+ * (PMTS card-address-challenge) interstitial. Amazon renders this in place
+ * of the Place Order button when our shipping/billing address change has
+ * tripped a payment-side fraud check — it asks the user to re-enter the
+ * card number to prove they own the card on file.
+ *
+ * Detection signals (combined for precision — any single one CAN appear in
+ * unrelated contexts, but the combination is unique to this challenge):
+ *   1. A `pmts-cc-address-challenge-form` wrapper (PMTS-specific class)
+ *   2. The `<h4 class="a-alert-heading">Verify your card</h4>` heading
+ *   3. A `[name$="_addCreditCardNumber"]` input + a "Verify card" button
+ *
+ * Both #1 and the heading are required. The form-wrapper class alone could
+ * appear on the row without the active challenge UI, and the heading alone
+ * could (theoretically) appear in unrelated alert copy, so we AND them.
+ *
+ * Failing the buy is the right outcome — we cannot complete checkout when
+ * card verification is required. The detector exists purely to surface a
+ * better diagnostic than the generic "Place Order button never appeared".
+ */
+export const VERIFY_CARD_FORM_SELECTOR = '.pmts-cc-address-challenge-form';
+export const VERIFY_CARD_HEADING_RE = /^\s*verify your card\s*$/i;
+
+/** True iff /spc is showing the PMTS "Verify your card" challenge in
+ *  place of (or alongside) the Place Order button. Pure HTML→bool — kept
+ *  free of Playwright so fixture tests can pin behavior. */
+export function isVerifyCardChallenge(doc: Document): boolean {
+  const form = doc.querySelector(VERIFY_CARD_FORM_SELECTOR);
+  if (!form) return false;
+  // Walk every alert-heading inside the challenge wrapper and require at
+  // least one to read exactly "Verify your card". Restricting the search
+  // to the challenge form (rather than the whole document) keeps the
+  // detector tight — random "Verify your card" copy elsewhere on the page
+  // (e.g. promotional banners) won't false-positive.
+  const headings = Array.from(
+    form.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6, .a-alert-heading'),
+  );
+  return headings.some((h) => VERIFY_CARD_HEADING_RE.test(h.textContent ?? ''));
+}
+
 /** Shared title-prefix builder. Chewbacca's /spc strips ASINs from the DOM,
  *  so target-row lookups fall back to matching the product title. First
  *  ~40 chars is usually unique; strip quotes/backslashes so the substring
@@ -466,4 +507,95 @@ export function readTargetCashbackFromDom(
     scopeStart: text.slice(0, 200),
     scopeEnd: text.slice(Math.max(0, text.length - 200)),
   };
+}
+
+/**
+ * Result of scanning an Amazon order-details page (`/gp/your-account/order-details`)
+ * for the "Cancel items" button. Used by the order-details cancel-fallback
+ * path: when the direct `/progress-tracker/.../cancel-items` URL redirects
+ * away (some not-yet-shipped orders only expose the cancel form via the
+ * order-details "Cancel items" link), we open order-details, read the
+ * link's href, and follow it.
+ *
+ * Pure HTML→struct so tests can drive it from a saved fixture.
+ *
+ * Three terminal cases:
+ *   - `cancelHref`: the relative href of the "Cancel items" link/button.
+ *     Caller resolves against amazon.com and navigates to it.
+ *   - `alreadyCancelled`: order-details is showing a cancelled banner —
+ *     no cancel action needed (caller treats as success).
+ *   - both null/false: order is not cancellable from this page (likely
+ *     already shipped). Caller bails.
+ */
+export type CancelItemsLinkResult = {
+  cancelHref: string | null;
+  alreadyCancelled: boolean;
+};
+
+/**
+ * Find the "Cancel items" link on an Amazon order-details page.
+ *
+ * The link appears as a small `<a>` button inside an `a-button` span,
+ * pointing at `/progress-tracker/package/preship/cancel-items?orderID=…`.
+ * Selector strategy (most specific → fallback):
+ *   1. Anchor href matching `/progress-tracker/.../cancel-items`
+ *   2. Anchor with `ref_=` containing `cancel_items`
+ *   3. Anchor whose visible text reads "Cancel items"
+ *
+ * Already-cancelled detection: Amazon order-details renders a
+ * `<div data-component="cancelled">` block when the order has been
+ * cancelled. Presence of that block (even alongside no cancel link)
+ * is treated as terminal-success.
+ */
+export function findCancelItemsLinkOnOrderDetails(
+  doc: Document,
+): CancelItemsLinkResult {
+  // Already-cancelled banner: Amazon stamps a data-component="cancelled"
+  // div on order-details for cancelled orders. Take it as the source of
+  // truth — we don't even bother looking for the cancel link in that case.
+  // We require a non-empty banner because the markup occasionally ships
+  // an empty `data-component="cancelled"` placeholder for non-cancelled
+  // orders (template scaffolding); only treat it as cancelled when the
+  // block actually has cancellation copy in it.
+  const cancelledBlocks = Array.from(
+    doc.querySelectorAll('[data-component="cancelled"]'),
+  );
+  let alreadyCancelled = false;
+  for (const block of cancelledBlocks) {
+    const t = (block.textContent ?? '').replace(/\s+/g, ' ').trim();
+    if (/cancel/i.test(t)) {
+      alreadyCancelled = true;
+      break;
+    }
+  }
+
+  // Strategy 1: direct href match on the cancel-items endpoint.
+  const anchors = Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href]'));
+  for (const a of anchors) {
+    const href = a.getAttribute('href') ?? '';
+    if (/\/progress-tracker\/package\/preship\/cancel-items\b/i.test(href)) {
+      return { cancelHref: href, alreadyCancelled };
+    }
+  }
+
+  // Strategy 2: ref_= contains cancel_items (Amazon's link-tracking ref
+  // is more stable than the path on some A/B variants).
+  for (const a of anchors) {
+    const href = a.getAttribute('href') ?? '';
+    if (/cancel_items/i.test(href)) {
+      return { cancelHref: href, alreadyCancelled };
+    }
+  }
+
+  // Strategy 3: visible text "Cancel items" (last resort — works even
+  // if Amazon renames the path).
+  for (const a of anchors) {
+    const label = (a.textContent ?? '').replace(/\s+/g, ' ').trim();
+    if (/^cancel items?$/i.test(label)) {
+      const href = a.getAttribute('href') ?? '';
+      if (href) return { cancelHref: href, alreadyCancelled };
+    }
+  }
+
+  return { cancelHref: null, alreadyCancelled };
 }

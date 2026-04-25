@@ -9,7 +9,10 @@ import {
   buyWithFillers,
   type BuyWithFillersResult,
 } from '../actions/buyWithFillers.js';
-import { cancelFillerOrder } from '../actions/cancelFillerOrder.js';
+import {
+  cancelFillerOrder,
+  cancelFillerOrderViaOrderDetails,
+} from '../actions/cancelFillerOrder.js';
 import { cancelNonTargetItems } from '../actions/cancelNonTargetItems.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
 import { fetchTracking } from '../actions/fetchTracking.js';
@@ -202,6 +205,48 @@ async function cancelFillerOrdersOnly(
       }
       if (tryN < MAX_TRIES) await page.waitForTimeout(8_000);
     }
+    if (!cancelled) {
+      // Order-details fallback. The primary cancel-items-page approach
+      // can fail silently in two ways the existing 3-attempt loop
+      // can't recover from on its own:
+      //   1. The direct `/progress-tracker/.../cancel-items` URL
+      //      redirects away (yields a "not on cancel-items page"
+      //      terminal reason) even though the order is still
+      //      cancellable from the order-details "Cancel items" link.
+      //   2. The cancel-items page is reachable but the form-submit
+      //      doesn't land — Amazon shows no banner, our retries see
+      //      the same dead state.
+      // Try the order-details path once as the very last shot. We
+      // want to attempt this even when we hit a terminal refusal,
+      // because those terminal reasons are based on what the
+      // cancel-items endpoint told us — order-details may disagree
+      // and successfully route the cancel through.
+      logger.info(
+        'job.verify.filler.orderCancel.fallback.start',
+        { orderId: fillerOrderId, priorReason: lastReason, terminalRefusal },
+        cid,
+      );
+      const fb = await cancelFillerOrderViaOrderDetails(page, fillerOrderId, {
+        correlationId: cid,
+      });
+      if (fb.ok) {
+        cancelled = true;
+        logger.info(
+          'job.verify.filler.orderCancel.fallback.ok',
+          { orderId: fillerOrderId, itemsChecked: fb.itemsChecked },
+          cid,
+        );
+      } else {
+        logger.warn(
+          'job.verify.filler.orderCancel.fallback.failed',
+          { orderId: fillerOrderId, reason: fb.reason, detail: fb.detail },
+          cid,
+        );
+        // Surface the fallback's reason as the most-recent failure
+        // signal so the giveup log captures the freshest context.
+        lastReason = fb.reason;
+      }
+    }
     if (cancelled) fillerOrdersCancelled.push(fillerOrderId);
     else {
       fillerOrdersFailed.push(fillerOrderId);
@@ -274,6 +319,73 @@ async function runVerifyFillerCleanup(
   };
 }
 
+/**
+ * Verify-phase filler cleanup for outcomes where we couldn't read the
+ * target's state (`error`, `timeout`). Loads the buy attempt to pull
+ * the persisted `fillerOrderIds`, runs `cancelFillerOrdersOnly` against
+ * them, and logs the result. Best-effort — swallows its own errors so
+ * the calling branch's status writes are unaffected.
+ *
+ * Distinct from `runVerifyFillerCleanup` (used on `active` outcome,
+ * which also runs `cancelNonTargetItems` against the target order).
+ * On error/timeout the target's state is unknown, so we ONLY clean up
+ * the standalone filler orders — touching the target could cancel the
+ * customer's actual purchase if it's secretly still alive.
+ *
+ * Always-run reason: the original bug (filler order left active when
+ * the target was cancelled by Amazon) generalizes — Amazon also
+ * occasionally surfaces a transient error/timeout on order-details for
+ * orders whose fillers are very-much live and cancellable. Skipping
+ * cleanup on those outcomes loses our chance to act before fillers
+ * ship.
+ */
+async function runVerifyFillerCleanupSweep(
+  deps: Deps,
+  page: Page,
+  job: AutoGJob,
+  activeAttemptId: string,
+  profileEmail: string,
+  targetOrderId: string,
+  outcomeKind: 'error' | 'timeout',
+  logCtx: Record<string, unknown>,
+  cid: string,
+): Promise<void> {
+  try {
+    const buyAttemptId = job.buyJobId
+      ? makeAttemptId(job.buyJobId, profileEmail)
+      : activeAttemptId;
+    const attemptForContext = await deps.jobAttempts
+      .get(buyAttemptId)
+      .catch(() => null);
+    const fillerOrderIds = attemptForContext?.fillerOrderIds ?? [];
+    if (fillerOrderIds.length === 0) return;
+    logger.info(
+      `job.verify.${outcomeKind}.filler.cleanup.start`,
+      { ...logCtx, targetOrderId, fillerOrderIdCount: fillerOrderIds.length },
+      cid,
+    );
+    const cleanup = await cancelFillerOrdersOnly(page, fillerOrderIds, cid);
+    logger.info(
+      `job.verify.${outcomeKind}.filler.cleanup.done`,
+      {
+        ...logCtx,
+        targetOrderId,
+        fillerOrdersCancelled: cleanup.fillerOrdersCancelled.length,
+        fillerOrdersFailed: cleanup.fillerOrdersFailed.length,
+      },
+      cid,
+    );
+  } catch (err) {
+    // Cleanup is best-effort — never let it bubble out and rewrite the
+    // failure/timeout status the caller is about to set.
+    logger.warn(
+      `job.verify.${outcomeKind}.filler.cleanup.threw`,
+      { ...logCtx, targetOrderId, err: err instanceof Error ? err.message : String(err) },
+      cid,
+    );
+  }
+}
+
 type FillerRunResult = {
   /** BuyResult-shaped adapter output the rest of runForProfile consumes. */
   buy: BuyResult;
@@ -298,6 +410,8 @@ async function runFillerBuyWithRetries(
   cid: string,
   /** Per-profile override of the min-cashback floor. See runForProfile. */
   minCashbackPct: number,
+  /** Per-profile cashback gate enforcement. See runForProfile. */
+  requireMinCashback: boolean,
   onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
   let lastRaw: BuyWithFillersResult = {
@@ -318,6 +432,7 @@ async function runFillerBuyWithRetries(
       maxPrice: job.maxPrice,
       allowedAddressPrefixes: deps.allowedAddressPrefixes,
       minCashbackPct,
+      requireMinCashback,
       dryRun: deps.buyDryRun,
       correlationId: `${cid}/attempt-${attempt}`,
       onStage,
@@ -624,6 +739,7 @@ async function handleJob(
       cid,
       fillerByEmail.get(profile.email) === true,
       effectiveMinByEmail.get(profile.email) ?? deps.minCashbackPct,
+      requireMinByEmail.get(profile.email.toLowerCase()) ?? true,
     ),
   );
 
@@ -1011,6 +1127,24 @@ async function handleVerifyJob(
         cid,
       );
       await maybeSnapshot(error, verifyPage, activeAttemptId, session, deps, cid, { ...logCtx });
+      // Filler cleanup on error too. We don't know what state the
+      // target order is in — but the buy fan-out's filler orders may
+      // still be live regardless, and leaving them for the customer to
+      // pay for is the worst-case bug we already saw on cancelled
+      // targets. Best-effort, never blocks the failed-status write.
+      if (job.viaFiller) {
+        await runVerifyFillerCleanupSweep(
+          deps,
+          verifyPage,
+          job,
+          activeAttemptId,
+          profile.email,
+          targetOrderId,
+          'error',
+          { ...logCtx },
+          cid,
+        );
+      }
       await deps.jobAttempts
         .update(activeAttemptId, { status: 'failed', error })
         .catch(() => undefined);
@@ -1027,6 +1161,23 @@ async function handleVerifyJob(
       { ...logCtx, orderId: targetOrderId },
       cid,
     );
+    // Same reasoning as the error branch: cancel any live filler
+    // orders even if we couldn't read the target's status. The retry
+    // budget is small (fillers list is typically <= 10) and avoids the
+    // worst-case "customer pays for filler items" outcome.
+    if (job.viaFiller) {
+      await runVerifyFillerCleanupSweep(
+        deps,
+        verifyPage,
+        job,
+        activeAttemptId,
+        profile.email,
+        targetOrderId,
+        'timeout',
+        { ...logCtx },
+        cid,
+      );
+    }
     await deps.jobAttempts
       .update(activeAttemptId, { status: 'awaiting_verification', error: null })
       .catch(() => undefined);
@@ -1434,10 +1585,17 @@ async function runForProfile(
   profileData: AmazonProfile,
   parentCid: string,
   useFillers: boolean,
-  /** Per-profile override of the worker's min-cashback floor. Comes from
-   *  `AmazonAccount.requireMinCashback=false` on BG — when false, the
-   *  effective floor drops to 0 so the buy flow bypasses the gate. */
+  /** Per-profile override of the worker's min-cashback floor. With
+   *  `AmazonAccount.requireMinCashback=false` on BG the effective
+   *  floor drops to 0 — but `pickBestCashbackDelivery` still uses
+   *  this value to choose the highest-cashback delivery option, so
+   *  even permissive accounts benefit from picking the best
+   *  available rate. */
   effectiveMinCashbackPct: number,
+  /** Per-profile cashback gate enforcement. False = skip the gate
+   *  entirely and default a missing /spc reading to 5%. See
+   *  shared/cashbackGate.ts. */
+  requireMinCashback: boolean,
 ): Promise<ProfileResult> {
   const profile = profileData.email;
   // Per-profile correlation id so logs across the parallel runs are
@@ -1571,7 +1729,7 @@ async function runForProfile(
     const onStage = (stage: 'placing' | null): Promise<void> =>
       deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;
@@ -1579,6 +1737,7 @@ async function runForProfile(
       buy = await buyNow(page, {
         dryRun: deps.buyDryRun,
         minCashbackPct: effectiveMinCashbackPct,
+        requireMinCashback,
         maxPrice: job.maxPrice,
         allowedAddressPrefixes: deps.allowedAddressPrefixes,
         correlationId: cid,
