@@ -33,6 +33,21 @@ const DEFAULTS: Settings = {
   autoEnqueueMinMarginPct: -3.5,
   autoEnqueueMaxPerTick: 75,
   autoEnqueueLastRunAt: null,
+  // How many Amazon accounts run a single deal in parallel. Single-mode
+  // buys are light enough that 3 accounts at once is the historical
+  // default. Filler-mode carts are heavier and Amazon is touchier on
+  // rapid-fire filler checkouts, so default 1 (one account at a time).
+  // Customers with thermal headroom can dial these up; customers with
+  // older / fanless laptops can dial them down to 1 to stay quiet.
+  maxConcurrentSingleBuys: 3,
+  maxConcurrentFillerBuys: 1,
+  // Parallel tabs inside ONE filler-mode buy. Each tab fires its own
+  // Add-to-Cart POSTs against Amazon's cart API; they share cookies
+  // + cart server-side so all adds land on the same order. 4 has
+  // historically given a clean ~4× speedup without hitting rate
+  // limits. 1 = sequential (slow but safest). 6 max (going higher
+  // can trigger Amazon's per-IP throttling on the cart endpoint).
+  fillerParallelTabs: 4,
 };
 
 function filePath(): string {

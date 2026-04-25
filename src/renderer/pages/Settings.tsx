@@ -58,6 +58,7 @@ export function SettingsView({
         <LiveModePanel />
         <AllowedPrefixesPanel />
         <AutoStartWorkerPanel />
+        <ParallelBuysPanel />
         <DebuggingModeGroup>
           <HeadlessTogglePanel profiles={profiles} />
           <SnapshotSettingsPanel />
@@ -69,6 +70,211 @@ export function SettingsView({
           Stop the worker first — settings can't be changed while jobs are polling.
         </div>
       )}
+    </div>
+  );
+}
+
+/* ============================================================
+   Parallel buys (per-mode account-fanout cap)
+   ============================================================ */
+const SINGLE_MIN = 1;
+const SINGLE_MAX = 5;
+const FILLER_MIN = 1;
+const FILLER_MAX = 3;
+const FILLER_TABS_MIN = 1;
+const FILLER_TABS_MAX = 6;
+
+function ParallelBuysPanel() {
+  const { settings, busy, update } = useSettings();
+  if (!settings) return null;
+  // Defensive defaults: existing installs may have a settings.json that
+  // predates these fields, in which case the IPC payload comes back
+  // missing them and the steppers would render `NaN` / blank. Show the
+  // historical hardcoded values until the user clicks +/-, which
+  // persists the field for real.
+  const single = settings.maxConcurrentSingleBuys ?? 3;
+  const filler = settings.maxConcurrentFillerBuys ?? 1;
+  const fillerTabs = settings.fillerParallelTabs ?? 4;
+  const setSingle = (v: number) => {
+    const clamped = Math.max(SINGLE_MIN, Math.min(SINGLE_MAX, Math.round(v)));
+    void update({ maxConcurrentSingleBuys: clamped });
+  };
+  const setFiller = (v: number) => {
+    const clamped = Math.max(FILLER_MIN, Math.min(FILLER_MAX, Math.round(v)));
+    void update({ maxConcurrentFillerBuys: clamped });
+  };
+  const setFillerTabs = (v: number) => {
+    const clamped = Math.max(
+      FILLER_TABS_MIN,
+      Math.min(FILLER_TABS_MAX, Math.round(v)),
+    );
+    void update({ fillerParallelTabs: clamped });
+  };
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Parallel buys</div>
+          <div className="prefix-sub">
+            How many Amazon accounts can run a deal at the same time.
+            Each account opens its own Chrome window. <b>Higher</b> means
+            more deals caught quickly when several of your accounts are
+            eligible — but uses more memory and runs hotter on your
+            laptop. <b>Lower</b> is quieter and cooler. Defaults are
+            tuned for typical Apple Silicon Macs; dial down to <b>1</b>{' '}
+            on older or fanless laptops if you hear fans spinning.
+          </div>
+        </div>
+      </div>
+      <div className="flex flex-col gap-3 mt-3">
+        {/* Single-mode row */}
+        <div className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-foreground/90">
+                Normal buys
+              </div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                When a deal triggers and you have multiple Amazon accounts
+                signed in, this many can place the order at the same
+                time. Default is <b>3</b>.
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setSingle(single - 1)}
+                disabled={busy || single <= SINGLE_MIN}
+                aria-label="Decrease normal buys"
+                className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                −
+              </button>
+              <span className="tabular-nums w-7 text-center text-base font-medium">
+                {single}
+              </span>
+              <button
+                type="button"
+                onClick={() => setSingle(single + 1)}
+                disabled={busy || single >= SINGLE_MAX}
+                aria-label="Increase normal buys"
+                className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                +
+              </button>
+              <span className="text-xs text-muted-foreground ml-1">
+                accounts
+              </span>
+            </div>
+          </div>
+          <div className="text-[11px] text-muted-foreground/80 mt-2">
+            Range {SINGLE_MIN}–{SINGLE_MAX}. Going higher than 3 may
+            trigger Amazon's anti-bot checks.
+          </div>
+        </div>
+
+        {/* Filler-mode row */}
+        <div className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-foreground/90">
+                Buy with Fillers
+              </div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                Filler-mode buys add ~10 extra items to the cart, which
+                is heavier on memory and Amazon is touchier about
+                running them in parallel. Default is <b>1</b> (one
+                account at a time).
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setFiller(filler - 1)}
+                disabled={busy || filler <= FILLER_MIN}
+                aria-label="Decrease filler buys"
+                className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                −
+              </button>
+              <span className="tabular-nums w-7 text-center text-base font-medium">
+                {filler}
+              </span>
+              <button
+                type="button"
+                onClick={() => setFiller(filler + 1)}
+                disabled={busy || filler >= FILLER_MAX}
+                aria-label="Increase filler buys"
+                className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                +
+              </button>
+              <span className="text-xs text-muted-foreground ml-1">
+                {filler === 1 ? 'account' : 'accounts'}
+              </span>
+            </div>
+          </div>
+          <div className="text-[11px] text-muted-foreground/80 mt-2">
+            Range {FILLER_MIN}–{FILLER_MAX}. Keep at 1 unless you've
+            verified your machine handles parallel filler checkouts.
+          </div>
+        </div>
+
+        {/* Filler tabs row — INSIDE one filler-mode buy */}
+        <div className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-foreground/90">
+                Filler add-to-cart speed
+              </div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                When Buy with Fillers runs, AmazonG adds ~12 filler
+                items to the cart. This many parallel tabs do the
+                add-to-cart step at the same time inside one Chrome
+                window. Higher = faster cart fill, but a high value
+                can trigger Amazon's rate limit on the cart endpoint.
+                Default is <b>4</b>.
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setFillerTabs(fillerTabs - 1)}
+                disabled={busy || fillerTabs <= FILLER_TABS_MIN}
+                aria-label="Decrease filler add-to-cart tabs"
+                className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                −
+              </button>
+              <span className="tabular-nums w-7 text-center text-base font-medium">
+                {fillerTabs}
+              </span>
+              <button
+                type="button"
+                onClick={() => setFillerTabs(fillerTabs + 1)}
+                disabled={busy || fillerTabs >= FILLER_TABS_MAX}
+                aria-label="Increase filler add-to-cart tabs"
+                className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                +
+              </button>
+              <span className="text-xs text-muted-foreground ml-1">
+                {fillerTabs === 1 ? 'tab' : 'tabs'}
+              </span>
+            </div>
+          </div>
+          <div className="text-[11px] text-muted-foreground/80 mt-2">
+            Range {FILLER_TABS_MIN}–{FILLER_TABS_MAX}. Set to 1 for
+            slow-but-safe sequential adds. Only applies when Buy with
+            Fillers is on.
+          </div>
+        </div>
+
+        <div className="text-[11px] text-muted-foreground/70">
+          Changes apply on the next deal AmazonG claims. Stop and
+          restart the worker to take effect immediately.
+        </div>
+      </div>
     </div>
   );
 }

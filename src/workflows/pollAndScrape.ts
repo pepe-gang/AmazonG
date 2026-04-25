@@ -60,6 +60,12 @@ type Deps = {
   buyWithFillers: boolean;
   minCashbackPct: number;
   allowedAddressPrefixes: string[];
+  /** Max parallel browser windows for single-mode buys (default 3). */
+  maxConcurrentSingleBuys: number;
+  /** Max parallel browser windows for Buy-with-Fillers buys (default 1). */
+  maxConcurrentFillerBuys: number;
+  /** Parallel tabs INSIDE one filler-mode buy for cart-add fan-out (default 4). */
+  fillerParallelTabs: number;
   /** Returns every enabled+loggedIn profile we should fan out the job to. */
   listEligibleProfiles: () => Promise<AmazonProfile[]>;
   /** Persistence for the jobs table — created on fan-out, updated as profiles run. */
@@ -88,8 +94,18 @@ export type WorkerHandle = {
   openProfileTab(email: string, url: string): Promise<boolean>;
 };
 
-const FANOUT_CONCURRENCY = 3;
-const FANOUT_CONCURRENCY_FILLER = 1;
+/** Bounds for the per-mode parallel-buy settings exposed in the
+ *  Settings page. The user-set value is clamped to this range so a
+ *  hand-edited settings.json can't ask for 100 parallel Chromium
+ *  windows. Lower bound 1 keeps the worker functional. */
+const MIN_CONCURRENT_BUYS = 1;
+const MAX_CONCURRENT_SINGLE_BUYS = 5;
+const MAX_CONCURRENT_FILLER_BUYS = 3;
+/** Fallback defaults if a Settings field is missing (e.g. a user
+ *  upgrading from a version where these didn't exist). Loadsettings
+ *  itself merges defaults, so this is belt-and-suspenders. */
+const DEFAULT_CONCURRENT_SINGLE_BUYS = 3;
+const DEFAULT_CONCURRENT_FILLER_BUYS = 1;
 
 /**
  * How many times we re-run the whole filler buy (clear cart → Buy Now
@@ -475,6 +491,7 @@ async function runFillerBuyWithRetries(
       minCashbackPct,
       requireMinCashback,
       dryRun: deps.buyDryRun,
+      fillerParallelTabs: deps.fillerParallelTabs,
       correlationId: `${cid}/attempt-${attempt}`,
       onStage,
     });
@@ -511,14 +528,23 @@ async function runFillerBuyWithRetries(
 }
 
 /**
- * Effective fan-out concurrency. Filler mode spins up FILLER_WORKERS parallel tabs
- * inside each account's BrowserContext already; running more than one
- * account simultaneously layers on 5× extra tabs per account and is
- * the fastest way to get rate-limited. Drop to one at a time whenever
- * ANY profile in this fan-out is going to run in filler mode.
+ * Effective fan-out concurrency — how many Amazon accounts run the
+ * same job in parallel.
+ *
+ * Filler mode is the lower default because each account's filler buy
+ * already loads ~10 extra cart items and Amazon's anti-automation is
+ * touchier on rapid-fire filler checkouts. Customers can tune both
+ * values from the Settings page (Parallel buys panel); falls back to
+ * the historical 3 / 1 defaults if a settings field is missing, and
+ * is clamped to safe per-mode bounds either way.
  */
-function fanoutConcurrency(anyFiller: boolean): number {
-  return anyFiller ? FANOUT_CONCURRENCY_FILLER : FANOUT_CONCURRENCY;
+function fanoutConcurrency(anyFiller: boolean, deps: Deps): number {
+  if (anyFiller) {
+    const v = deps.maxConcurrentFillerBuys ?? DEFAULT_CONCURRENT_FILLER_BUYS;
+    return Math.max(MIN_CONCURRENT_BUYS, Math.min(MAX_CONCURRENT_FILLER_BUYS, v));
+  }
+  const v = deps.maxConcurrentSingleBuys ?? DEFAULT_CONCURRENT_SINGLE_BUYS;
+  return Math.max(MIN_CONCURRENT_BUYS, Math.min(MAX_CONCURRENT_SINGLE_BUYS, v));
 }
 
 /**
@@ -726,7 +752,7 @@ async function handleJob(
     cid,
   );
   const anyFiller = Array.from(fillerByEmail.values()).some(Boolean);
-  const concurrency = fanoutConcurrency(anyFiller);
+  const concurrency = fanoutConcurrency(anyFiller, deps);
   logger.info(
     'job.fanout.start',
     {

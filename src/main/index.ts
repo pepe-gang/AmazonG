@@ -474,6 +474,9 @@ async function startWorkerNow(): Promise<void> {
     buyWithFillers: settings.buyWithFillers,
     minCashbackPct: settings.minCashbackPct,
     allowedAddressPrefixes: settings.allowedAddressPrefixes,
+    maxConcurrentSingleBuys: settings.maxConcurrentSingleBuys,
+    maxConcurrentFillerBuys: settings.maxConcurrentFillerBuys,
+    fillerParallelTabs: settings.fillerParallelTabs,
     listEligibleProfiles: async () => {
       const list = await loadProfiles();
       return list.filter((p) => p.enabled && p.loggedIn);

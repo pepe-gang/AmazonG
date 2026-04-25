@@ -65,6 +65,13 @@ type BuyWithFillersOptions = {
    * so the user can verify the pipeline without spending money.
    */
   dryRun: boolean;
+  /**
+   * Parallel tabs inside this single buy for cart-add fan-out.
+   * Default 4 (historical). 1 = sequential. Clamped 1..6 inside
+   * `addFillerItems` to keep a hand-edited settings.json from
+   * spawning 100 tabs.
+   */
+  fillerParallelTabs?: number;
   correlationId?: string;
   /**
    * Called immediately before the Place Order click ('placing') and
@@ -169,9 +176,14 @@ const FILLER_COUNT = 12;
 const FILLER_MIN_PRICE = 30;
 const FILLER_MAX_PRICE = 100;
 // Parallel tabs inside the account's BrowserContext. Tabs share cookies +
-// cart server-side, so all adds land in the same order. 4 gets us ~4x
-// speedup without hammering Amazon hard enough to trigger rate limits.
-const FILLER_WORKERS = 4;
+// cart server-side, so all adds land in the same order. The historical
+// default 4 gets a clean ~4× speedup without hammering Amazon hard
+// enough to trigger rate limits. Now user-configurable via
+// Settings.fillerParallelTabs; bounds enforced here so a hand-edited
+// settings.json can't ask for 100.
+const DEFAULT_FILLER_WORKERS = 4;
+const MIN_FILLER_WORKERS = 1;
+const MAX_FILLER_WORKERS = 6;
 
 // Low-risk impulse-item search terms borrowed from AutoG. Shuffled on each
 // run so we don't always hit the same items first (helps avoid rate-limit
@@ -326,7 +338,7 @@ export async function buyWithFillers(
   //    Proceed with whatever count we got: even a partial set (say 8/12)
   //    still provides camouflage. Refusing to buy because of a flaky
   //    search is worse than a slightly smaller cover.
-  const fillersResult = await addFillerItems(page, targetAsin, cid);
+  const fillersResult = await addFillerItems(page, targetAsin, cid, opts.fillerParallelTabs);
   const fillersAdded = fillersResult.added;
   const fillerAsins = fillersResult.asins;
   if (fillersAdded < FILLER_COUNT) {
@@ -1714,7 +1726,14 @@ async function addFillerItems(
   mainPage: Page,
   targetAsin: string | null,
   cid: string | undefined,
+  /** Number of parallel tabs to use. Defaults to the historical 4 if
+   *  unspecified; clamped to 1..6. */
+  parallelTabs: number = DEFAULT_FILLER_WORKERS,
 ): Promise<{ added: number; asins: string[] }> {
+  const workers = Math.max(
+    MIN_FILLER_WORKERS,
+    Math.min(MAX_FILLER_WORKERS, Math.round(parallelTabs)),
+  );
   const context = mainPage.context();
   const terms = shuffle(FILLER_SEARCH_TERMS);
   const state: FillerState = {
@@ -1728,7 +1747,7 @@ async function addFillerItems(
 
   // Main page participates as worker 0. Side tabs are workers 1..N-1.
   const sideTabs: Page[] = [];
-  for (let i = 1; i < FILLER_WORKERS; i++) {
+  for (let i = 1; i < workers; i++) {
     const p = await context.newPage().catch(() => null);
     if (p) sideTabs.push(p);
   }

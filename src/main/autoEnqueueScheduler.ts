@@ -45,6 +45,7 @@ export function startAutoEnqueueScheduler(deps: Deps): void {
   initialKickoff = setTimeout(() => {
     void tick(deps);
   }, 5_000);
+  logger.info('autoEnqueue.scheduler.started', { tickMs: TICK_MS });
 }
 
 export function stopAutoEnqueueScheduler(): void {
@@ -56,6 +57,7 @@ export function stopAutoEnqueueScheduler(): void {
     clearTimeout(initialKickoff);
     initialKickoff = null;
   }
+  logger.info('autoEnqueue.scheduler.stopped');
 }
 
 export async function getAutoEnqueueStatus(): Promise<{
@@ -242,21 +244,46 @@ export function clampMaxPerTick(n: number): number {
 // ───────────────────────────── tick ─────────────────────────────────────
 
 async function tick(deps: Deps): Promise<void> {
-  if (inFlight) return;
+  // In-flight overlap is unusual (a previous tick is still running)
+  // and worth logging — it means the BG fetch or trigger calls took
+  // longer than 60s, which is actionable.
+  if (inFlight) {
+    logger.warn('autoEnqueue.skip.inFlight');
+    return;
+  }
 
-  const settings = await loadSettings().catch(() => null);
+  const settings = await loadSettings().catch((err) => {
+    logger.warn('autoEnqueue.skip.settingsLoadFailed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  });
+  // Disabled is the most common reason a tick exits early — every
+  // minute when the feature is off. Don't log: would drown the log
+  // stream once enabled becomes false.
   if (!settings || !settings.autoEnqueueEnabled) return;
 
-  const intervalMs = clampInterval(settings.autoEnqueueIntervalHours) * 3_600_000;
+  const intervalH = clampInterval(settings.autoEnqueueIntervalHours);
+  const intervalMs = intervalH * 3_600_000;
   const lastRunAt = settings.autoEnqueueLastRunAt ?? 0;
   const now = Date.now();
+  // Same reasoning: skipping because it's not yet time happens on
+  // ~every tick except the one that fires. Silent.
   if (now - lastRunAt < intervalMs) return;
 
+  // Per-tick correlation id so every log line below can be filtered
+  // together in the Logs view ("show me everything from THIS run").
+  const cid = `enq-${now}`;
+
   const apiKey = deps.getApiKey();
-  // Not connected → skip silently and try again on the next tick. We
-  // don't stamp lastRunAt so the schedule isn't penalised for the user
-  // being offline at the moment a tick happened to fire.
-  if (!apiKey) return;
+  // Schedule is enabled and the interval has elapsed — but the user
+  // hasn't connected (or has disconnected). Worth a warn: the user
+  // expects the schedule to fire, and silence here looks like a bug.
+  // We don't stamp lastRunAt so the next minute will retry.
+  if (!apiKey) {
+    logger.warn('autoEnqueue.skip.notConnected', { lastRunAt, intervalH }, cid);
+    return;
+  }
 
   inFlight = true;
   const result: AutoEnqueueResult = {
@@ -267,6 +294,19 @@ async function tick(deps: Deps): Promise<void> {
     error: null,
   };
   try {
+    logger.info(
+      'autoEnqueue.tick.start',
+      {
+        runAt: now,
+        intervalHours: intervalH,
+        lastRunAt: lastRunAt || null,
+        shipToFilter: settings.autoEnqueueShipToFilter,
+        minMarginPct: settings.autoEnqueueMinMarginPct,
+        maxPerTick: clampMaxPerTick(settings.autoEnqueueMaxPerTick),
+      },
+      cid,
+    );
+
     const url = new URL('/api/public/deals/amazon', settings.bgBaseUrl).toString();
     const r = await fetch(url, { headers: { 'x-api-key': 'pepe-gang' } });
     if (!r.ok) {
@@ -275,8 +315,16 @@ async function tick(deps: Deps): Promise<void> {
     const data = (await r.json()) as unknown;
     if (!Array.isArray(data)) throw new Error('deals fetch failed: expected an array');
     const deals = data as AmazonDeal[];
+    logger.info('autoEnqueue.fetched', { total: deals.length }, cid);
 
-    const attempts = await listAttempts().catch(() => []);
+    const attempts = await listAttempts().catch((err) => {
+      logger.warn(
+        'autoEnqueue.attempts.loadFailed',
+        { error: err instanceof Error ? err.message : String(err) },
+        cid,
+      );
+      return [];
+    });
     const { todo, skippedDup, skippedCap } = selectDealsForTick({
       deals,
       attempts,
@@ -287,19 +335,49 @@ async function tick(deps: Deps): Promise<void> {
       now,
     });
     result.skipped = skippedDup + skippedCap;
+    logger.info(
+      'autoEnqueue.selected',
+      {
+        total: deals.length,
+        // Eligible = passed every filter; some get dedup-skipped and
+        // some get cap-skipped from this pool. Useful to see at a
+        // glance how aggressively the filters are gating.
+        eligible: todo.length + skippedDup + skippedCap,
+        todo: todo.length,
+        skippedDup,
+        skippedCap,
+      },
+      cid,
+    );
 
     const bg = createBGClient(settings.bgBaseUrl, apiKey);
     for (const d of todo) {
       try {
-        await bg.triggerDealJob(d.dealId);
+        const res = await bg.triggerDealJob(d.dealId);
         result.queued++;
+        logger.info(
+          'autoEnqueue.trigger.ok',
+          {
+            dealId: d.dealId,
+            dealKey: d.dealKey,
+            dealTitle: d.dealTitle,
+            price: d.price,
+            jobId: res.jobId,
+          },
+          cid,
+        );
       } catch (err) {
         result.failed++;
-        logger.warn('autoEnqueue.trigger.error', {
-          dealId: d.dealId,
-          dealKey: d.dealKey,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        logger.warn(
+          'autoEnqueue.trigger.error',
+          {
+            dealId: d.dealId,
+            dealKey: d.dealKey,
+            dealTitle: d.dealTitle,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          cid,
+        );
       }
     }
 
@@ -311,18 +389,23 @@ async function tick(deps: Deps): Promise<void> {
     await saveSettings({ ...fresh, autoEnqueueLastRunAt: now });
 
     lastResult = result;
-    logger.info('autoEnqueue.run', {
-      queued: result.queued,
-      skipped: result.skipped,
-      skippedDup,
-      skippedCap,
-      failed: result.failed,
-      total: deals.length,
-    });
+    logger.info(
+      'autoEnqueue.run',
+      {
+        queued: result.queued,
+        skipped: result.skipped,
+        skippedDup,
+        skippedCap,
+        failed: result.failed,
+        total: deals.length,
+        durationMs: Date.now() - now,
+      },
+      cid,
+    );
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err);
     lastResult = result;
-    logger.warn('autoEnqueue.error', { error: result.error });
+    logger.warn('autoEnqueue.error', { error: result.error }, cid);
     // Don't stamp lastRunAt — a network failure shouldn't burn the
     // interval. We'll retry on the next minute tick.
   } finally {
