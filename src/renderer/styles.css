@@ -883,6 +883,15 @@ a,
   flex-shrink: 0;
   align-items: center;
 }
+/* Per-account "Auto-submit tracking to" routing column. Sits between
+   account-main (Amazon account details) and account-actions (toggles +
+   buttons), so the routing decision is visually grouped with the
+   account it applies to rather than buried among the bulk-toggles. */
+.account-bg-route {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
 /* Each action slot takes a fixed min-width so columns line up across
    rows — Sign-in and Your-Orders sit in the same horizontal position
    regardless of which one is rendered, and the Headless toggle + Remove

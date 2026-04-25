@@ -535,6 +535,39 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                   )}
                 </div>
                 {!isRenaming && (
+                  <div className="account-bg-route">
+                    {/* Per-account auto-submit routing for carrier tracking.
+                        "None" is the default — opt-in only, so a fresh
+                        install never auto-submits anything until the user
+                        explicitly picks a BG account. The actual submit
+                        logic lives on BG side (step 2); the dropdown just
+                        persists the routing field. */}
+                    <label
+                      className="flex items-center gap-2"
+                      title="When set, AmazonG automatically submits carrier tracking codes captured for buys on this Amazon account to the selected buyinggroup.com account. Set to None to disable auto-submit."
+                    >
+                      <span className="text-xs font-medium text-foreground/80 whitespace-nowrap">
+                        Auto-submit tracking to
+                      </span>
+                      <select
+                        value={remoteSettings[p.email.toLowerCase()]?.bgAccountId ?? ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          void setBgAccount(p.email, v === '' ? null : v);
+                        }}
+                        className="text-xs bg-white/[0.03] border border-white/10 rounded-md px-2 py-1 text-foreground/90 focus:outline-none focus:border-white/30"
+                      >
+                        <option value="">None — don&apos;t submit</option>
+                        {bgAccounts.map((bg) => (
+                          <option key={bg.id} value={bg.id}>
+                            {bg.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                )}
+                {!isRenaming && (
                   <div className="account-actions">
                     <label
                       className="flex items-center gap-2 cursor-pointer"
@@ -590,58 +623,6 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                           <span className="text-xs font-medium text-foreground/80">
                             Require ≥ 6% CB
                           </span>
-                        </label>
-                      );
-                    })()}
-                    {(() => {
-                      // Per-account "Submit tracking to" dropdown. Behavior
-                      // by BG-account count:
-                      //   0  → disabled, hint to add a BG account on the dashboard
-                      //   1  → auto-display the only choice; no real picker
-                      //   N  → dropdown with the user's BG accounts; null = "Select…"
-                      const current =
-                        remoteSettings[p.email.toLowerCase()]?.bgAccountId ?? null;
-                      const onlyOne = bgAccounts.length === 1;
-                      const noneAvailable = bgAccounts.length === 0;
-                      // Effective selection — when there's exactly one BG
-                      // account, the resolver always uses it even if no
-                      // explicit value is set, so the UI mirrors that
-                      // ("auto-fill"). When there are many, null reads as
-                      // "Select…" so the user knows to pick.
-                      const effective = onlyOne ? bgAccounts[0]!.id : current;
-                      return (
-                        <label
-                          className="flex items-center gap-2"
-                          title={
-                            noneAvailable
-                              ? 'Add a BG account on the BetterBG dashboard first'
-                              : onlyOne
-                                ? `All tracking submitted via ${bgAccounts[0]!.label}`
-                                : 'Where carrier tracking captured for buys on this Amazon account gets submitted on buyinggroup.com'
-                          }
-                        >
-                          <span className="text-xs font-medium text-foreground/80">
-                            Submit to
-                          </span>
-                          <select
-                            value={effective ?? ''}
-                            disabled={noneAvailable || onlyOne}
-                            onChange={(e) => {
-                              const v = e.target.value;
-                              void setBgAccount(p.email, v === '' ? null : v);
-                            }}
-                            className="text-xs bg-white/[0.03] border border-white/10 rounded-md px-2 py-1 text-foreground/90 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:border-white/30"
-                          >
-                            {noneAvailable && <option value="">No BG account</option>}
-                            {!onlyOne && !noneAvailable && (
-                              <option value="">Select…</option>
-                            )}
-                            {bgAccounts.map((bg) => (
-                              <option key={bg.id} value={bg.id}>
-                                {bg.label}
-                              </option>
-                            ))}
-                          </select>
                         </label>
                       );
                     })()}
