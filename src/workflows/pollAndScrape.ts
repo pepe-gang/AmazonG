@@ -60,12 +60,18 @@ type Deps = {
   buyWithFillers: boolean;
   minCashbackPct: number;
   allowedAddressPrefixes: string[];
-  /** Max parallel browser windows for single-mode buys (default 3). */
-  maxConcurrentSingleBuys: number;
-  /** Max parallel browser windows for Buy-with-Fillers buys (default 1). */
-  maxConcurrentFillerBuys: number;
-  /** Parallel tabs INSIDE one filler-mode buy for cart-add fan-out (default 4). */
-  fillerParallelTabs: number;
+  /**
+   * Re-read each per-claim from disk so the user can tune Parallel
+   * buys + Filler tab speed in Settings without stopping the worker.
+   * Returns the three parallel-buy knobs as a struct; we don't pass
+   * the whole Settings object so the worker stays decoupled from
+   * fields it doesn't care about.
+   */
+  loadParallelism: () => Promise<{
+    maxConcurrentSingleBuys: number;
+    maxConcurrentFillerBuys: number;
+    fillerParallelTabs: number;
+  }>;
   /** Returns every enabled+loggedIn profile we should fan out the job to. */
   listEligibleProfiles: () => Promise<AmazonProfile[]>;
   /** Persistence for the jobs table — created on fan-out, updated as profiles run. */
@@ -469,6 +475,9 @@ async function runFillerBuyWithRetries(
   minCashbackPct: number,
   /** Per-profile cashback gate enforcement. See runForProfile. */
   requireMinCashback: boolean,
+  /** Live parallel-tab count for filler add-to-cart fan-out, re-read
+   *  from Settings on each claim. */
+  fillerParallelTabs: number,
   onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
   let lastRaw: BuyWithFillersResult = {
@@ -491,7 +500,7 @@ async function runFillerBuyWithRetries(
       minCashbackPct,
       requireMinCashback,
       dryRun: deps.buyDryRun,
-      fillerParallelTabs: deps.fillerParallelTabs,
+      fillerParallelTabs,
       correlationId: `${cid}/attempt-${attempt}`,
       onStage,
     });
@@ -538,12 +547,15 @@ async function runFillerBuyWithRetries(
  * the historical 3 / 1 defaults if a settings field is missing, and
  * is clamped to safe per-mode bounds either way.
  */
-function fanoutConcurrency(anyFiller: boolean, deps: Deps): number {
+function fanoutConcurrency(
+  anyFiller: boolean,
+  parallelism: { maxConcurrentSingleBuys: number; maxConcurrentFillerBuys: number },
+): number {
   if (anyFiller) {
-    const v = deps.maxConcurrentFillerBuys ?? DEFAULT_CONCURRENT_FILLER_BUYS;
+    const v = parallelism.maxConcurrentFillerBuys ?? DEFAULT_CONCURRENT_FILLER_BUYS;
     return Math.max(MIN_CONCURRENT_BUYS, Math.min(MAX_CONCURRENT_FILLER_BUYS, v));
   }
-  const v = deps.maxConcurrentSingleBuys ?? DEFAULT_CONCURRENT_SINGLE_BUYS;
+  const v = parallelism.maxConcurrentSingleBuys ?? DEFAULT_CONCURRENT_SINGLE_BUYS;
   return Math.max(MIN_CONCURRENT_BUYS, Math.min(MAX_CONCURRENT_SINGLE_BUYS, v));
 }
 
@@ -752,13 +764,25 @@ async function handleJob(
     cid,
   );
   const anyFiller = Array.from(fillerByEmail.values()).some(Boolean);
-  const concurrency = fanoutConcurrency(anyFiller, deps);
+  // Re-read parallelism settings per claim — lets the user tune from
+  // the Settings page without restarting the worker. Loadsettings is
+  // cheap (one JSON file read) and only fires once per job claim
+  // (~5s cadence under heavy load), so the cost is negligible.
+  const parallelism = await deps.loadParallelism().catch(() => ({
+    maxConcurrentSingleBuys: DEFAULT_CONCURRENT_SINGLE_BUYS,
+    maxConcurrentFillerBuys: DEFAULT_CONCURRENT_FILLER_BUYS,
+    fillerParallelTabs: 4,
+  }));
+  const concurrency = fanoutConcurrency(anyFiller, parallelism);
   logger.info(
     'job.fanout.start',
     {
       jobId: job.id,
       profiles: eligible.map((p) => p.email),
       concurrency: Math.min(concurrency, eligible.length),
+      maxConcurrentSingleBuys: parallelism.maxConcurrentSingleBuys,
+      maxConcurrentFillerBuys: parallelism.maxConcurrentFillerBuys,
+      fillerParallelTabs: parallelism.fillerParallelTabs,
       buyWithFillers: deps.buyWithFillers,
       anyFiller,
       rebuy: !!job.placedEmail,
@@ -807,6 +831,7 @@ async function handleJob(
       fillerByEmail.get(profile.email) === true,
       effectiveMinByEmail.get(profile.email) ?? deps.minCashbackPct,
       requireMinByEmail.get(profile.email.toLowerCase()) ?? true,
+      parallelism.fillerParallelTabs,
     ),
   );
 
@@ -1691,6 +1716,11 @@ async function runForProfile(
    *  entirely and default a missing /spc reading to 5%. See
    *  shared/cashbackGate.ts. */
   requireMinCashback: boolean,
+  /** Live parallel-tab count for filler-mode buys (Settings →
+   *  "Filler add-to-cart speed"). Re-read from disk per claim by
+   *  the caller, so changing it in Settings applies on the next
+   *  deal without restarting the worker. Single-mode buys ignore. */
+  fillerParallelTabs: number,
 ): Promise<ProfileResult> {
   const profile = profileData.email;
   // Per-profile correlation id so logs across the parallel runs are
@@ -1824,7 +1854,7 @@ async function runForProfile(
     const onStage = (stage: 'placing' | null): Promise<void> =>
       deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, fillerParallelTabs, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;

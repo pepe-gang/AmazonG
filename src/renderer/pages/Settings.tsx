@@ -271,8 +271,9 @@ function ParallelBuysPanel() {
         </div>
 
         <div className="text-[11px] text-muted-foreground/70">
-          Changes apply on the next deal AmazonG claims. Stop and
-          restart the worker to take effect immediately.
+          Changes apply on the next deal AmazonG claims (no need to
+          stop / restart the worker — settings are re-read every
+          claim).
         </div>
       </div>
     </div>

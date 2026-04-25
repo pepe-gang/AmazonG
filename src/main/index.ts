@@ -474,9 +474,17 @@ async function startWorkerNow(): Promise<void> {
     buyWithFillers: settings.buyWithFillers,
     minCashbackPct: settings.minCashbackPct,
     allowedAddressPrefixes: settings.allowedAddressPrefixes,
-    maxConcurrentSingleBuys: settings.maxConcurrentSingleBuys,
-    maxConcurrentFillerBuys: settings.maxConcurrentFillerBuys,
-    fillerParallelTabs: settings.fillerParallelTabs,
+    // Hot-reload parallelism settings per claim — Settings page
+    // changes (Parallel buys + Filler add-to-cart speed) take effect
+    // on the next deal without requiring a worker restart.
+    loadParallelism: async () => {
+      const s = await loadSettings();
+      return {
+        maxConcurrentSingleBuys: s.maxConcurrentSingleBuys,
+        maxConcurrentFillerBuys: s.maxConcurrentFillerBuys,
+        fillerParallelTabs: s.fillerParallelTabs,
+      };
+    },
     listEligibleProfiles: async () => {
       const list = await loadProfiles();
       return list.filter((p) => p.enabled && p.loggedIn);

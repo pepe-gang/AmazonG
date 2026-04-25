@@ -47,7 +47,14 @@ export function ActiveJobsPanel({
           <span className="ml-1 text-xs text-muted-foreground">({active.length})</span>
         </span>
       </div>
-      <div className="flex flex-col gap-2">
+      {/* Cap visible rows at ~3 and let the rest scroll. The panel
+          had no ceiling before, so a fan-out across many accounts
+          would push the rest of the page (Purchases table) below
+          the fold. Max-height is ~3 row-heights + the gaps between
+          them; pr-1 gives the scrollbar a gutter so row content
+          doesn't reflow when scroll appears. The scroll only
+          activates when there are >3 active rows. */}
+      <div className="flex flex-col gap-2 max-h-[12rem] overflow-y-auto pr-1">
         {active.map((a) => {
           const p = profiles.find(
             (pp) => pp.email.toLowerCase() === a.amazonEmail.toLowerCase(),
