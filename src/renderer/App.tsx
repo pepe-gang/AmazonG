@@ -511,18 +511,37 @@ function DashboardView(props: {
     startOfMonth.setHours(0, 0, 0, 0);
     startOfMonth.setDate(1);
     const monthMs = startOfMonth.getTime();
+    // Previous calendar month: [first-of-prev, first-of-this).
+    // setMonth(-1) handles the January→December rollover.
+    const startOfLastMonth = new Date(startOfMonth);
+    startOfLastMonth.setMonth(startOfLastMonth.getMonth() - 1);
+    const lastMonthMs = startOfLastMonth.getTime();
+    const startOfYear = new Date(startOfMonth);
+    startOfYear.setMonth(0);
+    startOfYear.setDate(1);
+    const yearMs = startOfYear.getTime();
 
-    let pAll = 0, pMonth = 0, pToday = 0, nAll = 0;
+    let pAll = 0,
+      pMonth = 0,
+      pLastMonth = 0,
+      pYear = 0,
+      pToday = 0,
+      nAll = 0;
     for (const a of attempts) {
       const profit = computeProfit(a);
       if (profit === null) continue;
       const t = new Date(a.createdAt).getTime();
       pAll += profit;
       nAll += 1;
+      if (t >= yearMs) pYear += profit;
+      // Last month is a closed range — must NOT include this month,
+      // hence the explicit upper bound. Keeps the month buckets
+      // disjoint so Today/This-month/Last-month never double-count.
+      if (t >= lastMonthMs && t < monthMs) pLastMonth += profit;
       if (t >= monthMs) pMonth += profit;
       if (t >= todayMs) pToday += profit;
     }
-    return { pAll, pMonth, pToday, nAll };
+    return { pAll, pMonth, pLastMonth, pYear, pToday, nAll };
   }, [attempts]);
 
   const statusCounts = useMemo(() => {
@@ -625,6 +644,16 @@ function DashboardView(props: {
               label: 'This month',
               value: `${fmt(profitSummary.pMonth)}`,
               valueClass: profitSummary.pMonth >= 0 ? 'green' : 'red',
+            },
+            {
+              label: 'Last month',
+              value: `${fmt(profitSummary.pLastMonth)}`,
+              valueClass: profitSummary.pLastMonth >= 0 ? 'green' : 'red',
+            },
+            {
+              label: 'This year',
+              value: `${fmt(profitSummary.pYear)}`,
+              valueClass: profitSummary.pYear >= 0 ? 'green' : 'red',
             },
             {
               label: 'All time',

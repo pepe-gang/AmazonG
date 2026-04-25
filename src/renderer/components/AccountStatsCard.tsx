@@ -4,7 +4,7 @@ import type { AmazonProfile, JobAttempt } from '../../shared/types.js';
 import { STATUS_GROUP } from '../lib/jobsColumns.js';
 import { UsersIcon } from './icons.js';
 
-type SortKey = 'account' | 'today' | 'month' | 'all';
+type SortKey = 'account' | 'today' | 'month' | 'lastMonth' | 'year' | 'all';
 type SortDir = 'asc' | 'desc';
 
 /**
@@ -42,6 +42,16 @@ export function AccountStatsCard({
     startOfMonth.setHours(0, 0, 0, 0);
     startOfMonth.setDate(1);
     const monthMs = startOfMonth.getTime();
+    // Previous calendar month: [first-of-prev-month, first-of-this-month).
+    // new Date(year, month, 1) handles January rollover automatically
+    // (month=-1 returns December of the previous year).
+    const startOfLastMonth = new Date(startOfMonth);
+    startOfLastMonth.setMonth(startOfLastMonth.getMonth() - 1);
+    const lastMonthMs = startOfLastMonth.getTime();
+    const startOfYear = new Date(startOfMonth);
+    startOfYear.setMonth(0);
+    startOfYear.setDate(1);
+    const yearMs = startOfYear.getTime();
 
     return enabledProfiles.map((p) => {
       const stats = {
@@ -49,6 +59,10 @@ export function AccountStatsCard({
         todayProfit: 0,
         monthCount: 0,
         monthProfit: 0,
+        lastMonthCount: 0,
+        lastMonthProfit: 0,
+        yearCount: 0,
+        yearProfit: 0,
         allCount: 0,
         allProfit: 0,
       };
@@ -61,6 +75,17 @@ export function AccountStatsCard({
 
         stats.allCount += 1;
         stats.allProfit += profit;
+        if (t >= yearMs) {
+          stats.yearCount += 1;
+          stats.yearProfit += profit;
+        }
+        // Last month is a closed range — must NOT include this month,
+        // hence the explicit upper bound. Using the same `monthMs`
+        // boundary keeps the two month buckets disjoint.
+        if (t >= lastMonthMs && t < monthMs) {
+          stats.lastMonthCount += 1;
+          stats.lastMonthProfit += profit;
+        }
         if (t >= monthMs) {
           stats.monthCount += 1;
           stats.monthProfit += profit;
@@ -92,6 +117,10 @@ export function AccountStatsCard({
         cmp = a.stats.todayProfit - b.stats.todayProfit;
       } else if (sortKey === 'month') {
         cmp = a.stats.monthProfit - b.stats.monthProfit;
+      } else if (sortKey === 'lastMonth') {
+        cmp = a.stats.lastMonthProfit - b.stats.lastMonthProfit;
+      } else if (sortKey === 'year') {
+        cmp = a.stats.yearProfit - b.stats.yearProfit;
       } else {
         cmp = a.stats.allProfit - b.stats.allProfit;
       }
@@ -155,6 +184,22 @@ export function AccountStatsCard({
                 title="Sort by this month's profit"
               />
               <SortHeader
+                label="Last month"
+                k="lastMonth"
+                sortKey={sortKey}
+                sortDir={sortDir}
+                onSort={onSort}
+                title="Sort by last month's profit (full previous calendar month)"
+              />
+              <SortHeader
+                label="This year"
+                k="year"
+                sortKey={sortKey}
+                sortDir={sortDir}
+                onSort={onSort}
+                title="Sort by this year's profit (Jan 1 to now)"
+              />
+              <SortHeader
                 label="All-time"
                 k="all"
                 sortKey={sortKey}
@@ -190,6 +235,18 @@ export function AccountStatsCard({
                     <CountProfit
                       count={stats.monthCount}
                       profit={stats.monthProfit}
+                    />
+                  </td>
+                  <td className="py-2 px-3 text-right">
+                    <CountProfit
+                      count={stats.lastMonthCount}
+                      profit={stats.lastMonthProfit}
+                    />
+                  </td>
+                  <td className="py-2 px-3 text-right">
+                    <CountProfit
+                      count={stats.yearCount}
+                      profit={stats.yearProfit}
                     />
                   </td>
                   <td className="py-2 pl-3 text-right">
