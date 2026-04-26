@@ -98,11 +98,36 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     }
   });
 
+  // Playwright's launchPersistentContext always boots with a single
+  // about:blank tab. Headless mode never shows it, but in headed
+  // mode every work tab the worker opens sits next to a stranded
+  // blank, which the user (correctly) finds confusing. Capture the
+  // initial blank now and prune it the first time `newPage` is
+  // called — by then there's always at least one real page open,
+  // so the context stays alive. We compare by reference rather than
+  // url so a user who happens to open a manual about:blank tab
+  // doesn't get it stomped on.
+  const initialPages = context.pages();
+  let initialBlank: Page | null =
+    initialPages.length === 1 && initialPages[0]?.url() === 'about:blank'
+      ? initialPages[0]
+      : null;
+
   return {
     profile,
     context,
     async newPage() {
-      return await context.newPage();
+      const fresh = await context.newPage();
+      if (initialBlank && !initialBlank.isClosed()) {
+        // Best-effort prune. Errors swallowed: a failure here would
+        // just leave the blank visible (the previous behavior),
+        // never break the run.
+        await initialBlank
+          .close({ runBeforeUnload: false })
+          .catch(() => undefined);
+        initialBlank = null;
+      }
+      return fresh;
     },
     async goto(page, url, { timeoutMs = 30_000 } = {}) {
       try {

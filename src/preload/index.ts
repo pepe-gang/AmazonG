@@ -105,7 +105,7 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.snapshotsClearAll) as ReturnType<AutoGBridge['snapshotsClearAll']>,
 
   onLog(cb) {
-    const listener = (_: unknown, ev: LogEvent) => cb(ev);
+    const listener = (_: unknown, events: LogEvent[]) => cb(events);
     ipcRenderer.on(IPC.evtLog, listener);
     return () => ipcRenderer.off(IPC.evtLog, listener);
   },

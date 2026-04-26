@@ -6,7 +6,7 @@ import { createBGClient, type ServerPurchase } from '../bg/client.js';
 import { startWorker, type WorkerHandle } from '../workflows/pollAndScrape.js';
 import { addLogSink, logger } from '../shared/logger.js';
 import {
-  appendLog as storeAppendLog,
+  appendLogBatch as storeAppendLogBatch,
   clearAll as storeClearAll,
   clearCanceled as storeClearCanceled,
   clearFailed as storeClearFailed,
@@ -22,7 +22,7 @@ import {
 import { verifyOrder } from '../actions/verifyOrder.js';
 import { fetchTracking } from '../actions/fetchTracking.js';
 import { makeAttemptId } from '../shared/sanitize.js';
-import type { JobAttempt, JobAttemptStatus } from '../shared/types.js';
+import type { JobAttempt, JobAttemptStatus, LogEvent } from '../shared/types.js';
 import { BGApiError } from '../shared/errors.js';
 import { loadIdentity, saveIdentity, clearIdentity } from './identity.js';
 import { loadSettings, saveSettings } from './settings.js';
@@ -92,6 +92,45 @@ let lastError: string | null = null;
 // against the same (still-locked) userDataDir.
 import type { DriverSession } from '../browser/driver.js';
 const openOrderSessions = new Map<string, { session: DriverSession }>();
+
+// Coalesced log fan-out. Workers emit 50–200 events per buy phase; a naive
+// sink would do that many IPCs and that many appendFile syscalls per profile
+// per minute, which keeps the M-series chip out of its low-power state.
+// Buffer for LOG_FLUSH_MS, then send one IPC carrying the batch and one
+// appendFile per attempt. Hoisted to module scope so the before-quit hook
+// can drain pending writes before the process exits.
+const LOG_FLUSH_MS = 200;
+const ipcLogBuffer: LogEvent[] = [];
+const diskLogBuffers = new Map<string, LogEvent[]>();
+let ipcFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let diskFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushIpcLogs(): void {
+  if (ipcFlushTimer) {
+    clearTimeout(ipcFlushTimer);
+    ipcFlushTimer = null;
+  }
+  if (ipcLogBuffer.length === 0) return;
+  const batch = ipcLogBuffer.splice(0, ipcLogBuffer.length);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.evtLog, batch);
+  }
+}
+
+async function flushDiskLogs(): Promise<void> {
+  if (diskFlushTimer) {
+    clearTimeout(diskFlushTimer);
+    diskFlushTimer = null;
+  }
+  const writes: Promise<void>[] = [];
+  for (const [attemptId, bucket] of diskLogBuffers) {
+    if (bucket.length === 0) continue;
+    const batch = bucket.splice(0, bucket.length);
+    writes.push(storeAppendLogBatch(attemptId, batch).catch(() => undefined));
+  }
+  diskLogBuffers.clear();
+  await Promise.all(writes);
+}
 
 function status(): RendererStatus {
   return {
@@ -545,31 +584,33 @@ app.whenReady().then(async () => {
     app.dock?.setIcon(devIcon);
   }
 
+  // Per-attempt log routing: callers can pass `attemptId` directly (wins
+  // over jobId+profile) — verify/fetch_tracking phases roll the BUY
+  // attempt row forward, so their logs need to land on the buy row, not
+  // on a phantom file derived from their own jobId.
+  // Both sinks coalesce via the module-level buffers; see flushIpcLogs /
+  // flushDiskLogs and the before-quit drain.
   addLogSink((ev) => {
-    mainWindow?.webContents.send(IPC.evtLog, ev);
+    ipcLogBuffer.push(ev);
+    if (!ipcFlushTimer) ipcFlushTimer = setTimeout(flushIpcLogs, LOG_FLUSH_MS);
   });
-  // Per-attempt log routing: any log carrying both `jobId` and `profile`
-  // gets appended to that attempt's JSONL log file. The renderer fetches
-  // these per-row via IPC.
-  //
-  // Verify/fetch_tracking phases roll the BUY attempt row forward (see
-  // resolveVerifyAttemptRow), so the buy row is what the user clicks
-  // "View Log" on. Those phases' AutoBuyJob.id is a different id, so a
-  // naive `makeAttemptId(data.jobId, profile)` would route their logs
-  // to a phantom file with no visible row. Callers can override by
-  // including `attemptId` directly — wins over computing from jobId.
   addLogSink((ev) => {
     const data = ev.data as Record<string, unknown> | undefined;
     const explicit = typeof data?.attemptId === 'string' ? data.attemptId : null;
-    if (explicit) {
-      void storeAppendLog(explicit, ev).catch(() => undefined);
-      return;
+    let attemptId: string | null = explicit;
+    if (!attemptId) {
+      const jobId = typeof data?.jobId === 'string' ? data.jobId : null;
+      const profile = typeof data?.profile === 'string' ? data.profile : null;
+      if (!jobId || !profile) return;
+      attemptId = makeAttemptId(jobId, profile);
     }
-    const jobId = typeof data?.jobId === 'string' ? data.jobId : null;
-    const profile = typeof data?.profile === 'string' ? data.profile : null;
-    if (!jobId || !profile) return;
-    const attemptId = makeAttemptId(jobId, profile);
-    void storeAppendLog(attemptId, ev).catch(() => undefined);
+    let bucket = diskLogBuffers.get(attemptId);
+    if (!bucket) {
+      bucket = [];
+      diskLogBuffers.set(attemptId, bucket);
+    }
+    bucket.push(ev);
+    if (!diskFlushTimer) diskFlushTimer = setTimeout(flushDiskLogs, LOG_FLUSH_MS);
   });
 
   // Drop attempts older than 30 days at startup so the table stays manageable.
@@ -680,6 +721,15 @@ app.on('before-quit', async (e) => {
   } catch (err) {
     logger.warn('app.quit.cleanup.error', { error: String(err) });
   } finally {
+    // Drain buffered logs before exit. The IPC drain is best-effort (the
+    // renderer may already be torn down); the disk drain is awaited so
+    // the last <200ms of events survive the shutdown.
+    flushIpcLogs();
+    try {
+      await flushDiskLogs();
+    } catch {
+      // Already swallowed inside flushDiskLogs; defensive double-catch.
+    }
     quittingCleanly = true;
     app.quit();
   }

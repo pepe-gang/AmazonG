@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -31,16 +31,12 @@ import { formatUptime } from './lib/format.js';
 import { useSettings } from './hooks/useSettings.js';
 import {
   AppIcon,
-  BackIcon,
   BoltIcon,
   DollarIcon,
   InfoIcon,
-  PencilIcon,
   PlayIcon,
-  PlusIcon,
   ShoppingIcon,
   StopIcon,
-  UsersIcon,
 } from './components/icons.js';
 import { useConfirm } from './components/ConfirmDialog.js';
 import { LogsView } from './pages/Logs.js';
@@ -177,8 +173,6 @@ function OnboardingScreen() {
 /* ============================================================
    Main screen
    ============================================================ */
-type View = 'dashboard' | 'accounts' | { kind: 'logs'; attempt: JobAttempt };
-
 type Stats = {
   claimed: number;
   completed: number;
@@ -249,8 +243,8 @@ function MainShell({ status }: { status: RendererStatus }) {
     // Update the dashboard's "Jobs" stat card by listening to the same log
     // stream the worker emits. Cheaper than maintaining a separate counter
     // pipeline through IPC.
-    const off = window.autog.onLog((ev) => {
-      setStats((prev) => applyLogsToStats(prev, [ev]));
+    const off = window.autog.onLog((events) => {
+      setStats((prev) => applyLogsToStats(prev, events));
     });
     const offProfiles = window.autog.onProfiles(setProfiles);
     void window.autog.profilesList().then(setProfiles);
@@ -309,9 +303,6 @@ function MainShell({ status }: { status: RendererStatus }) {
   // (Uptime label is rendered by <UptimeText /> below — it owns its own
   // 1s interval so the per-second tick doesn't re-render this whole
   // shell + every routed page.)
-
-  const accountsCount = profiles.length;
-  const accountsReady = profiles.filter((p) => p.enabled && p.loggedIn).length;
 
   return (
     <SidebarProvider defaultOpen={false} className="!min-h-0 h-screen flex-col">
@@ -413,7 +404,6 @@ function MainShell({ status }: { status: RendererStatus }) {
                     startedAt={stats.startedAt}
                     attempts={attempts}
                     profiles={profiles}
-                    onViewLogs={setLogsAttempt}
                   />
                 }
               />
@@ -441,7 +431,6 @@ function MainShell({ status }: { status: RendererStatus }) {
                 path="/settings"
                 element={
                   <SettingsView
-                    profiles={profiles}
                     workerRunning={status.running}
                     identity={status.identity}
                   />
@@ -489,9 +478,8 @@ function DashboardView(props: {
   startedAt: number | null;
   attempts: JobAttempt[];
   profiles: AmazonProfile[];
-  onViewLogs: (a: JobAttempt) => void;
 }) {
-  const { status, startedAt, attempts, profiles, onViewLogs } = props;
+  const { status, startedAt, attempts, profiles } = props;
   const { settings } = useSettings();
   // Timestamp of the last time the user reset the Failed counter.
   // Every attempt with a failed status whose createdAt is earlier than

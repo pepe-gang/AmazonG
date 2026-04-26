@@ -3,7 +3,7 @@ import { JSDOM } from 'jsdom';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../shared/logger.js';
-import { findCashbackPct, parsePrice } from '../parsers/amazonProduct.js';
+import { findCashbackPct } from '../parsers/amazonProduct.js';
 import {
   DELIVERY_OPTIONS_CHANGED_SELECTOR,
   computeCashbackRadioPlans,

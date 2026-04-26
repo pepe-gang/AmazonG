@@ -332,7 +332,7 @@ export type AutoGBridge = {
   jobsOpenTrace(attemptId: string): Promise<void>;
   snapshotsDiskUsage(): Promise<{ count: number; bytes: number }>;
   snapshotsClearAll(): Promise<number>;
-  onLog(cb: (ev: LogEvent) => void): () => void;
+  onLog(cb: (events: LogEvent[]) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;
   onJobs(cb: (attempts: JobAttempt[]) => void): () => void;

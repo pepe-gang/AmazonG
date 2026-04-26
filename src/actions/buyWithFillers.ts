@@ -1089,8 +1089,6 @@ async function fetchOrderIdsForAsins(
   const raw = await page
     .evaluate(
       ({ asinList, maxCards }) => {
-        const ORDER_ID_RE = /\b(\d{3}-\d{7}-\d{7})\b/;
-
         // Walk every element + text node in document order, collecting
         // "order-id encountered at position N" and "dp link with ASIN
         // encountered at position N" events into a single stream.

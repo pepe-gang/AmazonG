@@ -55,6 +55,7 @@ export function AccountsView({
         }}
       >
         <BuyWithFillersPanel />
+        <HeadlessTogglePanel profiles={profiles} />
         <AccountsList profiles={profiles} />
       </div>
       {lockedToast && (
@@ -62,6 +63,65 @@ export function AccountsView({
           Stop the worker first — accounts can't be changed while jobs are polling.
         </div>
       )}
+    </div>
+  );
+}
+
+function HeadlessTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
+  const { settings, busy, update } = useSettings();
+  const [applying, setApplying] = useState(false);
+  if (!settings) return null;
+  const on =
+    profiles.length > 0
+      ? profiles.every((p) => p.headless !== false)
+      : settings.headless;
+  const toggle = async () => {
+    const next = !on;
+    setApplying(true);
+    try {
+      for (const p of profiles) {
+        await window.autog.profilesSetHeadless(p.email, next);
+      }
+      await update({ headless: next });
+    } finally {
+      setApplying(false);
+    }
+  };
+  const anyOff = profiles.some((p) => p.headless === false);
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Headless mode</div>
+          <div className="prefix-sub">
+            When enabled, every account runs Amazon checkouts in hidden Chromium windows. Flip
+            any individual account below to Visible and this master switch turns off
+            automatically. Takes effect on the next worker Start.
+            {anyOff && profiles.length > 0 && (
+              <>
+                {' '}
+                <span className="muted">
+                  ({profiles.filter((p) => p.headless === false).length} of {profiles.length}{' '}
+                  currently visible)
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+        <label
+          className="flex items-center gap-2 cursor-pointer"
+          title={on ? 'Headless: all accounts run hidden' : 'At least one account is set to Visible'}
+        >
+          <Switch
+            checked={on}
+            onCheckedChange={() => void toggle()}
+            disabled={busy || applying}
+          />
+          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
+            {on ? 'Headless' : 'Visible'}
+          </span>
+        </label>
+      </div>
     </div>
   );
 }

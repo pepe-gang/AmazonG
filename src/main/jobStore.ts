@@ -145,9 +145,14 @@ export async function listAttempts(): Promise<JobAttempt[]> {
   );
 }
 
-export async function appendLog(attemptId: string, ev: LogEvent): Promise<void> {
+export async function appendLogBatch(
+  attemptId: string,
+  events: LogEvent[],
+): Promise<void> {
+  if (events.length === 0) return;
   await mkdir(logsDir(), { recursive: true });
-  await appendFile(logFile(attemptId), JSON.stringify(ev) + '\n', 'utf8');
+  const payload = events.map((ev) => JSON.stringify(ev)).join('\n') + '\n';
+  await appendFile(logFile(attemptId), payload, 'utf8');
 }
 
 export async function readLogs(attemptId: string): Promise<LogEvent[]> {

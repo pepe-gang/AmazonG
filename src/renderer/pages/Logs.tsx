@@ -117,12 +117,15 @@ export function LogsView({ attempt }: { attempt: JobAttempt }) {
 
   // Live tail: append any new log events that match this attempt.
   useEffect(() => {
-    const off = window.autog.onLog((ev) => {
-      const data = ev.data as Record<string, unknown> | undefined;
-      const jobId = typeof data?.jobId === 'string' ? data.jobId : null;
-      const profile = typeof data?.profile === 'string' ? data.profile : null;
-      if (jobId === attempt.jobId && profile === attempt.amazonEmail) {
-        setLogs((prev) => prev.concat(ev));
+    const off = window.autog.onLog((events) => {
+      const matching = events.filter((ev) => {
+        const data = ev.data as Record<string, unknown> | undefined;
+        const jobId = typeof data?.jobId === 'string' ? data.jobId : null;
+        const profile = typeof data?.profile === 'string' ? data.profile : null;
+        return jobId === attempt.jobId && profile === attempt.amazonEmail;
+      });
+      if (matching.length > 0) {
+        setLogs((prev) => prev.concat(matching));
       }
     });
     return off;

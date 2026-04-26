@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
-import type { AmazonProfile, RendererStatus } from '../../shared/types.js';
+import type { RendererStatus } from '../../shared/types.js';
 import { SNAPSHOT_ERROR_GROUPS } from '../../shared/snapshotGroups.js';
 import { useSettings } from '../hooks/useSettings.js';
 import { useConfirm } from '../components/ConfirmDialog.js';
@@ -15,11 +15,9 @@ import { formatBytes, formatDate } from '../lib/format.js';
    here.
    ============================================================ */
 export function SettingsView({
-  profiles,
   workerRunning,
   identity,
 }: {
-  profiles: AmazonProfile[];
   workerRunning: boolean;
   identity: RendererStatus['identity'];
 }) {
@@ -59,10 +57,7 @@ export function SettingsView({
         <AllowedPrefixesPanel />
         <AutoStartWorkerPanel />
         <ParallelBuysPanel />
-        <DebuggingModeGroup>
-          <HeadlessTogglePanel profiles={profiles} />
-          <SnapshotSettingsPanel />
-        </DebuggingModeGroup>
+        <SnapshotSettingsPanel />
         <BetterBGConnectionPanel identity={identity} workerRunning={workerRunning} />
       </div>
       {lockedToast && (
@@ -276,33 +271,6 @@ function ParallelBuysPanel() {
           claim).
         </div>
       </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   Debugging Mode group
-   ============================================================
-   Visual container that groups the developer / debugging toggles
-   ("Headless mode", "Capture snapshots on failure") under one
-   labeled box. Pure layout — children render as the same panels
-   they did before, just nested inside a glass container with a
-   header. No state, no behavior change.
-*/
-function DebuggingModeGroup({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Debugging Mode</div>
-          <div className="prefix-sub">
-            Toggles useful for inspecting checkout runs and capturing what
-            went wrong on a failure. Off by default for normal day-to-day
-            operation.
-          </div>
-        </div>
-      </div>
-      <div className="flex flex-col gap-3 mt-3">{children}</div>
     </div>
   );
 }
@@ -561,65 +529,6 @@ function SnapshotSettingsPanel() {
           </button>
         </div>
       )}
-    </div>
-  );
-}
-
-function HeadlessTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
-  const { settings, busy, update } = useSettings();
-  const [applying, setApplying] = useState(false);
-  if (!settings) return null;
-  const on =
-    profiles.length > 0
-      ? profiles.every((p) => p.headless !== false)
-      : settings.headless;
-  const toggle = async () => {
-    const next = !on;
-    setApplying(true);
-    try {
-      for (const p of profiles) {
-        await window.autog.profilesSetHeadless(p.email, next);
-      }
-      await update({ headless: next });
-    } finally {
-      setApplying(false);
-    }
-  };
-  const anyOff = profiles.some((p) => p.headless === false);
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Headless mode</div>
-          <div className="prefix-sub">
-            When enabled, every account runs Amazon checkouts in hidden Chromium windows. Flip
-            any individual account on the Accounts page to Visible and this master switch turns
-            off automatically. Takes effect on the next worker Start.
-            {anyOff && profiles.length > 0 && (
-              <>
-                {' '}
-                <span className="muted">
-                  ({profiles.filter((p) => p.headless === false).length} of {profiles.length}{' '}
-                  currently visible)
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Headless: all accounts run hidden' : 'At least one account is set to Visible'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={() => void toggle()}
-            disabled={busy || applying}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
-            {on ? 'Headless' : 'Visible'}
-          </span>
-        </label>
-      </div>
     </div>
   );
 }
