@@ -612,18 +612,20 @@ export function startWorker(deps: Deps): WorkerHandle {
   let lastNoProfilesWarn = 0;
   const NO_PROFILES_WARN_INTERVAL_MS = 60_000;
 
-  // Tracked set of in-flight fetch_tracking jobs. When the user
-  // bulk-clicks "Tracking now" on N rows, BG queues N fetch_tracking
-  // jobs at once. The default serial claim → process → next-claim
-  // loop drains them at ~one-every-5s; running them in parallel up
-  // to `maxConcurrentSingleBuys` (the existing "Single mode parallel
+  // Tracked set of in-flight lifecycle jobs (verify + fetch_tracking).
+  // When the user bulk-clicks "Verify" or "Tracking now" on N rows,
+  // BG queues N lifecycle jobs at once. The default serial loop
+  // drains them at ~one-every-5s; running them in parallel up to
+  // `maxConcurrentSingleBuys` (the existing "Single mode parallel
   // windows" setting) cuts the total wall-clock by Nx for typical
-  // bulk operations. Only fetch_tracking gets this treatment — buy
-  // already does its own per-job profile fan-out, and verify is
-  // close enough to fetch_tracking semantically that we'd parallel
-  // it too if profile bookkeeping were simpler. Held outside the
-  // loop closure so the stop handler can drain it.
-  const fetchTrackingInFlight = new Set<Promise<void>>();
+  // bulk operations. Both phases share one cap because they both
+  // open a Playwright page in the same per-profile context — letting
+  // them sum to 2× the cap could blow past the user's intended
+  // window count. Buy stays serial (it has its own per-job profile
+  // fan-out) and drains this set before running so phases don't
+  // compete for the same browser resources. Held outside the loop
+  // closure so the stop handler can drain it.
+  const lifecycleInFlight = new Set<Promise<void>>();
 
   const loop = (async () => {
     logger.info('worker.start');
@@ -658,25 +660,25 @@ export function startWorker(deps: Deps): WorkerHandle {
           }))).maxConcurrentSingleBuys,
         );
 
-        // At-cap → wait for one fetch_tracking to finish before
+        // At-cap → wait for one lifecycle job to finish before
         // claiming again. Promise.race resolves on the first settle
         // (success or rejection); the .finally() inside the spawn
         // removes the resolved promise from the set, so the next
         // loop iteration sees one slot freed.
-        if (fetchTrackingInFlight.size >= cap) {
-          await Promise.race(fetchTrackingInFlight).catch(() => undefined);
+        if (lifecycleInFlight.size >= cap) {
+          await Promise.race(lifecycleInFlight).catch(() => undefined);
           continue;
         }
 
         const job = await deps.bg.claimJob();
         if (!job) {
           backoffMs = 5_000;
-          // If background fetch_tracking work is in flight, loop
-          // again right away (no sleep) so we re-claim as soon as
-          // any of them finishes — keeps the pipeline saturated when
-          // BG has more work waiting. Only sleep when truly idle.
-          if (fetchTrackingInFlight.size > 0) {
-            await Promise.race(fetchTrackingInFlight).catch(() => undefined);
+          // If background lifecycle work is in flight, loop again
+          // right away (no sleep) so we re-claim as soon as any of
+          // them finishes — keeps the pipeline saturated when BG has
+          // more work waiting. Only sleep when truly idle.
+          if (lifecycleInFlight.size > 0) {
+            await Promise.race(lifecycleInFlight).catch(() => undefined);
             continue;
           }
           await sleep(5_000, () => running);
@@ -685,18 +687,21 @@ export function startWorker(deps: Deps): WorkerHandle {
         const cid = randomUUID();
         logger.info('job.claim', { jobId: job.id, phase: job.phase, url: job.productUrl }, cid);
 
-        if (job.phase === 'fetch_tracking') {
+        if (job.phase === 'verify' || job.phase === 'fetch_tracking') {
           // Fire-and-track: don't await the handler. The loop body
           // continues to the next claim immediately, up to `cap`
           // concurrent in-flight jobs. Errors are logged inside the
           // IIFE so an unhandled rejection can't sneak past Node's
-          // process-level handlers and crash the worker.
+          // process-level handlers and crash the worker. Phase is
+          // included in the log key so a wedged verify vs a wedged
+          // tracking is distinguishable from log search alone.
+          const phase = job.phase;
           const p = (async () => {
             try {
               await handleJob(deps, sessions, job, cid, eligible);
             } catch (err) {
               logger.error(
-                'worker.fetchTracking.background.error',
+                `worker.${phase}.background.error`,
                 {
                   error: err instanceof Error ? err.message : String(err),
                   jobId: job.id,
@@ -705,21 +710,21 @@ export function startWorker(deps: Deps): WorkerHandle {
               );
             }
           })();
-          fetchTrackingInFlight.add(p);
+          lifecycleInFlight.add(p);
           // Self-removal so the next at-cap check is accurate. void
           // discards the chained promise (we don't need its result).
           void p.finally(() => {
-            fetchTrackingInFlight.delete(p);
+            lifecycleInFlight.delete(p);
           });
           backoffMs = 5_000;
           continue;
         }
 
-        // Buy / verify path — serial. Drain any background
-        // fetch_tracking first so the buy/verify run doesn't compete
-        // with them for the same Playwright session resources.
-        if (fetchTrackingInFlight.size > 0) {
-          await Promise.allSettled([...fetchTrackingInFlight]);
+        // Buy path — serial. Drain any background verify /
+        // fetch_tracking first so the buy run doesn't compete with
+        // them for the same Playwright session resources.
+        if (lifecycleInFlight.size > 0) {
+          await Promise.allSettled([...lifecycleInFlight]);
         }
         await handleJob(deps, sessions, job, cid, eligible);
         backoffMs = 5_000;
@@ -730,12 +735,12 @@ export function startWorker(deps: Deps): WorkerHandle {
         backoffMs = Math.min(backoffMs * 2, 60_000);
       }
     }
-    // On shutdown, give in-flight fetch_tracking a beat to settle
+    // On shutdown, give in-flight lifecycle jobs a beat to settle
     // (their Playwright ops will throw shortly after closeAllSessions
     // runs, which is what we want). allSettled never rejects, so this
     // is safe even if some are mid-error.
-    if (fetchTrackingInFlight.size > 0) {
-      await Promise.allSettled([...fetchTrackingInFlight]);
+    if (lifecycleInFlight.size > 0) {
+      await Promise.allSettled([...lifecycleInFlight]);
     }
     await closeAllSessions(sessions);
     logger.info('worker.stop');
