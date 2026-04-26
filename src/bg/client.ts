@@ -154,6 +154,18 @@ export type BGClient = {
     requireMinCashback: boolean,
   ): Promise<AmazonAccountSetting>;
   /**
+   * Push the human-friendly Amazon account name (e.g. "Mom", "Cuong 1")
+   * to BG so the dashboard's Account column can render it instead of
+   * the raw Gmail. Pass null to clear. Best-effort — callers should
+   * .catch() since BG might be unreachable or the user might not have
+   * connected an AutoG key yet, and a sync failure must not block the
+   * local rename UX.
+   */
+  setAmazonAccountDisplayName(
+    email: string,
+    displayName: string | null,
+  ): Promise<AmazonAccountSetting>;
+  /**
    * Set or clear the per-Amazon-account tracking-submit routing target.
    * Pass `null` to clear (the resolver then falls through to single-
    * BGAccount auto-fill or skipped_no_route). Server verifies the
@@ -337,6 +349,20 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         {
           method: 'POST',
           body: JSON.stringify({ email, requireMinCashback }),
+        },
+      );
+      if (!r) {
+        throw new BGApiError(500, '/api/autog/amazon-accounts', 'empty response');
+      }
+      return r;
+    },
+
+    async setAmazonAccountDisplayName(email, displayName) {
+      const r = await request<AmazonAccountSetting>(
+        '/api/autog/amazon-accounts',
+        {
+          method: 'POST',
+          body: JSON.stringify({ email, displayName }),
         },
       );
       if (!r) {

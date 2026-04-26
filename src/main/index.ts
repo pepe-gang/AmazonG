@@ -150,6 +150,53 @@ async function broadcastProfiles(list?: AmazonProfile[]): Promise<void> {
   mainWindow?.webContents.send(IPC.evtProfiles, payload);
 }
 
+/**
+ * Push a single Amazon profile's displayName to BG so the dashboard's
+ * Account column can render the human-friendly name. Best-effort:
+ * silently no-ops when not connected to BG, and swallows transport
+ * errors — the local rename UX must never block on this. Logs at
+ * debug level so a BG hiccup is traceable without surfacing as a
+ * user-visible warning.
+ */
+async function syncDisplayNameToBG(
+  email: string,
+  displayName: string | null,
+): Promise<void> {
+  if (!apiKey) return;
+  try {
+    const settings = await loadSettings();
+    const bg = createBGClient(settings.bgBaseUrl, apiKey);
+    await bg.setAmazonAccountDisplayName(email, displayName);
+  } catch (err) {
+    logger.debug('profile.displayName.sync.error', {
+      email,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Push every locally-known profile's displayName to BG in one pass.
+ * Called once on app start (after identity is loaded) so a brand-new
+ * BG side picks up names from the user's existing AmazonG state
+ * without them having to manually re-rename each profile. Sequential
+ * to keep the desktop's outbound HTTP polite — there are typically
+ * <20 accounts, so total time is bounded. Best-effort throughout.
+ */
+async function bulkSyncDisplayNamesToBG(): Promise<void> {
+  if (!apiKey) return;
+  let profiles: AmazonProfile[] = [];
+  try {
+    profiles = await loadProfiles();
+  } catch {
+    return;
+  }
+  if (profiles.length === 0) return;
+  for (const p of profiles) {
+    await syncDisplayNameToBG(p.email.toLowerCase(), p.displayName ?? null);
+  }
+}
+
 // Coalesce job-list broadcasts so a fan-out across N profiles doesn't
 // fire 2N+ full-list IPC sends. 250ms trailing timer collapses burst
 // updates further than the previous 100ms — not perceptibly less
@@ -686,6 +733,16 @@ app.whenReady().then(async () => {
   // live `apiKey` so connect/disconnect cycles don't need to restart it.
   startAutoEnqueueScheduler({ getApiKey: () => apiKey });
 
+  // One-shot bulk sync of every locally-known profile's displayName
+  // to BG. Catches the existing user base — names live in the local
+  // profiles.json today, and BG's Account column needs them pushed
+  // up before it can render anything friendlier than the email. Best-
+  // effort: skips silently if not connected; subsequent renames sync
+  // individually via the profilesAdd / profilesRename IPC handlers.
+  // void to detach from the whenReady chain — no need to block window
+  // creation on a network round-trip.
+  void bulkSyncDisplayNamesToBG();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -867,6 +924,10 @@ function registerIpcHandlers(): void {
       const name = displayName?.trim() || undefined;
       const list = await upsertProfile(newProfile(clean, name));
       await broadcastProfiles(list);
+      // Push the name to BG so the dashboard's Account column can
+      // render it. Best-effort — a failed sync (offline, no AutoG
+      // key, BG hiccup) must not break the local add UX.
+      void syncDisplayNameToBG(clean, name ?? null);
       return list;
     },
   );
@@ -907,6 +968,7 @@ function registerIpcHandlers(): void {
       const clean = displayName?.trim() || null;
       const list = await updateProfile(email, { displayName: clean });
       await broadcastProfiles(list);
+      void syncDisplayNameToBG(email.toLowerCase(), clean);
       return list;
     },
   );
