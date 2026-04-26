@@ -194,7 +194,13 @@ function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
     buyMode: 'single',
     dryRun: false,
     trackingIds: s.trackingIds ?? null,
-    fillerOrderIds: null,
+    // BG now serves fillerOrderIds in /api/autog/purchases. Read it so
+    // the column survives the local 30-day prune — pre-fix the field
+    // was hardcoded to null here, which silently dropped filler order
+    // ids from the table once the local entry aged out. Empty array
+    // when the server row is non-filler or hasn't been backfilled yet
+    // (matches the type's "single-mode → []" convention).
+    fillerOrderIds: s.fillerOrderIds ?? null,
     productTitle: null,
     stage: null,
     createdAt: s.createdAt,
@@ -262,9 +268,17 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
         // BG doesn't track filler-mode on AutoBuyPurchase, so the server
         // row is always 'single'. The local attempt knows whether the
         // buy actually ran through buyWithFillers — prefer it for the
-        // Buy Mode column + the filler-only context fields.
+        // Buy Mode column + productTitle (still local-only).
         buyMode: l.buyMode,
-        fillerOrderIds: l.fillerOrderIds,
+        // For fillerOrderIds: prefer whichever side has a non-empty
+        // list. Local is up-to-the-second (the buy just persisted them
+        // before the /status POST landed), but BG is durable past the
+        // local 30-day prune. After prune the local field is null/[],
+        // so the server's snapshot wins. Same shape rule as trackingIds.
+        fillerOrderIds:
+          l.fillerOrderIds && l.fillerOrderIds.length > 0
+            ? l.fillerOrderIds
+            : (existing.fillerOrderIds ?? l.fillerOrderIds),
         productTitle: l.productTitle,
       });
     } else {
@@ -543,6 +557,7 @@ async function startWorkerNow(): Promise<void> {
         maxConcurrentSingleBuys: s.maxConcurrentSingleBuys,
         maxConcurrentFillerBuys: s.maxConcurrentFillerBuys,
         fillerParallelTabs: s.fillerParallelTabs,
+        wheyProteinFillerOnly: s.wheyProteinFillerOnly,
       };
     },
     listEligibleProfiles: async () => {

@@ -71,6 +71,11 @@ type Deps = {
     maxConcurrentSingleBuys: number;
     maxConcurrentFillerBuys: number;
     fillerParallelTabs: number;
+    /** When true (and the buy is in filler mode), the filler picker
+     *  uses a whey-protein-only term pool instead of the general
+     *  impulse mix. Read every claim so a Settings toggle takes
+     *  effect on the next deal without restarting the worker. */
+    wheyProteinFillerOnly: boolean;
   }>;
   /** Returns every enabled+loggedIn profile we should fan out the job to. */
   listEligibleProfiles: () => Promise<AmazonProfile[]>;
@@ -478,6 +483,9 @@ async function runFillerBuyWithRetries(
   /** Live parallel-tab count for filler add-to-cart fan-out, re-read
    *  from Settings on each claim. */
   fillerParallelTabs: number,
+  /** Live "Whey Protein Filler only" toggle, re-read each claim same
+   *  as fillerParallelTabs. Single-mode buys never reach here. */
+  wheyProteinFillerOnly: boolean,
   onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
   let lastRaw: BuyWithFillersResult = {
@@ -485,11 +493,24 @@ async function runFillerBuyWithRetries(
     stage: 'cashback_gate',
     reason: 'filler buy never ran',
   };
+  // Shared dedup set across the up-to-3 attempts. Each call to
+  // buyWithFillers seeds its picker from this Set and adds every
+  // ASIN it considers (via addFillerItems → state.seen, which is
+  // this same Set by reference). Means attempt 2/3 won't re-pick
+  // anything attempt 1 tried — different fillers → different
+  // shipping-group fan-out → different cashback eligibility, which
+  // is the whole point of retrying on a cashback_gate miss.
+  const attemptedAsins = new Set<string>();
   for (let attempt = 1; attempt <= FILLER_MAX_ATTEMPTS; attempt++) {
     if (attempt > 1) {
       logger.info(
         'step.fillerBuy.retryWhole.start',
-        { attempt, maxAttempts: FILLER_MAX_ATTEMPTS, priorReason: lastRaw.ok ? null : lastRaw.reason },
+        {
+          attempt,
+          maxAttempts: FILLER_MAX_ATTEMPTS,
+          priorReason: lastRaw.ok ? null : lastRaw.reason,
+          excludedAsinsCount: attemptedAsins.size,
+        },
         cid,
       );
     }
@@ -501,6 +522,8 @@ async function runFillerBuyWithRetries(
       requireMinCashback,
       dryRun: deps.buyDryRun,
       fillerParallelTabs,
+      wheyProteinFillerOnly,
+      attemptedAsins,
       correlationId: `${cid}/attempt-${attempt}`,
       onStage,
     });
@@ -657,6 +680,7 @@ export function startWorker(deps: Deps): WorkerHandle {
             maxConcurrentSingleBuys: DEFAULT_CONCURRENT_SINGLE_BUYS,
             maxConcurrentFillerBuys: DEFAULT_CONCURRENT_FILLER_BUYS,
             fillerParallelTabs: 4,
+            wheyProteinFillerOnly: false,
           }))).maxConcurrentSingleBuys,
         );
 
@@ -863,6 +887,7 @@ async function handleJob(
     maxConcurrentSingleBuys: DEFAULT_CONCURRENT_SINGLE_BUYS,
     maxConcurrentFillerBuys: DEFAULT_CONCURRENT_FILLER_BUYS,
     fillerParallelTabs: 4,
+    wheyProteinFillerOnly: false,
   }));
   const concurrency = fanoutConcurrency(anyFiller, parallelism);
   logger.info(
@@ -923,6 +948,7 @@ async function handleJob(
       effectiveMinByEmail.get(profile.email) ?? deps.minCashbackPct,
       requireMinByEmail.get(profile.email.toLowerCase()) ?? true,
       parallelism.fillerParallelTabs,
+      parallelism.wheyProteinFillerOnly,
     ),
   );
 
@@ -1803,6 +1829,10 @@ async function runForProfile(
    *  the caller, so changing it in Settings applies on the next
    *  deal without restarting the worker. Single-mode buys ignore. */
   fillerParallelTabs: number,
+  /** When true (and the buy is in filler mode), the picker uses a
+   *  whey-protein-only term pool with a 10–12 random count. Re-read
+   *  per claim same as fillerParallelTabs. Single-mode buys ignore. */
+  wheyProteinFillerOnly: boolean,
 ): Promise<ProfileResult> {
   const profile = profileData.email;
   // Per-profile correlation id so logs across the parallel runs are
@@ -1926,7 +1956,7 @@ async function runForProfile(
     const onStage = (stage: 'placing' | null): Promise<void> =>
       deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, fillerParallelTabs, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, fillerParallelTabs, wheyProteinFillerOnly, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;

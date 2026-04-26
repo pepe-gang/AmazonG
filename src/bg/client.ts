@@ -36,6 +36,12 @@ export type ServerPurchase = {
   /** Carrier tracking codes populated by fetch_tracking. Null when BG
    *  hasn't recorded any (legacy purchases + orders still pre-ship). */
   trackingIds: string[] | null;
+  /** Filler-only Amazon order ids snapshotted at buy time on filler-mode
+   *  buys — orders that came out of Place Order but DON'T contain the
+   *  target ASIN. Empty for single-mode buys. Optional on the wire so
+   *  pre-fix BG deployments parse cleanly; AmazonG defaults to [] when
+   *  the field is missing. */
+  fillerOrderIds?: string[];
   createdAt: string;
   updatedAt: string;
 };

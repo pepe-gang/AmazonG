@@ -72,6 +72,24 @@ type BuyWithFillersOptions = {
    * spawning 100 tabs.
    */
   fillerParallelTabs?: number;
+  /**
+   * When true, the filler picker uses a whey-protein search-term pool
+   * instead of the general impulse mix and randomises the count to
+   * 6–8 (vs the fixed 8 for the general pool). Prime + $20–$100
+   * rules unchanged.
+   */
+  wheyProteinFillerOnly?: boolean;
+  /**
+   * Set of ASINs the picker must NOT add to cart. Pre-seeded into the
+   * dedup state, then mutated by the picker as it goes — callers
+   * running a retry loop should pass the SAME Set across attempts so
+   * each retry lands on a different shipping-group fan-out (avoiding
+   * the items they already tried, which is the whole point of
+   * retrying on a cashback_gate miss).
+   *
+   * Pass undefined for a fresh-start picker.
+   */
+  attemptedAsins?: Set<string>;
   correlationId?: string;
   /**
    * Called immediately before the Place Order click ('placing') and
@@ -172,8 +190,8 @@ const BUY_NOW_URL_MATCH = /\/gp\/buy\/|\/checkout\/|\/spc\//i;
 const SPC_URL_MATCH = /\/gp\/buy\/|\/checkout\/p\/|\/spc\//i;
 const CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
 
-const FILLER_COUNT = 12;
-const FILLER_MIN_PRICE = 30;
+const FILLER_COUNT = 8;
+const FILLER_MIN_PRICE = 20;
 const FILLER_MAX_PRICE = 100;
 // Parallel tabs inside the account's BrowserContext. Tabs share cookies +
 // cart server-side, so all adds land in the same order. The historical
@@ -198,6 +216,30 @@ const FILLER_SEARCH_TERMS: readonly string[] = [
   'book', 'card game', 'yoga mat', 'resistance band', 'jump rope',
   'face mask', 'hair clip', 'scrunchie', 'sunglasses', 'socks',
 ];
+
+// Whey-protein-only pool. Used when the user opts in via Settings →
+// Buy with Fillers → "Whey Protein Filler only". Same Prime + $20–$100
+// gating as the general pool; just a narrower term list so the cart
+// looks like a sports/nutrition shop instead of a general-merch run.
+// Brand + flavour variants are intentional — Amazon's search rankings
+// for "whey protein" alone tend to surface the same handful of bestsellers
+// every time, which would defeat the no-duplicates-on-retry rule.
+const WHEY_PROTEIN_SEARCH_TERMS: readonly string[] = [
+  'whey protein', 'whey protein powder', 'whey isolate', 'whey concentrate',
+  'whey protein vanilla', 'whey protein chocolate', 'whey protein strawberry',
+  'optimum nutrition whey', 'dymatize iso100', 'muscle milk powder',
+  'body fortress whey', 'six star whey', 'cellucor whey',
+  'isopure protein', 'naked whey', 'muscletech whey',
+  'gnc whey', 'gold standard whey', 'pure protein whey',
+];
+
+// When wheyProteinFillerOnly is on, the count is randomised in this
+// inclusive range — adds a touch of variation per buy on top of the
+// shuffled term order so two consecutive whey-mode buys aren't
+// fingerprintably identical. Range scaled proportionally with the
+// general FILLER_COUNT drop from 12 → 8.
+const WHEY_FILLER_MIN_COUNT = 6;
+const WHEY_FILLER_MAX_COUNT = 8;
 
 /**
  * Orchestrator for the "Buy with Fillers" checkout flow.
@@ -338,19 +380,49 @@ export async function buyWithFillers(
   //    Proceed with whatever count we got: even a partial set (say 8/12)
   //    still provides camouflage. Refusing to buy because of a flaky
   //    search is worse than a slightly smaller cover.
-  const fillersResult = await addFillerItems(page, targetAsin, cid, opts.fillerParallelTabs);
+  //
+  // Pool + count picked here so log lines downstream can attribute
+  // results to the active mode. Whey-only randomises 10–12 to add a
+  // bit of cart-shape variation across runs; general pool stays at the
+  // historical fixed 12.
+  const useWheyPool = opts.wheyProteinFillerOnly === true;
+  const fillerTerms = useWheyPool ? WHEY_PROTEIN_SEARCH_TERMS : FILLER_SEARCH_TERMS;
+  const fillerTargetCount = useWheyPool
+    ? WHEY_FILLER_MIN_COUNT +
+      Math.floor(Math.random() * (WHEY_FILLER_MAX_COUNT - WHEY_FILLER_MIN_COUNT + 1))
+    : FILLER_COUNT;
+  logger.info(
+    'step.fillerBuy.fillers.config',
+    {
+      pool: useWheyPool ? 'whey' : 'general',
+      targetCount: fillerTargetCount,
+      preExcludedCount: opts.attemptedAsins?.size ?? 0,
+    },
+    cid,
+  );
+  const fillersResult = await addFillerItems(
+    page,
+    targetAsin,
+    cid,
+    opts.fillerParallelTabs,
+    {
+      terms: fillerTerms,
+      targetCount: fillerTargetCount,
+      attemptedAsins: opts.attemptedAsins,
+    },
+  );
   const fillersAdded = fillersResult.added;
   const fillerAsins = fillersResult.asins;
-  if (fillersAdded < FILLER_COUNT) {
+  if (fillersAdded < fillerTargetCount) {
     logger.warn(
       'step.fillerBuy.fillers.partial',
-      { fillersAdded, fillersRequested: FILLER_COUNT },
+      { fillersAdded, fillersRequested: fillerTargetCount },
       cid,
     );
   } else {
     logger.info(
       'step.fillerBuy.fillers.ok',
-      { fillersAdded, fillersRequested: FILLER_COUNT },
+      { fillersAdded, fillersRequested: fillerTargetCount },
       cid,
     );
   }
@@ -380,7 +452,7 @@ export async function buyWithFillers(
     };
   }
 
-  const expectedRows = FILLER_COUNT + 1;
+  const expectedRows = fillerTargetCount + 1;
   const pollStart = Date.now();
   const pollDeadline = pollStart + 20_000;
   let lastCount = -1;
@@ -769,7 +841,7 @@ export async function buyWithFillers(
     targetAsin,
     productInfo: info,
     fillersAdded,
-    fillersRequested: FILLER_COUNT,
+    fillersRequested: fillerTargetCount,
     placeOrderSelector: ready.detected,
     targetCashbackPct,
     placedQuantity,
@@ -787,7 +859,7 @@ export async function buyWithFillers(
         fillersAdded,
         message:
           `✓ Dry run successful — order would have been placed ` +
-          `(cashback ${targetCashbackPct ?? 'n/a'}%, ${fillersAdded}/${FILLER_COUNT} fillers). ` +
+          `(cashback ${targetCashbackPct ?? 'n/a'}%, ${fillersAdded}/${fillerTargetCount} fillers). ` +
           `Skipped Place Order click.`,
       },
       cid,
@@ -1704,8 +1776,26 @@ type FillerState = {
   addedAsins: string[];
   queue: string[];
   termIdx: number;
+  /** Dedup set: target ASIN + every filler ASIN we've considered so far.
+   *  Caller can pass its own Set in (via FillerOpts.attemptedAsins) so
+   *  retries share state and avoid re-picking previously-tried items. */
   seen: Set<string>;
   termsExhausted: boolean;
+  /** Target count of fillers for this run. Used to be the FILLER_COUNT
+   *  constant; now configurable per-call so whey-only mode can pick
+   *  6–8 randomly while the general pool stays at 8. */
+  targetCount: number;
+};
+
+type FillerOpts = {
+  /** Search-term pool. Defaults to the general impulse-item list. */
+  terms?: readonly string[];
+  /** How many fillers to add before stopping. Defaults to FILLER_COUNT. */
+  targetCount?: number;
+  /** See BuyWithFillersOptions.attemptedAsins — same Set, passed
+   *  through. Used as both the dedup pre-seed and the accumulator
+   *  the caller can read after the call. */
+  attemptedAsins?: Set<string>;
 };
 
 /**
@@ -1727,20 +1817,27 @@ async function addFillerItems(
   /** Number of parallel tabs to use. Defaults to the historical 4 if
    *  unspecified; clamped to 1..6. */
   parallelTabs: number = DEFAULT_FILLER_WORKERS,
+  fillerOpts: FillerOpts = {},
 ): Promise<{ added: number; asins: string[] }> {
   const workers = Math.max(
     MIN_FILLER_WORKERS,
     Math.min(MAX_FILLER_WORKERS, Math.round(parallelTabs)),
   );
   const context = mainPage.context();
-  const terms = shuffle(FILLER_SEARCH_TERMS);
+  const terms = shuffle(fillerOpts.terms ?? FILLER_SEARCH_TERMS);
+  // Dedup set is the caller-supplied Set when present (so retries
+  // share it across calls), or a fresh one. Pre-seed with the target
+  // ASIN so the picker can't accidentally add the target as a filler.
+  const seen = fillerOpts.attemptedAsins ?? new Set<string>();
+  if (targetAsin) seen.add(targetAsin);
   const state: FillerState = {
     added: 0,
     addedAsins: [],
     queue: [],
     termIdx: 0,
-    seen: new Set<string>(targetAsin ? [targetAsin] : []),
+    seen,
     termsExhausted: false,
+    targetCount: fillerOpts.targetCount ?? FILLER_COUNT,
   };
 
   // Main page participates as worker 0. Side tabs are workers 1..N-1.
@@ -1773,9 +1870,9 @@ async function runFillerWorker(
 ): Promise<void> {
   while (true) {
     // Top-of-loop stop conditions — checked synchronously before any await
-    // so a worker that sees the counter at FILLER_COUNT returns instantly
-    // and can't start another add.
-    if (state.added >= FILLER_COUNT) return;
+    // so a worker that sees the counter at state.targetCount returns
+    // instantly and can't start another add.
+    if (state.added >= state.targetCount) return;
 
     let asin = state.queue.shift();
     if (!asin) {
@@ -1808,7 +1905,7 @@ async function runFillerWorker(
 
     // Reserve a slot before the async add so a concurrent worker can't
     // reserve the same last slot. If the add fails we release the slot.
-    if (state.added >= FILLER_COUNT) return;
+    if (state.added >= state.targetCount) return;
     state.added++;
 
     const ok = await addOneFillerToCart(tab, asin);
@@ -1816,7 +1913,7 @@ async function runFillerWorker(
       state.addedAsins.push(asin);
       logger.info(
         'step.fillerBuy.fillers.added',
-        { workerId, asin, count: state.added, of: FILLER_COUNT },
+        { workerId, asin, count: state.added, of: state.targetCount },
         cid,
       );
     } else {

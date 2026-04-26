@@ -223,7 +223,7 @@ function ParallelBuysPanel() {
                 Filler add-to-cart speed
               </div>
               <div className="text-xs text-muted-foreground mt-0.5">
-                When Buy with Fillers runs, AmazonG adds ~12 filler
+                When Buy with Fillers runs, AmazonG adds ~8 filler
                 items to the cart. This many parallel tabs do the
                 add-to-cart step at the same time inside one Chrome
                 window. Higher = faster cart fill, but a high value

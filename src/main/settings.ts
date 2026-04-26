@@ -21,6 +21,7 @@ const DEFAULTS: Settings = {
   snapshotOnFailure: false,
   snapshotGroups: [],
   buyWithFillers: false,
+  wheyProteinFillerOnly: true,
   failedHiddenBeforeTs: null,
   hiddenAttemptIds: [],
   autoEnqueueEnabled: false,

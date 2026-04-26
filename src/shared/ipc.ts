@@ -136,6 +136,13 @@ export type Settings = {
    */
   buyWithFillers: boolean;
   /**
+   * When on (and the buy is in filler mode), the filler picker uses a
+   * whey-protein search-term pool only. 10–12 fillers per buy (random
+   * count). Same Prime + price-band rules ($30–$100). No effect when
+   * filler mode is off.
+   */
+  wheyProteinFillerOnly: boolean;
+  /**
    * When set, the Dashboard's Failed counter + the failures-by-reason
    * popover ignore every attempt whose createdAt predates this
    * timestamp. Used by the popover's Clear action to "reset" the

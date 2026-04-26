@@ -130,13 +130,14 @@ function BuyWithFillersPanel() {
   const { settings, busy, update } = useSettings();
   if (!settings) return null;
   const on = settings.buyWithFillers;
+  const wheyOn = settings.wheyProteinFillerOnly;
   return (
     <div className="prefix-panel">
       <div className="prefix-head">
         <div>
           <div className="prefix-title">Buy with Fillers</div>
           <div className="prefix-sub">
-            When on, every account&apos;s buy phase places the target item alongside ~10 random
+            When on, every account&apos;s buy phase places the target item alongside ~8 random
             Prime fillers, then cancels the fillers once the order is verified. Applies globally
             to all enabled accounts. Caps worker concurrency to 1 account at a time. Shows as
             &quot;Filler&quot; in the Buy Mode column. Takes effect on the next worker Start.
@@ -153,6 +154,45 @@ function BuyWithFillersPanel() {
           />
           <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
             {on ? 'On' : 'Off'}
+          </span>
+        </label>
+      </div>
+
+      {/* Whey-only sub-toggle. Disabled when the master Filler toggle
+          is off because it has no effect outside filler mode. Sits
+          inside the same panel since it only modifies filler picker
+          behavior, not a separate feature. */}
+      <div className="flex items-start justify-between gap-3 mt-3 pt-3 border-t border-white/[0.04]">
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-foreground/80">
+            Whey Protein Filler only
+          </div>
+          <div className="text-[11px] text-muted-foreground leading-snug mt-0.5 max-w-md">
+            Restrict fillers to whey-protein items only — 10&ndash;12 per buy
+            (random count). Same Prime + $20&ndash;$100 rules. Across the up-to-3
+            cashback retries, the picker remembers what it tried so each
+            retry lands different items. No effect when Buy with Fillers is off.
+          </div>
+        </div>
+        <label
+          className="flex items-center gap-2 cursor-pointer"
+          title={
+            !on
+              ? wheyOn
+                ? 'Whey-only pool will activate when Buy with Fillers is enabled'
+                : 'Will use the general pool when Buy with Fillers is enabled'
+              : wheyOn
+                ? 'Whey-only pool active'
+                : 'Using the general impulse pool'
+          }
+        >
+          <Switch
+            checked={wheyOn}
+            onCheckedChange={(v) => void update({ wheyProteinFillerOnly: v })}
+            disabled={busy}
+          />
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {wheyOn ? 'On' : 'Off'}
           </span>
         </label>
       </div>
