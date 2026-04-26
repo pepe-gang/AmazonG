@@ -42,6 +42,12 @@ export type ServerPurchase = {
    *  pre-fix BG deployments parse cleanly; AmazonG defaults to [] when
    *  the field is missing. */
   fillerOrderIds?: string[];
+  /** Parent AutoBuyJob.viaFiller — true when the buy was a rebuy or
+   *  filler-verify offshoot. Lets AmazonG render Buy Mode = 'filler'
+   *  for these rows after the local attempt is pruned out of
+   *  job-attempts.json. Optional on the wire (older BG deployments
+   *  don't send it). */
+  viaFiller?: boolean;
   createdAt: string;
   updatedAt: string;
 };

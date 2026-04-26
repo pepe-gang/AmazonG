@@ -191,7 +191,17 @@ function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
     orderId: s.placedOrderId ?? null,
     status: s.status,
     error: s.error,
-    buyMode: 'single',
+    // Surface filler-mode when BG marked the parent job viaFiller
+    // (rebuys, filler-verify offshoots). Without this, server-only
+    // rows — which is what shows up after the local attempt is
+    // evicted from job-attempts.json by the 1000-row ring buffer or
+    // the 30-day prune — flip to 'single' even though the buy
+    // actually ran with fillers. NOTE: a fresh non-rebuy buy that
+    // ran in filler mode purely because of the global buyWithFillers
+    // toggle has parent.viaFiller=false on BG, so it still flips
+    // post-prune; making that case durable needs an AutoBuyPurchase
+    // column (separate migration).
+    buyMode: s.viaFiller ? 'filler' : 'single',
     dryRun: false,
     trackingIds: s.trackingIds ?? null,
     // BG now serves fillerOrderIds in /api/autog/purchases. Read it so
@@ -265,11 +275,16 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
         // sync failure, or a buy whose confirmation parser didn't find
         // a final price — local still has the PDP fallback).
         cost: existing.cost ?? l.cost,
-        // BG doesn't track filler-mode on AutoBuyPurchase, so the server
-        // row is always 'single'. The local attempt knows whether the
-        // buy actually ran through buyWithFillers — prefer it for the
-        // Buy Mode column + productTitle (still local-only).
-        buyMode: l.buyMode,
+        // BG now derives buyMode from the parent AutoBuyJob.viaFiller
+        // (set on rebuys + filler-verify offshoots). Either side
+        // saying 'filler' is enough — local is authoritative for
+        // fresh just-ran buys; server is authoritative once the
+        // local attempt is evicted from job-attempts.json. Falling
+        // through to 'single' only when both agree.
+        buyMode:
+          l.buyMode === 'filler' || existing.buyMode === 'filler'
+            ? 'filler'
+            : 'single',
         // For fillerOrderIds: prefer whichever side has a non-empty
         // list. Local is up-to-the-second (the buy just persisted them
         // before the /status POST landed), but BG is durable past the
