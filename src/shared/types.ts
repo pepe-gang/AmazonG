@@ -169,6 +169,39 @@ export type AmazonProfile = {
   buyWithFillers: boolean;
 };
 
+/**
+ * Chase login profile — entirely local to the desktop. No BG sync, no
+ * remote storage. Cookies + storage persist across launches in the
+ * per-profile Playwright user-data dir under
+ * `userData/chase-profiles/{id}/`, so a returning user typically
+ * doesn't need to re-2FA every session.
+ *
+ * Fields:
+ *   - id            UUID generated locally; opaque to the user
+ *   - label         human-readable name ("Personal Chase", "Business Chase")
+ *   - loggedIn      true once the URL probe saw the dashboard URL on a
+ *                   login attempt. Stale on its own — the persistent
+ *                   context might still have a valid session even if a
+ *                   "Re-login" was never clicked again.
+ *   - lastLoginAt   ISO timestamp of the most recent successful login
+ *                   probe; null if never logged in
+ *   - createdAt     ISO timestamp the profile row was added
+ */
+export type ChaseProfile = {
+  id: string;
+  label: string;
+  loggedIn: boolean;
+  lastLoginAt: string | null;
+  createdAt: string;
+};
+
+/** Outcome shape for chaseLogin IPC. The `cancelled` reason is
+ *  surfaced separately from generic failures so the UI can render it
+ *  as a neutral state ("you closed the window") rather than an error. */
+export type ChaseLoginResult =
+  | { ok: true }
+  | { ok: false; reason: string; cancelled?: boolean };
+
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug';
 
 export type LogEvent = {

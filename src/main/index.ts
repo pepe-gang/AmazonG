@@ -39,6 +39,13 @@ import {
   updateProfile,
   upsertProfile,
 } from './profiles.js';
+import {
+  createChaseProfile,
+  loadChaseProfiles,
+  removeChaseProfile,
+  updateChaseProfile,
+} from './chaseProfiles.js';
+import { openChaseSession, type ChaseSession } from './chaseDriver.js';
 import { openSession } from '../browser/driver.js';
 import { snapshotDir, snapshotsDiskUsage, clearAllSnapshots } from '../browser/snapshot.js';
 import { compareSemver } from '../shared/version.js';
@@ -92,6 +99,14 @@ let lastError: string | null = null;
 // against the same (still-locked) userDataDir.
 import type { DriverSession } from '../browser/driver.js';
 const openOrderSessions = new Map<string, { session: DriverSession }>();
+
+// In-flight Chase login cancellers. Keyed by chase profile id; the
+// stored function closes the browser context + flips the local
+// `aborted` flag so the awaiting handler returns a cancellation
+// instead of a spurious "browser closed" error. Single-flight per
+// profile (Chromium refuses to open the same user-data dir twice
+// anyway).
+const chaseLoginAborts = new Map<string, () => void>();
 
 // Coalesced log fan-out. Workers emit 50–200 events per buy phase; a naive
 // sink would do that many IPCs and that many appendFile syscalls per profile
@@ -1063,6 +1078,116 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.handle(IPC.autoEnqueueStatus, () => getAutoEnqueueStatus());
+
+  // ─── Chase profile handlers ───────────────────────────────────────
+  // Entirely local. No BG sync, no remote storage. Login is a hands-on
+  // flow: open Chrome, let the user type credentials + handle MFA, and
+  // poll for the post-login dashboard URL as the success signal.
+  ipcMain.handle(IPC.chaseList, () => loadChaseProfiles());
+
+  ipcMain.handle(IPC.chaseAdd, async (_e, label: string) => {
+    return createChaseProfile(label);
+  });
+
+  ipcMain.handle(IPC.chaseRemove, async (_e, id: string) => {
+    // Make sure no in-flight login is holding the browser context
+    // open against a profile we're about to delete on disk.
+    chaseLoginAborts.get(id)?.();
+    return removeChaseProfile(id);
+  });
+
+  ipcMain.handle(
+    IPC.chaseLogin,
+    async (
+      _e,
+      id: string,
+    ): Promise<{ ok: true } | { ok: false; reason: string; cancelled?: boolean }> => {
+      const profiles = await loadChaseProfiles();
+      const profile = profiles.find((p) => p.id === id);
+      if (!profile) return { ok: false, reason: 'profile not found' };
+
+      // Single-flight per profile — if a previous login is still
+      // pending for this id, cancel it before starting a new one so
+      // we don't end up with two Chrome windows pointed at the same
+      // user-data dir (Chromium refuses the second one anyway).
+      chaseLoginAborts.get(id)?.();
+
+      let session: ChaseSession;
+      try {
+        session = await openChaseSession(id);
+      } catch (err) {
+        return {
+          ok: false,
+          reason: `failed to open browser: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+
+      let aborted = false;
+      const abort = () => {
+        aborted = true;
+        void session.close();
+      };
+      chaseLoginAborts.set(id, abort);
+
+      try {
+        await session.page.goto('https://www.chase.com/', {
+          waitUntil: 'domcontentloaded',
+          timeout: 30_000,
+        });
+
+        // 30-minute deadline — generous because the user has to
+        // type credentials, may need SMS / passkey / security
+        // questions, and Chase sometimes serves an extra interstitial
+        // (e.g. "We don't recognize this device"). The success
+        // signal is the post-login dashboard URL; everything else is
+        // a no-op as far as we're concerned.
+        await session.page.waitForURL(
+          (url) =>
+            url
+              .toString()
+              .startsWith('https://secure.chase.com/web/auth/dashboard'),
+          { timeout: 30 * 60 * 1000 },
+        );
+
+        if (aborted) {
+          return { ok: false, reason: 'login cancelled', cancelled: true };
+        }
+
+        // Detected dashboard — close the Chrome window and stamp
+        // success on the profile row. Cookies persist in the
+        // user-data dir for next time.
+        await session.close();
+        await updateChaseProfile(id, {
+          loggedIn: true,
+          lastLoginAt: new Date().toISOString(),
+        });
+        logger.info('chase.login.ok', { id, label: profile.label });
+        return { ok: true };
+      } catch (err) {
+        await session.close().catch(() => undefined);
+        if (aborted) {
+          return { ok: false, reason: 'login cancelled', cancelled: true };
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        // Chrome window closed by the user (context.close → page
+        // ops throw) is the most common non-success path. Surface a
+        // friendlier message than Playwright's raw "Target page,
+        // context or browser has been closed" so the UI can render
+        // it as a neutral state.
+        const friendlier = /Target.*closed|browser has been closed/i.test(msg)
+          ? 'login window closed before reaching the dashboard'
+          : msg;
+        logger.warn('chase.login.error', { id, label: profile.label, error: friendlier });
+        return { ok: false, reason: friendlier };
+      } finally {
+        chaseLoginAborts.delete(id);
+      }
+    },
+  );
+
+  ipcMain.handle(IPC.chaseAbortLogin, async (_e, id: string) => {
+    chaseLoginAborts.get(id)?.();
+  });
 
   ipcMain.handle(IPC.jobsList, () => listMergedAttempts());
   ipcMain.handle(IPC.jobsLogs, (_e, attemptId: string) => storeReadLogs(attemptId));

@@ -68,6 +68,17 @@ const bridge: AutoGBridge = {
   autoEnqueueStatus: () =>
     ipcRenderer.invoke(IPC.autoEnqueueStatus) as ReturnType<AutoGBridge['autoEnqueueStatus']>,
 
+  chaseList: () =>
+    ipcRenderer.invoke(IPC.chaseList) as ReturnType<AutoGBridge['chaseList']>,
+  chaseAdd: (label) =>
+    ipcRenderer.invoke(IPC.chaseAdd, label) as ReturnType<AutoGBridge['chaseAdd']>,
+  chaseRemove: (id) =>
+    ipcRenderer.invoke(IPC.chaseRemove, id) as ReturnType<AutoGBridge['chaseRemove']>,
+  chaseLogin: (id) =>
+    ipcRenderer.invoke(IPC.chaseLogin, id) as ReturnType<AutoGBridge['chaseLogin']>,
+  chaseAbortLogin: (id) =>
+    ipcRenderer.invoke(IPC.chaseAbortLogin, id) as Promise<void>,
+
   jobsList: () => ipcRenderer.invoke(IPC.jobsList) as Promise<JobAttempt[]>,
   jobsLogs: (attemptId) =>
     ipcRenderer.invoke(IPC.jobsLogs, attemptId) as Promise<LogEvent[]>,

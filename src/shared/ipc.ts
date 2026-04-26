@@ -1,5 +1,7 @@
 import type {
   AmazonProfile,
+  ChaseLoginResult,
+  ChaseProfile,
   IdentityInfo,
   JobAttempt,
   LogEvent,
@@ -56,6 +58,19 @@ export const IPC = {
    *  result of the most recent tick (queued/skipped/failed counts). The
    *  Deals page polls this so the user can see "next run in 2h". */
   autoEnqueueStatus: 'auto-enqueue:status',
+  /** Chase profile management — entirely local. List/add/remove
+   *  profiles, plus a user-driven login flow that opens a Chromium
+   *  window pointed at chase.com, lets the user enter credentials +
+   *  any 2FA challenges by hand, and auto-closes once the post-login
+   *  dashboard URL is reached. */
+  chaseList: 'chase:list',
+  chaseAdd: 'chase:add',
+  chaseRemove: 'chase:remove',
+  chaseLogin: 'chase:login',
+  /** Cancel an in-flight chase:login (closes the window, leaves the
+   *  profile's loggedIn flag unchanged). Used when the user clicks
+   *  the cancel button mid-login. */
+  chaseAbortLogin: 'chase:abort-login',
 
   jobsList: 'jobs:list',
   jobsLogs: 'jobs:logs',
@@ -305,6 +320,11 @@ export type AutoGBridge = {
       error: string | null;
     } | null;
   }>;
+  chaseList(): Promise<ChaseProfile[]>;
+  chaseAdd(label: string): Promise<ChaseProfile[]>;
+  chaseRemove(id: string): Promise<ChaseProfile[]>;
+  chaseLogin(id: string): Promise<ChaseLoginResult>;
+  chaseAbortLogin(id: string): Promise<void>;
   jobsList(): Promise<JobAttempt[]>;
   jobsLogs(attemptId: string): Promise<LogEvent[]>;
   jobsClearAll(): Promise<void>;
