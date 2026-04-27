@@ -283,14 +283,6 @@ export type Settings = {
    * 1 = sequential (slowest but safest). 1-6 inclusive.
    */
   fillerParallelTabs: number;
-  /**
-   * When true, automated Chase flows (Bank-tab snapshot refresh +
-   * rewards redemption) launch their persistent context with
-   * headless Chromium so no window pops up. Login is exempt — it
-   * always opens a visible window so the user can type credentials
-   * and answer 2FA. Default false: visible windows for everything.
-   */
-  chaseHeadless: boolean;
 };
 
 /**

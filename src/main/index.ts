@@ -46,6 +46,7 @@ import {
   updateChaseProfile,
 } from './chaseProfiles.js';
 import {
+  attachSessionAutoSave,
   attemptChaseAutoLogin,
   fetchChaseAccountSnapshot,
   openChaseSession,
@@ -1207,8 +1208,10 @@ function registerIpcHandlers(): void {
       }
 
       let aborted = false;
+      const stopAutoSave = attachSessionAutoSave(session, id);
       const abort = () => {
         aborted = true;
+        stopAutoSave();
         void session.close();
       };
       chaseLoginAborts.set(id, abort);
@@ -1285,6 +1288,7 @@ function registerIpcHandlers(): void {
         // Detected card-summary URL — close the Chrome window and
         // stamp success + the captured card id on the profile row.
         // Cookies persist in the user-data dir for next time.
+        stopAutoSave();
         await session.close();
         await updateChaseProfile(id, {
           loggedIn: true,
@@ -1298,6 +1302,7 @@ function registerIpcHandlers(): void {
         });
         return { ok: true };
       } catch (err) {
+        stopAutoSave();
         await session.close().catch(() => undefined);
         if (aborted) {
           return { ok: false, reason: 'login cancelled', cancelled: true };
@@ -1366,7 +1371,9 @@ function registerIpcHandlers(): void {
         };
       }
       chaseActionSessions.set(id, session);
+      const stopAutoSave = attachSessionAutoSave(session, id);
       session.context.on('close', () => {
+        stopAutoSave();
         chaseActionSessions.delete(id);
       });
 
@@ -1518,10 +1525,7 @@ function registerIpcHandlers(): void {
     }
     chaseRedeemInFlight.set(id, Date.now());
     try {
-      const settings = await loadSettings();
-      const result = await redeemAllToStatementCredit(id, profile.cardAccountId, {
-        headless: settings.chaseHeadless,
-      });
+      const result = await redeemAllToStatementCredit(id, profile.cardAccountId);
       if (
         !result.ok &&
         result.kind === 'error' &&
@@ -1600,10 +1604,7 @@ function registerIpcHandlers(): void {
     return runCoalesced(coalesceSnapshot, id, async () => {
       chaseSnapshotInFlight.set(id, Date.now());
       try {
-      const settings = await loadSettings();
-      const result = await fetchChaseAccountSnapshot(id, profile.cardAccountId, {
-        headless: settings.chaseHeadless,
-      });
+      const result = await fetchChaseAccountSnapshot(id, profile.cardAccountId);
       if (result.ok) {
         await setAccountSnapshot(id, result.snapshot).catch((err) => {
           logger.warn('chase.snapshot.persistError', {
@@ -1678,7 +1679,9 @@ function registerIpcHandlers(): void {
     // open a parallel session against the same userDataDir, and
     // clean up when the user closes the window.
     chaseActionSessions.set(id, result.session);
+    const stopAutoSave = attachSessionAutoSave(result.session, id);
     result.session.context.on('close', () => {
+      stopAutoSave();
       chaseActionSessions.delete(id);
     });
 

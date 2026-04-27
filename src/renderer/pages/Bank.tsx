@@ -8,25 +8,17 @@ import type {
 import { AddChaseDialog } from '../components/AddChaseDialog.js';
 import { useConfirm } from '../components/ConfirmDialog.js';
 import { PlusIcon } from '../components/icons.js';
-import { Switch } from '../components/ui/switch.js';
 import { relDate } from '../lib/format.js';
 import { sumPaymentAmounts } from '../../shared/chasePayments.js';
 
 /**
- * How many Chase profiles the "Redeem All Accounts" bulk loop runs
- * in parallel. Each worker owns its own Chrome window + persistent
- * userDataDir, so they don't conflict on disk. Capped at 4 because:
- *
- *   - Chase's anti-automation tolerates a small number of parallel
- *     sessions from the same IP (banks expect a household), but
- *     scoring gets aggressive past 5–6.
- *   - Each Chrome window costs ~150–250 MB; 4 visible windows is
- *     about as many as fits on a typical 13" laptop without
- *     overlapping.
- *
- * If you have fewer profiles than this, only that many workers run.
+ * "Redeem All Accounts" fans out one worker per eligible profile
+ * with no concurrency cap — every Chase profile redeems in parallel.
+ * Each worker owns its own Chrome window + persistent userDataDir,
+ * so they don't conflict on disk. RAM and Chase's anti-bot scoring
+ * are the practical limits; the user has explicitly opted into
+ * "all browsers running."
  */
-const CHASE_BULK_CONCURRENCY = 4;
 
 /* ============================================================
    Bank tab
@@ -296,14 +288,28 @@ function ChaseAccountsPanel() {
     };
   }, [profiles]);
 
-  // "Fetch all" handler: parallel snapshot refresh for every profile
-  // with a captured card id. No-op when none qualify or when a fetch
-  // is already in flight (the button itself is disabled in that case,
-  // but the guard makes the intent explicit).
+  // "Fetch all" handler: throttled snapshot refresh for every profile
+  // with a captured card id. We can't fan out fully — Chase's anti-bot
+  // rate-limits / stalls dashboard requests when N parallel sessions
+  // hit secure.chase.com simultaneously, which makes the recon-bar
+  // selector wait silently time out and leaves credit balance blank
+  // on most cards. Worker-pool of 2 gives us some throughput without
+  // tripping the rate limit. (Bulk redeem deliberately fans out fully
+  // because the user opted into "all windows at once" there.)
+  const FETCH_ALL_CONCURRENCY = 2;
   const onFetchAll = () => {
     const eligible = profiles.filter((p) => !!p.cardAccountId);
     if (eligible.length === 0) return;
-    void Promise.all(eligible.map((p) => refreshSnapshotFor(p.id)));
+    const queue = [...eligible];
+    const worker = async (): Promise<void> => {
+      while (queue.length > 0) {
+        const p = queue.shift();
+        if (!p) return;
+        await refreshSnapshotFor(p.id);
+      }
+    };
+    const workerCount = Math.min(FETCH_ALL_CONCURRENCY, eligible.length);
+    void Promise.all(Array.from({ length: workerCount }, () => worker()));
   };
   const anySnapshotPending = Object.values(snapshotPending).some(Boolean);
 
@@ -311,7 +317,7 @@ function ChaseAccountsPanel() {
   // bulkInFlight is true, every per-card action is locked to prevent
   // the user from racing the workers.
   // Set of profile ids currently being redeemed by the bulk loop.
-  // Multiple ids at once = parallel workers (see CHASE_BULK_CONCURRENCY).
+  // Multiple ids at once = parallel workers (one per profile).
   // Empty + bulkInFlight=false = idle. The header button + per-card
   // lock derive from this.
   const [bulkRunningIds, setBulkRunningIds] = useState<Set<string>>(new Set());
@@ -338,23 +344,6 @@ function ChaseAccountsPanel() {
   // and reset at the start of every bulk run.
   const bulkCancelRef = useRef(false);
   const [bulkCancelRequested, setBulkCancelRequested] = useState(false);
-
-  // Headless mode is locked off: Chase's banking-grade bot detection
-  // makes hidden-window automation unreliable (fetches stall, login
-  // gets challenged). The toggle stays in the UI as a read-only
-  // indicator so users who saw it before know the state, but it
-  // can't be flipped on. If the persisted setting is somehow true
-  // (older install, manual edit), force it back to false on mount.
-  useEffect(() => {
-    void window.autog
-      .settingsGet()
-      .then((s) => {
-        if (s.chaseHeadless) {
-          void window.autog.settingsSet({ chaseHeadless: false });
-        }
-      })
-      .catch(() => undefined);
-  }, []);
 
   // Drive a single Chase profile through the automated redemption
   // flow and reflect the outcome into per-row state. Shared between
@@ -488,8 +477,11 @@ function ChaseAccountsPanel() {
         const skipped: { id: string; label: string }[] = [];
         const failed: { id: string; label: string; reason: string }[] = [];
 
-        // Worker-pool pattern: spin up CHASE_BULK_CONCURRENCY
-        // workers, each pulls from the shared queue until empty.
+        // Worker-pool pattern: spin up one worker per eligible
+        // profile (no concurrency cap), each pulls from the shared
+        // queue until empty. With one worker per item the queue
+        // empties in one pass — pattern stays for cancel-checking
+        // and consistency with the throttled flows.
         // JS is single-threaded so queue.shift() and the outcome
         // pushes are atomic — no need for a mutex. Each worker
         // checks the cancel flag before starting a new task; we
@@ -525,8 +517,9 @@ function ChaseAccountsPanel() {
             }
           }
         };
-        const workerCount = Math.min(CHASE_BULK_CONCURRENCY, eligible.length);
-        await Promise.all(Array.from({ length: workerCount }, () => worker()));
+        // No concurrency cap — fan out one worker per profile so
+        // every Chrome window opens at once.
+        await Promise.all(Array.from({ length: eligible.length }, () => worker()));
 
         const wasCancelled = bulkCancelRef.current;
         bulkCancelRef.current = false;
@@ -578,24 +571,10 @@ function ChaseAccountsPanel() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
-          {/* Headless mode is locked off — Chase's anti-bot blocks
-              hidden Chrome windows for credit-card flows. Toggle is
-              shown disabled so users understand the state. */}
-          <label
-            className="inline-flex items-center gap-2 text-[11px] text-muted-foreground select-none opacity-60 cursor-not-allowed"
-            title="Disabled — Chase blocks headless automation for credit-card flows. Snapshot fetch + redemption always run in a visible window."
-          >
-            <Switch
-              checked={false}
-              disabled
-              aria-label="Headless automation (disabled — Chase blocks it)"
-            />
-            <span>Headless automation (off)</span>
-          </label>
           {profiles.some((p) => p.cardAccountId) && (
             <button
               type="button"
-              className="ghost-btn"
+              className="primary-action"
               onClick={onFetchAll}
               disabled={bulkInFlight || anySnapshotPending}
               title="Open every linked Chase profile in turn and refresh its rewards / balance / pending-charges snapshot"
@@ -617,9 +596,9 @@ function ChaseAccountsPanel() {
             ) : (
               <button
                 type="button"
-                className="ghost-btn"
+                className="primary-action danger"
                 onClick={onRedeemAllAccounts}
-                title="Run Redeem All sequentially across every linked Chase account"
+                title="Run Redeem All across every linked Chase account in parallel"
               >
                 Redeem All Accounts
               </button>

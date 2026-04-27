@@ -1,3 +1,5 @@
+import { app } from 'electron';
+import { join } from 'node:path';
 import type { BrowserContext, Locator, Page } from 'playwright';
 import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { logger } from '../shared/logger.js';
@@ -76,15 +78,6 @@ export type ChaseSessionOptions = {
    * noise since there's nothing to click for the user).
    */
   showLinkAmazonBanner?: boolean;
-  /**
-   * When true, launch the persistent context in headless mode so no
-   * visible window pops up. Default false. Callers must guarantee
-   * the session is already authenticated — headless mode means the
-   * user can't intervene to type credentials or pass 2FA, so a stale
-   * cookie state will silently time out instead of producing a
-   * login prompt. Login itself ignores this and is always visible.
-   */
-  headless?: boolean;
 };
 
 export async function openChaseSession(
@@ -95,31 +88,15 @@ export async function openChaseSession(
   await mkdir(userDataDir, { recursive: true });
 
   const { chromium } = await import('playwright');
-  // Chase's anti-bot fingerprints headless Chrome via the default
-  // user agent (it contains "HeadlessChrome") and a few other
-  // signals. Spoofing to a real Chrome UA in headless mode gets
-  // us past the cheapest detection. We do NOT spoof in visible
-  // mode — Chase has nothing to detect there and a custom UA can
-  // ironically draw more attention to itself in some flows.
-  const SPOOF_UA =
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
   const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: options.headless === true,
-    userAgent: options.headless === true ? SPOOF_UA : undefined,
+    headless: false,
     viewport: { width: 1280, height: 900 },
-    // Standard anti-bot-detection mitigations. Without these,
-    // Chase's automation-detection (and many other banks') will
-    // refuse to issue persistent session cookies even though
-    // launchPersistentContext writes whatever it gets — net
-    // effect is "session never saves." Both flags are widely
-    // documented Playwright stealth patches; nothing fancy.
-    //
-    //   --disable-blink-features=AutomationControlled
-    //     Hides the Blink-level "automation controlled" flag
-    //     that bot detectors check via CDP.
-    //   --no-default-browser-check / --no-first-run
-    //     Skip the first-launch interstitials so a fresh
-    //     userDataDir comes up clean.
+    // --disable-blink-features=AutomationControlled hides the Blink
+    // "automation controlled" flag that bot detectors check via CDP.
+    // Without it, Chase's automation-detection refuses to issue
+    // persistent session cookies — net effect is "session never
+    // saves." Other args skip first-launch interstitials so a fresh
+    // userDataDir comes up clean.
     args: [
       '--disable-blink-features=AutomationControlled',
       '--no-default-browser-check',
@@ -127,58 +104,13 @@ export async function openChaseSession(
     ],
   });
 
-  // Anti-bot stealth patches. None of these are needed in visible
-  // mode (real Chrome already has them), but they help shrink the
-  // headless fingerprint surface against bank-grade detection.
-  // None are bullet-proof — Chase still wins sometimes. We layer
-  // the cheap ones because they're free; deeper detection (WebGL
-  // GPU strings, audio context defaults) needs a stealth bundle.
+  // navigator.webdriver === true in Playwright-launched Chrome even
+  // visible. Banking sites flag it; the stub is cheap and harmless.
   await context.addInitScript(() => {
     try {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     } catch {
-      // some pages freeze the property; best-effort
-    }
-    try {
-      // window.chrome is a flat object in real Chrome but missing
-      // in headless. A stub with the right shape gets us past the
-      // simplest "do you have window.chrome?" checks.
-      if (!('chrome' in window)) {
-        Object.defineProperty(window, 'chrome', {
-          value: { runtime: {} },
-          configurable: true,
-        });
-      }
-    } catch {
-      // best-effort
-    }
-    try {
-      // Real Chrome reports several plugins (PDF viewer etc).
-      // Headless reports an empty list. Spoof a non-empty length —
-      // bot detectors check both presence and shape.
-      if (navigator.plugins.length === 0) {
-        Object.defineProperty(navigator, 'plugins', {
-          get: () => [1, 2, 3, 4, 5],
-        });
-      }
-    } catch {
-      // best-effort
-    }
-    try {
-      // Headless permissions API returns 'denied' for everything;
-      // real Chrome returns 'prompt' for most. Spoofing the
-      // notification permission specifically because that's the
-      // most-fingerprinted one.
-      const orig = navigator.permissions?.query?.bind(navigator.permissions);
-      if (orig) {
-        // @ts-expect-error patch for fingerprint evasion
-        navigator.permissions.query = (parameters) =>
-          parameters.name === 'notifications'
-            ? Promise.resolve({ state: Notification.permission })
-            : orig(parameters);
-      }
-    } catch {
-      // best-effort
+      // best-effort — some pages freeze the property
     }
   });
 
@@ -413,6 +345,89 @@ export async function openChaseSession(
 }
 
 /**
+ * Save a screenshot of the current page to userData/chase-snapshot-debug/
+ * for after-the-fact triage when a snapshot scrape comes back empty.
+ * Best-effort — silently swallows any error (often because the page is
+ * mid-navigation when we try). Filename includes profile id + ISO
+ * timestamp so we can match it to the warn log line.
+ */
+async function captureSummaryDebugSnapshot(
+  page: Page,
+  profileId: string,
+): Promise<void> {
+  const dir = join(app.getPath('userData'), 'chase-snapshot-debug');
+  await mkdir(dir, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const file = join(dir, `${profileId}-${ts}.png`);
+  await page.screenshot({ path: file, fullPage: true });
+  logger.info('chase.snapshot.debugCaptured', { profileId, file });
+}
+
+/**
+ * Periodic + navigation-driven storageState save for the user-driven
+ * windows (Pay my Balance, Open Rewards). Solves "Chase keeps logging
+ * out" — those flows let the user close the Chrome window directly,
+ * which fires context.on('close') AFTER the context is torn down,
+ * which means session.close()'s storageState dump is too late. Without
+ * this, every cookie/localStorage update Chase makes during the
+ * session is lost on close (Chromium's SQLite drops session cookies,
+ * and our JSON snapshot stays at whatever it was on the previous
+ * graceful close).
+ *
+ * Strategy:
+ *   - Hook page.framenavigated (mainframe only) so we save on every
+ *     real navigation. Coalesced to 2s so login redirect storms don't
+ *     thrash the disk.
+ *   - 60s safety-net interval for the user-idles-on-one-page case.
+ *
+ * Returns a teardown function the caller MUST call when the session
+ * is being closed (otherwise the interval keeps firing against a
+ * closed context, which is harmless but spams logs).
+ */
+export function attachSessionAutoSave(
+  session: ChaseSession,
+  profileId: string,
+): () => void {
+  let stopped = false;
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  const flush = async (): Promise<void> => {
+    if (stopped) return;
+    try {
+      await session.context.storageState({
+        path: chaseSessionStatePath(profileId),
+      });
+    } catch {
+      // Context closed mid-save — fine, the teardown will fire
+      // momentarily. Swallow so we don't surface noise.
+    }
+  };
+  const scheduleSave = (): void => {
+    if (saveTimer || stopped) return;
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      void flush();
+    }, 2_000);
+  };
+  const onFrameNavigated = (frame: { parentFrame: () => unknown | null }): void => {
+    // Mainframe only — Chase's login form lives in an iframe and
+    // its internal navigations are noise we don't need to save on.
+    if (frame.parentFrame() === null) scheduleSave();
+  };
+  session.page.on('framenavigated', onFrameNavigated);
+  const interval = setInterval(() => void flush(), 60_000);
+  return () => {
+    stopped = true;
+    if (saveTimer) clearTimeout(saveTimer);
+    clearInterval(interval);
+    try {
+      session.page.off('framenavigated', onFrameNavigated);
+    } catch {
+      // page might already be gone
+    }
+  };
+}
+
+/**
  * Fully-automated cash-back redemption. Converts every available
  * rewards point on the profile's tracked card into a statement
  * credit on the same card. Window stays visible the entire time so
@@ -438,11 +453,10 @@ export async function openChaseSession(
 export async function redeemAllToStatementCredit(
   profileId: string,
   cardAccountId: string,
-  options: { headless?: boolean } = {},
 ): Promise<ChaseRedeemResult> {
-  const session = await openChaseSession(profileId, {
-    headless: options.headless === true,
-  });
+  const session = await openChaseSession(profileId);
+  // Resilience to force-quits — see fetchChaseAccountSnapshot for why.
+  const stopAutoSave = attachSessionAutoSave(session, profileId);
   let result: ChaseRedeemResult;
   try {
     result = await runRedeemFlow(session.page, profileId, cardAccountId);
@@ -471,6 +485,7 @@ export async function redeemAllToStatementCredit(
   // Brief pause so the user can read the success/error screen
   // before the window vanishes. 2.5s feels intentional, not jittery.
   await new Promise((r) => setTimeout(r, 2_500));
+  stopAutoSave();
   await session.close();
   return result;
 }
@@ -1032,43 +1047,49 @@ export type ChaseSnapshotFetchResult =
  *
  * Window stays visible for the same reason the redeem flow does:
  * Chase 2FA challenges occasionally pop here, and we'd rather the
- * user see + complete them than have a silent timeout. The grace
- * period before close is shorter than redeem's because there's
- * nothing for the user to read on the way out.
+ * user see + complete them than have a silent timeout.
+ *
+ * 90s wall-clock deadline — each individual step has its own ~30s
+ * selector wait, so without a hard cap a single fetch could spin
+ * for 2+ minutes before bailing. 90s is generous for cold loads
+ * plus auto-login, tight enough to give the user a clear error
+ * before they think it's stuck forever.
  */
 export async function fetchChaseAccountSnapshot(
   profileId: string,
   cardAccountId: string,
-  options: { headless?: boolean } = {},
 ): Promise<ChaseSnapshotFetchResult> {
-  // Hard timeout for the whole fetch — primarily to fail fast in
-  // headless mode when Chase's anti-bot blocks page rendering.
-  // Each individual step has its own ~30s wait, but in worst case
-  // they stack and a single fetch could spin for 2+ minutes
-  // before bailing. 90s is generous for cold loads + auto-login,
-  // tight enough to give the user a clear error before they think
-  // it's stuck forever.
-  const FETCH_DEADLINE_MS = 90_000;
-  const deadline = Promise.race([
-    runFetchInner(),
+  return raceWithTimeout(
+    runFetch(profileId, cardAccountId),
+    90_000,
+    'Snapshot fetch timed out after 90s.',
+  );
+}
+
+function raceWithTimeout(
+  work: Promise<ChaseSnapshotFetchResult>,
+  ms: number,
+  reason: string,
+): Promise<ChaseSnapshotFetchResult> {
+  return Promise.race([
+    work,
     new Promise<ChaseSnapshotFetchResult>((resolve) =>
-      setTimeout(
-        () =>
-          resolve({
-            ok: false,
-            reason:
-              "Snapshot fetch timed out after 90s. If you're in headless mode, Chase may be blocking it — try turning Headless automation off in the Bank tab header.",
-          }),
-        FETCH_DEADLINE_MS,
-      ),
+      setTimeout(() => resolve({ ok: false, reason }), ms),
     ),
   ]);
-  return deadline;
+}
 
-  async function runFetchInner(): Promise<ChaseSnapshotFetchResult> {
-  const session = await openChaseSession(profileId, {
-    headless: options.headless === true,
-  });
+async function runFetch(
+  profileId: string,
+  cardAccountId: string,
+): Promise<ChaseSnapshotFetchResult> {
+  const session = await openChaseSession(profileId);
+  // Auto-save state on every navigation + 60s safety net so a force-quit
+  // (cmd-Q while the fetch is mid-flight) doesn't lose the session
+  // cookies Chase rotated during this run. session.close() in the
+  // finally block writes one more time, but that only fires on graceful
+  // exits; this catches the kill case.
+  const stopAutoSave = attachSessionAutoSave(session, profileId);
   try {
     const { page } = session;
     let creditBalance = '';
@@ -1109,15 +1130,18 @@ export async function fetchChaseAccountSnapshot(
       // page.content() so we don't pay for a second navigation.
       pendingCharges = parsePendingChargesFromHtml(summaryHtml);
       if (!creditBalance) {
-        // Diagnostic log so we can tell whether the page hadn't
-        // rendered, the SPA bounced us elsewhere, or the regex
-        // anchor stopped matching.
+        // Diagnostic log + screenshot so we can tell whether the
+        // page hadn't rendered, the SPA bounced us elsewhere, or
+        // the regex anchor stopped matching. Screenshot lands at
+        // userData/chase-snapshot-debug/{profileId}-{ts}.png — the
+        // user can dig it out next time we triage a missing balance.
         logger.warn('chase.snapshot.summaryNoBalance', {
           profileId,
           cardAccountId,
           url: page.url(),
           htmlSize: summaryHtml.length,
         });
+        await captureSummaryDebugSnapshot(page, profileId).catch(() => undefined);
       }
     } catch (err) {
       logger.warn('chase.snapshot.summaryError', {
@@ -1182,23 +1206,29 @@ export async function fetchChaseAccountSnapshot(
       });
     }
 
-    // Both numeric scrapes failed → most likely the session bounced
-    // us through SSO without finishing, or Chase 2FA-challenged and
-    // our headless run silently waited. Don't persist a half-empty
-    // snapshot (it would block the auto-fetch retry); fail loudly so
-    // the user sees the error banner and can manually refresh.
-    // Note: "0 pts" and "$0.00" are *valid* values here — only literal
-    // empty strings indicate a missed scrape.
-    if (!pointsBalance && !creditBalance) {
-      logger.warn('chase.snapshot.allEmpty', {
+    // Credit balance is the load-bearing field — Chase shows it on
+    // every card-summary page (even fully-paid-off cards display
+    // "$0.00"), so an empty string means the summary scrape silently
+    // failed (recon-bar selector wait timed out, anti-bot stall,
+    // 2FA challenge, etc.). Failing here prevents persisting a
+    // half-snapshot that would otherwise look successful in the UI
+    // (em-dash for balance, real values for pts + pending + payments)
+    // and surfaces an actionable error banner instead.
+    // Note: "$0.00" is a valid scraped value — only literal empty
+    // strings indicate a missed scrape.
+    if (!creditBalance) {
+      logger.warn('chase.snapshot.balanceMissing', {
         profileId,
         cardAccountId,
         url: page.url(),
+        hasPoints: !!pointsBalance,
+        hasPending: !!pendingCharges,
+        inProcessCount: inProcessPayments.length,
       });
       return {
         ok: false,
         reason:
-          "Couldn't read points or balance from Chase — the session may need refreshing or 2FA.",
+          "Couldn't read credit balance from Chase — likely a parallel-fetch rate-limit or expired session. Try refreshing this card alone, or sign in again.",
       };
     }
     logger.info('chase.snapshot.ok', {
@@ -1220,9 +1250,9 @@ export async function fetchChaseAccountSnapshot(
       },
     };
   } finally {
+    stopAutoSave();
     await session.close();
   }
-  } // close runFetchInner
 }
 
 /**

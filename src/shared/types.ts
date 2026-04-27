@@ -179,12 +179,14 @@ export type AmazonProfile = {
  * Fields:
  *   - id            UUID generated locally; opaque to the user
  *   - label         human-readable name ("Personal Chase", "Business Chase")
- *   - loggedIn      true once the URL probe saw the dashboard URL on a
- *                   login attempt. Stale on its own — the persistent
- *                   context might still have a valid session even if a
- *                   "Re-login" was never clicked again.
- *   - lastLoginAt   ISO timestamp of the most recent successful login
- *                   probe; null if never logged in
+ *   - loggedIn      true once the manual login flow saw Chase route to
+ *                   the card-summary URL. Stale on its own — the
+ *                   persistent context might still have a valid session
+ *                   even if "Re-login" was never clicked again, or the
+ *                   server may have invalidated the session before the
+ *                   user opened the Bank tab.
+ *   - lastLoginAt   ISO timestamp of the most recent successful login;
+ *                   null if never logged in
  *   - createdAt     ISO timestamp the profile row was added
  */
 export type ChaseProfile = {
