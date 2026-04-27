@@ -269,18 +269,14 @@ function ChaseAccountsPanel() {
     return off;
   }, [refreshSnapshotFor]);
 
-  // Single combined effect: read disk cache for every profile, then
-  // (after that completes) auto-fetch for any profile still missing
-  // a valid snapshot. Combined into one effect because splitting it
-  // races — the auto-fetch closure would read snapshotState before
-  // the disk-load IIFE had populated it, causing redundant Chrome
-  // window pop-ups for profiles that already had cached data on
-  // disk. Reading the disk values from a local variable instead of
-  // state sidesteps that entirely.
+  // Disk-cache load only. Auto-fetch on Bank tab entry was removed —
+  // every visit was kicking off N visible Chase windows, which the
+  // user found intrusive. The user now triggers fetches explicitly:
+  // either per-card (the refresh icon on the card) or all at once
+  // via the "Fetch all" button in the panel header.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Pass 1: disk cache.
       const fromDisk: Record<string, ChaseAccountSnapshot | null> = {};
       for (const p of profiles) {
         if (cancelled) return;
@@ -291,38 +287,25 @@ function ChaseAccountsPanel() {
         }
       }
       if (cancelled) return;
-      // Merge into state. Existing in-memory entries (e.g. from a
-      // redemption that already triggered a refresh) win over disk.
+      // Existing in-memory entries (e.g. from a redemption that
+      // already triggered a refresh) win over disk.
       setSnapshotState((s) => ({ ...fromDisk, ...s }));
-
-      // Pass 2: auto-fetch on Bank tab entry. Three triggers:
-      //
-      //   1. No cache exists yet — first run for this profile.
-      //   2. Cache is missing fields a newer build expects (e.g.
-      //      pendingCharges added later). One-time migration.
-      //   3. Cache is older than AUTO_REFRESH_STALE_MS (5 min).
-      //      Captures "user opened the app, opened Bank tab" —
-      //      fetches fresh values without thrashing on rapid
-      //      tab-switches under that threshold.
-      //
-      // Fan all profiles' refreshes out in parallel — no cache-age
-      // threshold, no concurrency cap. Every Bank tab entry kicks
-      // a fresh fetch for every profile with a captured card id.
-      // Each profile owns its own Chrome userDataDir so they don't
-      // conflict on disk. For logged-out profiles with saved
-      // credentials, each fetch transparently auto-logs-in via
-      // maybeAutoLoginAndContinue before scraping.
-      const eligibleForRefresh = profiles.filter((p) => !!p.cardAccountId);
-      if (eligibleForRefresh.length > 0 && !cancelled) {
-        await Promise.all(
-          eligibleForRefresh.map((p) => refreshSnapshotFor(p.id)),
-        );
-      }
     })();
     return () => {
       cancelled = true;
     };
-  }, [profiles, refreshSnapshotFor]);
+  }, [profiles]);
+
+  // "Fetch all" handler: parallel snapshot refresh for every profile
+  // with a captured card id. No-op when none qualify or when a fetch
+  // is already in flight (the button itself is disabled in that case,
+  // but the guard makes the intent explicit).
+  const onFetchAll = () => {
+    const eligible = profiles.filter((p) => !!p.cardAccountId);
+    if (eligible.length === 0) return;
+    void Promise.all(eligible.map((p) => refreshSnapshotFor(p.id)));
+  };
+  const anySnapshotPending = Object.values(snapshotPending).some(Boolean);
 
   // Panel-level state for the "Redeem All Accounts" bulk action. While
   // bulkInFlight is true, every per-card action is locked to prevent
@@ -609,6 +592,17 @@ function ChaseAccountsPanel() {
             />
             <span>Headless automation (off)</span>
           </label>
+          {profiles.some((p) => p.cardAccountId) && (
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={onFetchAll}
+              disabled={bulkInFlight || anySnapshotPending}
+              title="Open every linked Chase profile in turn and refresh its rewards / balance / pending-charges snapshot"
+            >
+              {anySnapshotPending ? 'Fetching…' : 'Fetch all'}
+            </button>
+          )}
           {profiles.some((p) => p.cardAccountId) &&
             (bulkInFlight ? (
               <button
