@@ -192,6 +192,16 @@ export type ChaseProfile = {
   label: string;
   loggedIn: boolean;
   lastLoginAt: string | null;
+  /**
+   * Chase's internal numeric id for the credit card this profile is
+   * tracking. Captured during login from the URL the user lands on
+   * after clicking into a specific card
+   * (.../dashboard/summary/<id>/CARD/BAC). Null until first successful
+   * login. Persisted so subsequent flows (list cards, redeem points,
+   * pay statement) know which card to operate on without making the
+   * user re-pick.
+   */
+  cardAccountId: string | null;
   createdAt: string;
 };
 
@@ -201,6 +211,74 @@ export type ChaseProfile = {
 export type ChaseLoginResult =
   | { ok: true }
   | { ok: false; reason: string; cancelled?: boolean };
+
+/** Outcome shape for chaseRedeemAll IPC. On success, the renderer can
+ *  print "Redeemed $X as statement credit (order …)".
+ *  On failure, `kind` distinguishes "0 points" (informational, neutral
+ *  styling) from any real error (red error styling). */
+export type ChaseRedeemResult =
+  | {
+      ok: true;
+      orderNumber: string;
+      amount: string;
+      pointsRedeemed: string;
+    }
+  | {
+      ok: false;
+      kind: 'no_points' | 'error';
+      reason: string;
+    };
+
+/** One historical redemption row, persisted to disk per profile and
+ *  surfaced via chaseRedeemHistory IPC. ts is ISO-8601; amount is the
+ *  raw "$704.73" Chase showed on the success page. */
+export type ChaseRedeemEntry = {
+  ts: string;
+  orderNumber: string;
+  amount: string;
+  pointsRedeemed: string;
+};
+
+/** Cached card snapshot (rewards points + current credit balance +
+ *  in-process payments) scraped from a profile's signed-in Chase
+ *  session. Persisted to userData/chase-account-snapshots.json so
+ *  the Bank tab can render immediately on mount without re-fetching
+ *  every time. */
+export type ChaseAccountSnapshot = {
+  /** Header text from /chaseloyalty home, e.g. "70,473 pts". Empty
+   *  if the scrape couldn't locate it. */
+  pointsBalance: string;
+  /** Dollar amount from the secure.chase.com card summary page,
+   *  e.g. "$1,234.56". Empty if the scrape couldn't locate it. */
+  creditBalance: string;
+  /** "Pending charges" total from the same summary page — the sum
+   *  of authorized-but-not-posted activity that's about to push the
+   *  balance up. e.g. "$11,758.95". Empty when there's no pending
+   *  block on the page (no pending activity). Optional for backwards-
+   *  compat; renderers should treat undefined as empty. */
+  pendingCharges?: string;
+  /** Payments scraped from the secure.chase.com payment-activity page
+   *  whose status is "In process" / "Pending" / "Scheduled" / similar
+   *  not-yet-completed value. Newest first by Chase's own ordering.
+   *  Optional for backwards-compat with snapshots persisted before
+   *  this field existed; renderers should treat undefined as []. */
+  inProcessPayments?: ChasePaymentEntry[];
+  /** ISO-8601 of when the snapshot was captured. */
+  fetchedAt: string;
+};
+
+/** One row from the secure.chase.com payment-activity table. We keep
+ *  the displayed strings verbatim (no Date parsing, no amount math)
+ *  — the Bank tab renders them as-is, and Chase's formatting is
+ *  the user's mental model. */
+export type ChasePaymentEntry = {
+  /** "Apr 25, 2026" */
+  date: string;
+  /** "In process", "Pending", "Scheduled", "Completed", etc. */
+  status: string;
+  /** "$13,000.00" with sign + commas preserved. */
+  amount: string;
+};
 
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug';
 

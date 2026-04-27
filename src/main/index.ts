@@ -45,7 +45,30 @@ import {
   removeChaseProfile,
   updateChaseProfile,
 } from './chaseProfiles.js';
-import { openChaseSession, type ChaseSession } from './chaseDriver.js';
+import {
+  attemptChaseAutoLogin,
+  fetchChaseAccountSnapshot,
+  openChaseSession,
+  openChasePayPage,
+  redeemAllToStatementCredit,
+  type ChaseSession,
+} from './chaseDriver.js';
+import {
+  clearChaseCredentials,
+  getChaseCredentials,
+  hasChaseCredentials,
+  setChaseCredentials,
+} from './chaseCredentials.js';
+import {
+  appendRedeemEntry,
+  clearRedeemHistory,
+  listRedeemHistory,
+} from './chaseRedeemHistory.js';
+import {
+  clearAccountSnapshot,
+  getAccountSnapshot,
+  setAccountSnapshot,
+} from './chaseAccountSnapshotStore.js';
 import { openSession } from '../browser/driver.js';
 import { snapshotDir, snapshotsDiskUsage, clearAllSnapshots } from '../browser/snapshot.js';
 import { compareSemver } from '../shared/version.js';
@@ -107,6 +130,14 @@ const openOrderSessions = new Map<string, { session: DriverSession }>();
 // profile (Chromium refuses to open the same user-data dir twice
 // anyway).
 const chaseLoginAborts = new Map<string, () => void>();
+
+// User-driven Chase Chromium windows that aren't part of the login
+// flow — currently just the Redeem Rewards page. Tracked per profile
+// so a second click on Redeem Rewards focuses the existing window
+// instead of trying to open another persistent context against the
+// same userDataDir (Chromium refuses, throws). Cleared when the
+// context's `close` event fires (user shut the window).
+const chaseActionSessions = new Map<string, ChaseSession>();
 
 // Coalesced log fan-out. Workers emit 50–200 events per buy phase; a naive
 // sink would do that many IPCs and that many appendFile syscalls per profile
@@ -1085,15 +1116,62 @@ function registerIpcHandlers(): void {
   // poll for the post-login dashboard URL as the success signal.
   ipcMain.handle(IPC.chaseList, () => loadChaseProfiles());
 
-  ipcMain.handle(IPC.chaseAdd, async (_e, label: string) => {
-    return createChaseProfile(label);
-  });
+  ipcMain.handle(
+    IPC.chaseAdd,
+    async (
+      _e,
+      label: string,
+      credentials?: { username: string; password: string } | null,
+    ) => {
+      const list = await createChaseProfile(label);
+      // Save credentials against the brand-new profile if the caller
+      // passed any. The new profile is always the last entry — we
+      // captured it before returning.
+      if (credentials && credentials.username && credentials.password) {
+        const newProfile = list[list.length - 1];
+        if (newProfile) {
+          await setChaseCredentials(newProfile.id, credentials).catch((err) => {
+            logger.warn('chase.credentials.saveOnAddError', {
+              id: newProfile.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
+      }
+      return list;
+    },
+  );
 
   ipcMain.handle(IPC.chaseRemove, async (_e, id: string) => {
     // Make sure no in-flight login is holding the browser context
     // open against a profile we're about to delete on disk.
     chaseLoginAborts.get(id)?.();
+    // Drop everything we keep keyed on this profile id — history,
+    // snapshot cache, encrypted credentials. A re-add (or a recycled
+    // UUID, theoretically) starts clean.
+    await clearRedeemHistory(id).catch(() => undefined);
+    await clearAccountSnapshot(id).catch(() => undefined);
+    await clearChaseCredentials(id).catch(() => undefined);
     return removeChaseProfile(id);
+  });
+
+  ipcMain.handle(
+    IPC.chaseCredentialsSet,
+    async (
+      _e,
+      id: string,
+      credentials: { username: string; password: string },
+    ) => {
+      await setChaseCredentials(id, credentials);
+    },
+  );
+
+  ipcMain.handle(IPC.chaseCredentialsClear, async (_e, id: string) => {
+    await clearChaseCredentials(id);
+  });
+
+  ipcMain.handle(IPC.chaseCredentialsHas, async (_e, id: string) => {
+    return hasChaseCredentials(id);
   });
 
   ipcMain.handle(
@@ -1114,7 +1192,13 @@ function registerIpcHandlers(): void {
 
       let session: ChaseSession;
       try {
-        session = await openChaseSession(id);
+        // showLinkAmazonBanner=true so the user gets an in-page
+        // hint on /dashboard/overview telling them to click into
+        // their Amazon card. Without it, users land on the
+        // overview, see no AmazonG indication, and wonder why the
+        // window isn't closing. Hidden on every other URL so MFA /
+        // sign-in / card-summary pages stay clean.
+        session = await openChaseSession(id, { showLinkAmazonBanner: true });
       } catch (err) {
         return {
           ok: false,
@@ -1130,22 +1214,67 @@ function registerIpcHandlers(): void {
       chaseLoginAborts.set(id, abort);
 
       try {
-        await session.page.goto('https://www.chase.com/', {
-          waitUntil: 'domcontentloaded',
-          timeout: 30_000,
-        });
+        // Navigate straight to the secure dashboard URL rather than
+        // chase.com/ (the marketing front page). Two reasons:
+        //
+        //   1. Returning user with a valid persistent session: Chase
+        //      sees the cookies and serves the dashboard immediately
+        //      — no sign-in form, no 2FA prompt, often no manual
+        //      input at all if the user already clicked into a card
+        //      on a previous run (the summary URL becomes the new
+        //      default landing). The waitForURL below fires on its
+        //      own and the window auto-closes.
+        //
+        //   2. Fresh user with no cookies yet: Chase redirects this
+        //      URL to the logon page; user signs in normally; auth
+        //      redirects back here. Same end state as starting on
+        //      chase.com, just one fewer click.
+        //
+        // Persistent context at userData/chase-profiles/{id}/ holds
+        // the cookies + localStorage; nothing extra to do for "save
+        // session" — Playwright flushes state on context.close().
+        await session.page.goto(
+          'https://secure.chase.com/web/auth/dashboard',
+          {
+            waitUntil: 'domcontentloaded',
+            timeout: 30_000,
+          },
+        );
 
-        // 30-minute deadline — generous because the user has to
-        // type credentials, may need SMS / passkey / security
-        // questions, and Chase sometimes serves an extra interstitial
-        // (e.g. "We don't recognize this device"). The success
-        // signal is the post-login dashboard URL; everything else is
-        // a no-op as far as we're concerned.
+        // Auto-login when we have saved credentials. Always try —
+        // attemptChaseAutoLogin handles both layouts (iframe overlay
+        // OR full-page /logon) and bails gracefully with
+        // 'no_login_form' when the user is already signed in. After
+        // Sign-in, the iframe detaches / URL leaves /logon, and the
+        // existing waitForURL() below picks up the card-summary
+        // redirect when the user clicks into their card.
+        const savedCreds = await getChaseCredentials(id).catch(() => null);
+        if (savedCreds) {
+          const outcome = await attemptChaseAutoLogin(session.page, savedCreds).catch(
+            (err) => ({ kind: 'error' as const, reason: String(err) }),
+          );
+          logger.info('chase.login.autoLogin', { id, outcome: outcome.kind });
+        }
+
+        // 30-minute deadline — generous because the user has to type
+        // credentials, may need SMS / passkey / security questions,
+        // and then click into the specific card whose summary we want
+        // to capture. Success URL has Chase's internal card account
+        // id baked into the hash route — capturing it here means
+        // future flows (list, pay, redeem) can navigate to the same
+        // card without making the user re-pick.
+        const CARD_SUMMARY_RE =
+          /^https:\/\/secure\.chase\.com\/web\/auth\/dashboard#\/dashboard\/summary\/(\d+)\/CARD\/BAC/;
+        let capturedCardAccountId: string | null = null;
         await session.page.waitForURL(
-          (url) =>
-            url
-              .toString()
-              .startsWith('https://secure.chase.com/web/auth/dashboard'),
+          (url) => {
+            const m = url.toString().match(CARD_SUMMARY_RE);
+            if (m) {
+              capturedCardAccountId = m[1] ?? null;
+              return true;
+            }
+            return false;
+          },
           { timeout: 30 * 60 * 1000 },
         );
 
@@ -1153,15 +1282,20 @@ function registerIpcHandlers(): void {
           return { ok: false, reason: 'login cancelled', cancelled: true };
         }
 
-        // Detected dashboard — close the Chrome window and stamp
-        // success on the profile row. Cookies persist in the
-        // user-data dir for next time.
+        // Detected card-summary URL — close the Chrome window and
+        // stamp success + the captured card id on the profile row.
+        // Cookies persist in the user-data dir for next time.
         await session.close();
         await updateChaseProfile(id, {
           loggedIn: true,
           lastLoginAt: new Date().toISOString(),
+          cardAccountId: capturedCardAccountId,
         });
-        logger.info('chase.login.ok', { id, label: profile.label });
+        logger.info('chase.login.ok', {
+          id,
+          label: profile.label,
+          cardAccountId: capturedCardAccountId,
+        });
         return { ok: true };
       } catch (err) {
         await session.close().catch(() => undefined);
@@ -1187,6 +1321,425 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.chaseAbortLogin, async (_e, id: string) => {
     chaseLoginAborts.get(id)?.();
+  });
+
+  ipcMain.handle(
+    IPC.chaseOpenRewards,
+    async (_e, id: string): Promise<{ ok: true } | { ok: false; reason: string }> => {
+      const profiles = await loadChaseProfiles();
+      const profile = profiles.find((p) => p.id === id);
+      if (!profile) return { ok: false, reason: 'profile not found' };
+      if (!profile.cardAccountId) {
+        return {
+          ok: false,
+          reason: 'no card linked yet — finish the login flow first so the card account id is captured',
+        };
+      }
+      // Don't fight the login flow for the userDataDir.
+      if (chaseLoginAborts.has(id)) {
+        return { ok: false, reason: 'login is still in progress for this profile' };
+      }
+
+      // Reuse an already-open redeem window if there is one. Bring
+      // its focused page back to front so a duplicate click feels
+      // like "raise the existing window" rather than spawn a new
+      // one (Chromium would refuse the new one anyway).
+      const existing = chaseActionSessions.get(id);
+      if (existing) {
+        try {
+          await existing.page.bringToFront();
+          return { ok: true };
+        } catch {
+          // The page is gone (user closed it); fall through and
+          // open a fresh session.
+          chaseActionSessions.delete(id);
+        }
+      }
+
+      let session: ChaseSession;
+      try {
+        session = await openChaseSession(id);
+      } catch (err) {
+        return {
+          ok: false,
+          reason: `failed to open browser: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      chaseActionSessions.set(id, session);
+      session.context.on('close', () => {
+        chaseActionSessions.delete(id);
+      });
+
+      const url = `https://chaseloyalty.chase.com/home?AI=${encodeURIComponent(
+        profile.cardAccountId,
+      )}`;
+      try {
+        // Two-hop navigation. The persistent context's saved cookies
+        // are scoped to secure.chase.com (the subdomain where the
+        // user actually authenticated). chaseloyalty.chase.com is a
+        // separate subdomain — Chase mints its session via an SSO
+        // redirect off secure.chase.com on first visit. If we go
+        // straight to chaseloyalty, that subdomain has no cookies
+        // and Chase shows the login form even though the user's
+        // secure.chase.com session is fully valid. Hitting the
+        // secure dashboard first triggers the SSO machinery so the
+        // follow-up loyalty navigation rides the session through.
+        await session.page.goto(
+          'https://secure.chase.com/web/auth/dashboard',
+          { waitUntil: 'domcontentloaded', timeout: 30_000 },
+        );
+        await session.page.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30_000,
+        });
+        logger.info('chase.openRewards.ok', {
+          id,
+          label: profile.label,
+          cardAccountId: profile.cardAccountId,
+        });
+        return { ok: true };
+      } catch (err) {
+        // Don't tear down the session on a navigation hiccup — the
+        // window is open and the user can retry from inside Chrome.
+        // Just surface the error to the renderer for visibility.
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn('chase.openRewards.gotoError', { id, error: msg });
+        return { ok: false, reason: msg };
+      }
+    },
+  );
+
+  // Per-profile guards so duplicate clicks across the redeem +
+  // snapshot flows (and parallel logins) don't fight the userDataDir
+  // lock. Each handler clears its own set in a finally; they all
+  // refuse if any of the others is currently active for the same id.
+  // Self-healing in-flight guards. Each map entry's value is the
+  // timestamp it was added — entries older than STALE_INFLIGHT_MS
+  // are evicted on read so a hung Playwright session (user closed
+  // the Chase window in a way that confused close(), Chrome crashed,
+  // etc.) doesn't permanently lock the user out of automation. Every
+  // automation hard-caps at ~2min anyway between SSO + page loads.
+  const STALE_INFLIGHT_MS = 3 * 60_000;
+  const chaseRedeemInFlight = new Map<string, number>();
+  const chaseSnapshotInFlight = new Map<string, number>();
+  const chasePayInFlight = new Map<string, number>();
+  const isInFlight = (m: Map<string, number>, id: string): boolean => {
+    const ts = m.get(id);
+    if (ts === undefined) return false;
+    if (Date.now() - ts > STALE_INFLIGHT_MS) {
+      logger.warn('chase.inflight.evicted', {
+        id,
+        ageMs: Date.now() - ts,
+      });
+      m.delete(id);
+      return false;
+    }
+    return true;
+  };
+
+  /**
+   * Request coalescing for read-only Chase operations (snapshot
+   * refresh, pay preview). Renderer side fires duplicate IPC calls
+   * in dev because React StrictMode double-invokes useEffects;
+   * without coalescing the second call hits the in-flight guard
+   * and surfaces a confusing "another automation running" error
+   * even though the user only clicked once. With coalescing, all
+   * callers for the same profile id await the same underlying
+   * promise.
+   *
+   * Only used for read-only flows. Submit flows (chasePayBalance,
+   * chaseRedeemAll) should NOT coalesce — accidentally executing
+   * a paid action once is the right behavior on a double-click.
+   */
+  type Coalesce<T> = Map<string, Promise<T>>;
+  const coalesceSnapshot: Coalesce<unknown> = new Map();
+  const runCoalesced = async <T>(
+    map: Coalesce<unknown>,
+    id: string,
+    fn: () => Promise<T>,
+  ): Promise<T> => {
+    const existing = map.get(id) as Promise<T> | undefined;
+    if (existing) return existing;
+    const promise = (async () => {
+      try {
+        return await fn();
+      } finally {
+        map.delete(id);
+      }
+    })();
+    map.set(id, promise as Promise<unknown>);
+    return promise;
+  };
+  ipcMain.handle(IPC.chaseRedeemAll, async (_e, id: string) => {
+    const profiles = await loadChaseProfiles();
+    const profile = profiles.find((p) => p.id === id);
+    if (!profile) return { ok: false, kind: 'error', reason: 'profile not found' };
+    if (!profile.cardAccountId) {
+      return {
+        ok: false,
+        kind: 'error',
+        reason: 'no card linked yet — finish login first so the card account id is captured',
+      };
+    }
+    if (chaseLoginAborts.has(id)) {
+      return {
+        ok: false,
+        kind: 'error',
+        reason: 'login is still in progress for this profile',
+      };
+    }
+    if (chaseActionSessions.has(id)) {
+      return {
+        ok: false,
+        kind: 'error',
+        reason: 'another Chase window is already open for this profile — close it first',
+      };
+    }
+    if (isInFlight(chaseRedeemInFlight, id)) {
+      return {
+        ok: false,
+        kind: 'error',
+        reason: 'redemption already running for this profile',
+      };
+    }
+    if (isInFlight(chaseSnapshotInFlight, id)) {
+      return {
+        ok: false,
+        kind: 'error',
+        reason: 'a snapshot fetch is running for this profile — try again in a moment',
+      };
+    }
+    if (isInFlight(chasePayInFlight, id)) {
+      return {
+        ok: false,
+        kind: 'error',
+        reason: 'a payment is running for this profile — close the Pay window first',
+      };
+    }
+    chaseRedeemInFlight.set(id, Date.now());
+    try {
+      const settings = await loadSettings();
+      const result = await redeemAllToStatementCredit(id, profile.cardAccountId, {
+        headless: settings.chaseHeadless,
+      });
+      if (
+        !result.ok &&
+        result.kind === 'error' &&
+        /session expired/i.test(result.reason)
+      ) {
+        await updateChaseProfile(id, { loggedIn: false }).catch(() => undefined);
+      }
+      if (result.ok) {
+        // Persist successful redemptions only — failed runs are noise
+        // for a "history" view (the user knows it failed because the
+        // banner just told them so).
+        await appendRedeemEntry(id, {
+          ts: new Date().toISOString(),
+          orderNumber: result.orderNumber,
+          amount: result.amount,
+          pointsRedeemed: result.pointsRedeemed,
+        }).catch((err) => {
+          logger.warn('chase.redeem.historySave.error', {
+            id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn('chase.redeem.unexpected', { id, error: msg });
+      return { ok: false, kind: 'error', reason: msg };
+    } finally {
+      chaseRedeemInFlight.delete(id);
+    }
+  });
+
+  ipcMain.handle(IPC.chaseRedeemHistory, async (_e, id: string) => {
+    return listRedeemHistory(id);
+  });
+
+  ipcMain.handle(IPC.chaseSnapshotGet, async (_e, id: string) => {
+    return getAccountSnapshot(id);
+  });
+
+  // Same family of guards as the redeem handler — Chase's persistent
+  // userDataDir can only host one session at a time, and a parallel
+  // login + snapshot would deadlock.
+  ipcMain.handle(IPC.chaseSnapshotRefresh, async (_e, id: string) => {
+    const profiles = await loadChaseProfiles();
+    const profile = profiles.find((p) => p.id === id);
+    if (!profile) return { ok: false, reason: 'profile not found' };
+    if (!profile.cardAccountId) {
+      return {
+        ok: false,
+        reason: 'no card linked yet — finish login first so the card account id is captured',
+      };
+    }
+    if (chaseLoginAborts.has(id)) {
+      return { ok: false, reason: 'login is still in progress for this profile' };
+    }
+    if (chaseActionSessions.has(id)) {
+      return {
+        ok: false,
+        reason: 'another Chase window is already open for this profile — close it first',
+      };
+    }
+    if (isInFlight(chaseRedeemInFlight, id)) {
+      return { ok: false, reason: 'a redemption is already running for this profile' };
+    }
+    if (isInFlight(chasePayInFlight, id)) {
+      // A pay window is holding the userDataDir lock — running a
+      // second Chromium against the same dir would fail with
+      // ProcessSingleton. Defer this snapshot fetch.
+      return { ok: false, reason: 'a payment is already running for this profile' };
+    }
+    // Coalesce concurrent snapshot calls (StrictMode double-fires
+    // the renderer's useEffect) so duplicates wait on the same
+    // underlying work instead of hitting the in-flight guard.
+    return runCoalesced(coalesceSnapshot, id, async () => {
+      chaseSnapshotInFlight.set(id, Date.now());
+      try {
+      const settings = await loadSettings();
+      const result = await fetchChaseAccountSnapshot(id, profile.cardAccountId, {
+        headless: settings.chaseHeadless,
+      });
+      if (result.ok) {
+        await setAccountSnapshot(id, result.snapshot).catch((err) => {
+          logger.warn('chase.snapshot.persistError', {
+            id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      } else if (/session expired/i.test(result.reason)) {
+        // Server-side session is gone. Flip our local loggedIn flag
+        // so the Bank-tab UI re-shows the Login button on this card
+        // and stops hiding it behind a "logged in" pill that's a lie.
+        await updateChaseProfile(id, { loggedIn: false }).catch(() => undefined);
+      }
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn('chase.snapshot.unexpected', { id, error: msg });
+      return { ok: false, reason: msg } as const;
+    } finally {
+      chaseSnapshotInFlight.delete(id);
+    }
+    });
+  });
+
+  // Pay my Balance — open the Chase pay window, hand off to user.
+  // No auto-fill, no submit. The window stays open until the user
+  // closes it, the same as chaseOpenRewards. Reusing the action-
+  // session map keeps every other automation refusing to fight the
+  // userDataDir lock while this window is up.
+  ipcMain.handle(IPC.chasePayBalance, async (_e, id: string) => {
+    const profiles = await loadChaseProfiles();
+    const profile = profiles.find((p) => p.id === id);
+    if (!profile) return { ok: false, reason: 'profile not found' };
+    if (!profile.cardAccountId) {
+      return {
+        ok: false,
+        reason: 'no card linked yet — finish login first so the card account id is captured',
+      };
+    }
+    if (chaseLoginAborts.has(id)) {
+      return { ok: false, reason: 'login is still in progress for this profile' };
+    }
+    const existing = chaseActionSessions.get(id);
+    if (existing) {
+      try {
+        await existing.page.bringToFront();
+        return { ok: true };
+      } catch {
+        // page is gone (user closed it); fall through to a fresh open
+        chaseActionSessions.delete(id);
+      }
+    }
+    if (
+      isInFlight(chaseRedeemInFlight, id) ||
+      isInFlight(chaseSnapshotInFlight, id) ||
+      isInFlight(chasePayInFlight, id)
+    ) {
+      return {
+        ok: false,
+        reason: 'another Chase automation is running for this profile',
+      };
+    }
+
+    const result = await openChasePayPage(id, profile.cardAccountId);
+    if (!result.ok) {
+      if (/session expired/i.test(result.reason)) {
+        await updateChaseProfile(id, { loggedIn: false }).catch(() => undefined);
+      }
+      return result;
+    }
+    // Hand the session off — register so other handlers refuse to
+    // open a parallel session against the same userDataDir, and
+    // clean up when the user closes the window.
+    chaseActionSessions.set(id, result.session);
+    result.session.context.on('close', () => {
+      chaseActionSessions.delete(id);
+    });
+
+    // Background watcher: poll the page for Chase's success-text
+    // (the "You've scheduled a …" header that shows up on the
+    // confirmation screen). When it appears, give the user a few
+    // seconds to read it, then close the window automatically.
+    // Doesn't block this IPC return — the watcher races the user's
+    // own close + a 15-minute hard timeout.
+    void (async () => {
+      try {
+        await result.session.page.waitForFunction(
+          () => {
+            const body = document.body?.textContent || '';
+            // Matches "You've scheduled a $X payment to ..." and
+            // related variants Chase has shown across layouts.
+            return /you'?ve\s+scheduled\s+a/i.test(body);
+          },
+          { timeout: 15 * 60_000, polling: 1_000 },
+        );
+        // Brief read window before we whisk the page away.
+        await new Promise((r) => setTimeout(r, 3_000));
+        logger.info('chase.pay.autoClose', { id });
+        // Notify the renderer so it can refresh this profile's
+        // snapshot — pending charges + balance shift after the
+        // payment posts to Chase's intake queue. Sent BEFORE close
+        // so the event isn't dropped if the close+cleanup races
+        // the renderer's listener registration.
+        mainWindow?.webContents.send(IPC.evtChasePaySuccess, id);
+        await result.session.close();
+      } catch {
+        // Three legitimate ways to land here:
+        //   - user closed the window manually (page already gone)
+        //   - 15-min timeout (user wandered off, payment never
+        //     submitted)
+        //   - waitForFunction errored on a navigation race
+        // In all three the on('close') handler above already (or
+        // will) clear the action-session map. Nothing to do here.
+      }
+    })();
+
+    return { ok: true };
+  });
+
+  // Force-close the Pay-my-Balance browser. The renderer's "Close
+  // browser" button calls this when the user wants to bail out
+  // without completing the payment. session.close() flushes
+  // cookies/localStorage to disk and tears the context down; the
+  // on('close') hook above clears chaseActionSessions[id], which
+  // also unsticks the success-text watcher (its waitForFunction
+  // throws once the page is gone).
+  ipcMain.handle(IPC.chasePayCancel, async (_e, id: string) => {
+    const session = chaseActionSessions.get(id);
+    if (!session) return;
+    chaseActionSessions.delete(id);
+    try {
+      await session.close();
+    } catch {
+      // Window may already be gone (user closed it manually a
+      // moment before clicking the renderer button) — nothing to do.
+    }
   });
 
   ipcMain.handle(IPC.jobsList, () => listMergedAttempts());

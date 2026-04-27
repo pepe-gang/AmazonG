@@ -70,14 +70,50 @@ const bridge: AutoGBridge = {
 
   chaseList: () =>
     ipcRenderer.invoke(IPC.chaseList) as ReturnType<AutoGBridge['chaseList']>,
-  chaseAdd: (label) =>
-    ipcRenderer.invoke(IPC.chaseAdd, label) as ReturnType<AutoGBridge['chaseAdd']>,
+  chaseAdd: (label, credentials) =>
+    ipcRenderer.invoke(IPC.chaseAdd, label, credentials) as ReturnType<
+      AutoGBridge['chaseAdd']
+    >,
   chaseRemove: (id) =>
     ipcRenderer.invoke(IPC.chaseRemove, id) as ReturnType<AutoGBridge['chaseRemove']>,
+  chaseCredentialsSet: (id, credentials) =>
+    ipcRenderer.invoke(IPC.chaseCredentialsSet, id, credentials) as ReturnType<
+      AutoGBridge['chaseCredentialsSet']
+    >,
+  chaseCredentialsClear: (id) =>
+    ipcRenderer.invoke(IPC.chaseCredentialsClear, id) as ReturnType<
+      AutoGBridge['chaseCredentialsClear']
+    >,
+  chaseCredentialsHas: (id) =>
+    ipcRenderer.invoke(IPC.chaseCredentialsHas, id) as ReturnType<
+      AutoGBridge['chaseCredentialsHas']
+    >,
   chaseLogin: (id) =>
     ipcRenderer.invoke(IPC.chaseLogin, id) as ReturnType<AutoGBridge['chaseLogin']>,
   chaseAbortLogin: (id) =>
     ipcRenderer.invoke(IPC.chaseAbortLogin, id) as Promise<void>,
+  chaseOpenRewards: (id) =>
+    ipcRenderer.invoke(IPC.chaseOpenRewards, id) as ReturnType<AutoGBridge['chaseOpenRewards']>,
+  chaseRedeemAll: (id) =>
+    ipcRenderer.invoke(IPC.chaseRedeemAll, id) as ReturnType<AutoGBridge['chaseRedeemAll']>,
+  chaseRedeemHistory: (id) =>
+    ipcRenderer.invoke(IPC.chaseRedeemHistory, id) as ReturnType<
+      AutoGBridge['chaseRedeemHistory']
+    >,
+  chaseSnapshotGet: (id) =>
+    ipcRenderer.invoke(IPC.chaseSnapshotGet, id) as ReturnType<
+      AutoGBridge['chaseSnapshotGet']
+    >,
+  chaseSnapshotRefresh: (id) =>
+    ipcRenderer.invoke(IPC.chaseSnapshotRefresh, id) as ReturnType<
+      AutoGBridge['chaseSnapshotRefresh']
+    >,
+  chasePayBalance: (id) =>
+    ipcRenderer.invoke(IPC.chasePayBalance, id) as ReturnType<
+      AutoGBridge['chasePayBalance']
+    >,
+  chasePayCancel: (id) =>
+    ipcRenderer.invoke(IPC.chasePayCancel, id) as Promise<void>,
 
   jobsList: () => ipcRenderer.invoke(IPC.jobsList) as Promise<JobAttempt[]>,
   jobsLogs: (attemptId) =>
@@ -134,6 +170,11 @@ const bridge: AutoGBridge = {
     const listener = (_: unknown, attempts: JobAttempt[]) => cb(attempts);
     ipcRenderer.on(IPC.evtJobs, listener);
     return () => ipcRenderer.off(IPC.evtJobs, listener);
+  },
+  onChasePaySuccess(cb) {
+    const listener = (_: unknown, profileId: string) => cb(profileId);
+    ipcRenderer.on(IPC.evtChasePaySuccess, listener);
+    return () => ipcRenderer.off(IPC.evtChasePaySuccess, listener);
   },
 };
 

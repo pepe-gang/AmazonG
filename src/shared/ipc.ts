@@ -1,7 +1,10 @@
 import type {
   AmazonProfile,
+  ChaseAccountSnapshot,
   ChaseLoginResult,
   ChaseProfile,
+  ChaseRedeemEntry,
+  ChaseRedeemResult,
   IdentityInfo,
   JobAttempt,
   LogEvent,
@@ -67,10 +70,48 @@ export const IPC = {
   chaseAdd: 'chase:add',
   chaseRemove: 'chase:remove',
   chaseLogin: 'chase:login',
+  /** Save / overwrite username + password for one Chase profile.
+   *  Encrypted at rest via OS keychain. The plaintext password
+   *  never goes back over IPC; renderer can only set / clear /
+   *  has (boolean check). */
+  chaseCredentialsSet: 'chase:credentials-set',
+  chaseCredentialsClear: 'chase:credentials-clear',
+  chaseCredentialsHas: 'chase:credentials-has',
   /** Cancel an in-flight chase:login (closes the window, leaves the
    *  profile's loggedIn flag unchanged). Used when the user clicks
    *  the cancel button mid-login. */
   chaseAbortLogin: 'chase:abort-login',
+  /** Open Chase's "redeem rewards" page in the profile's persistent
+   *  context so the user is already logged in. Window stays open
+   *  until the user closes it manually — we don't track the redeem
+   *  outcome here; the user navigates the Chase UI by hand. */
+  chaseOpenRewards: 'chase:open-rewards',
+  /** Fully-automated redemption: convert all available rewards points
+   *  on the profile's tracked card to a statement credit on the same
+   *  card. Window opens visibly so the user can watch / 2FA, then
+   *  closes itself once /cash-back/success loads. */
+  chaseRedeemAll: 'chase:redeem-all',
+  /** Per-profile history of successful automated redemptions. Reads
+   *  userData/chase-redeem-history.json. Returned newest-first. */
+  chaseRedeemHistory: 'chase:redeem-history',
+  /** Read the cached card snapshot (rewards points + current credit
+   *  balance). Returns null when nothing has been fetched yet. */
+  chaseSnapshotGet: 'chase:snapshot-get',
+  /** Open a Chase window, scrape the snapshot fresh, persist, and
+   *  return the new values. Used both by the Bank tab on first load
+   *  (when no cache exists) and by an explicit refresh button. */
+  chaseSnapshotRefresh: 'chase:snapshot-refresh',
+  /** Open a visible Chase window pointed at the pay-card flyout
+   *  for this profile's card. AmazonG does NOT auto-fill or submit
+   *  — the user picks amount + bank + date themselves and clicks
+   *  the final Schedule payment / Pay this bill button in the
+   *  Chase window. Window stays open until the user closes it. */
+  chasePayBalance: 'chase:pay-balance',
+  /** Force-close the Pay-my-Balance Chase window from the renderer
+   *  (the "Close browser" button on the Bank card). Calls
+   *  session.close() which persists cookies + tears down the context.
+   *  No-op when no pay session is registered. */
+  chasePayCancel: 'chase:pay-cancel',
 
   jobsList: 'jobs:list',
   jobsLogs: 'jobs:logs',
@@ -92,6 +133,12 @@ export const IPC = {
   evtStatus: 'evt:status',
   evtProfiles: 'evt:profiles',
   evtJobs: 'evt:jobs',
+  /** Fired when the Pay-my-Balance auto-close watcher detects
+   *  Chase's "You've scheduled a …" confirmation. Carries the
+   *  profile id so the renderer can refresh that profile's
+   *  snapshot (pending charges + balance shift after the payment
+   *  posts to Chase's intake queue). */
+  evtChasePaySuccess: 'evt:chase-pay-success',
 } as const;
 
 export type Settings = {
@@ -236,6 +283,14 @@ export type Settings = {
    * 1 = sequential (slowest but safest). 1-6 inclusive.
    */
   fillerParallelTabs: number;
+  /**
+   * When true, automated Chase flows (Bank-tab snapshot refresh +
+   * rewards redemption) launch their persistent context with
+   * headless Chromium so no window pops up. Login is exempt — it
+   * always opens a visible window so the user can type credentials
+   * and answer 2FA. Default false: visible windows for everything.
+   */
+  chaseHeadless: boolean;
 };
 
 /**
@@ -321,10 +376,31 @@ export type AutoGBridge = {
     } | null;
   }>;
   chaseList(): Promise<ChaseProfile[]>;
-  chaseAdd(label: string): Promise<ChaseProfile[]>;
+  /** Create a Chase profile and (optionally) save credentials in the
+   *  same shot. Pass `null` for credentials when the user wants to
+   *  add a profile without saved-credentials auto-login (rare). */
+  chaseAdd(
+    label: string,
+    credentials?: { username: string; password: string } | null,
+  ): Promise<ChaseProfile[]>;
   chaseRemove(id: string): Promise<ChaseProfile[]>;
+  chaseCredentialsSet(
+    id: string,
+    credentials: { username: string; password: string },
+  ): Promise<void>;
+  chaseCredentialsClear(id: string): Promise<void>;
+  chaseCredentialsHas(id: string): Promise<boolean>;
   chaseLogin(id: string): Promise<ChaseLoginResult>;
   chaseAbortLogin(id: string): Promise<void>;
+  chaseOpenRewards(id: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+  chaseRedeemAll(id: string): Promise<ChaseRedeemResult>;
+  chaseRedeemHistory(id: string): Promise<ChaseRedeemEntry[]>;
+  chaseSnapshotGet(id: string): Promise<ChaseAccountSnapshot | null>;
+  chaseSnapshotRefresh(
+    id: string,
+  ): Promise<{ ok: true; snapshot: ChaseAccountSnapshot } | { ok: false; reason: string }>;
+  chasePayBalance(id: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+  chasePayCancel(id: string): Promise<void>;
   jobsList(): Promise<JobAttempt[]>;
   jobsLogs(attemptId: string): Promise<LogEvent[]>;
   jobsClearAll(): Promise<void>;
@@ -363,6 +439,7 @@ export type AutoGBridge = {
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;
   onJobs(cb: (attempts: JobAttempt[]) => void): () => void;
+  onChasePaySuccess(cb: (profileId: string) => void): () => void;
 };
 
 declare global {

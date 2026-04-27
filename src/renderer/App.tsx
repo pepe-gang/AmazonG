@@ -41,6 +41,7 @@ import {
 import { useConfirm } from './components/ConfirmDialog.js';
 import { LogsView } from './pages/Logs.js';
 import { AccountsView } from './pages/Accounts.js';
+import { BankView } from './pages/Bank.js';
 import { PurchasesView } from './pages/Purchases.js';
 import { SettingsView } from './pages/Settings.js';
 import { AccountStatsCard } from './components/AccountStatsCard.js';
@@ -437,6 +438,7 @@ function MainShell({ status }: { status: RendererStatus }) {
                 }
               />
               <Route path="/deals" element={<Deals />} />
+              <Route path="/bank" element={<BankView />} />
             </Routes>
           </div>
         </SidebarInset>

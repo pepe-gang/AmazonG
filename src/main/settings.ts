@@ -49,6 +49,14 @@ const DEFAULTS: Settings = {
   // limits. 1 = sequential (slow but safest). 6 max (going higher
   // can trigger Amazon's per-IP throttling on the cart endpoint).
   fillerParallelTabs: 4,
+  // Run Chase automation (snapshot fetch + rewards redemption) with
+  // a hidden Chrome window. Default OFF because Chase's anti-bot
+  // detection (banking-grade) flags headless via WebGL fingerprint,
+  // missing window.chrome, plugin list, etc. — going beyond UA.
+  // Visible mode reliably works; headless is best-effort and may
+  // get stuck on snapshot fetches for some accounts. Login + Pay
+  // flows always open visible regardless.
+  chaseHeadless: false,
 };
 
 function filePath(): string {
