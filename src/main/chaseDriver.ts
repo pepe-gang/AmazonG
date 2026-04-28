@@ -8,6 +8,7 @@ import { chaseProfileDir, chaseSessionStatePath } from './chaseProfiles.js';
 import { getChaseCredentials } from './chaseCredentials.js';
 import {
   isChaseAuthPromptUrl,
+  parseAvailableCreditFromHtml,
   parseCreditBalanceFromHtml,
   parseInProcessPaymentsFromHtml,
   parsePendingChargesFromHtml,
@@ -1094,6 +1095,7 @@ async function runFetch(
     const { page } = session;
     let creditBalance = '';
     let pendingCharges = '';
+    let availableCredit = '';
     let pointsBalance = '';
 
     // 1) Card summary page — credit balance + pending charges.
@@ -1129,6 +1131,7 @@ async function runFetch(
       // accordion above the recon bar. Pull it out of the same
       // page.content() so we don't pay for a second navigation.
       pendingCharges = parsePendingChargesFromHtml(summaryHtml);
+      availableCredit = parseAvailableCreditFromHtml(summaryHtml);
       if (!creditBalance) {
         // Diagnostic log + screenshot so we can tell whether the
         // page hadn't rendered, the SPA bounced us elsewhere, or
@@ -1237,6 +1240,7 @@ async function runFetch(
       pointsBalance,
       creditBalance,
       pendingCharges,
+      availableCredit,
       inProcessCount: inProcessPayments.length,
     });
     return {
@@ -1245,6 +1249,7 @@ async function runFetch(
         pointsBalance,
         creditBalance,
         pendingCharges,
+        availableCredit,
         inProcessPayments,
         fetchedAt: new Date().toISOString(),
       },

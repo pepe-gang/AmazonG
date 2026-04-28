@@ -904,14 +904,16 @@ function ChaseBankCard({
           </div>
         </div>
 
-        {/* Hero row: balance + points side by side. The two
-            numbers the user opens this tab for — large, bold,
-            and immediately legible. Dim while a refresh is
+        {/* Hero row: balance + available credit + points side by side.
+            The three numbers the user opens this tab for — large,
+            bold, and immediately legible. Dim while a refresh is
             re-reading them so stale values are visible but
-            visibly stale. */}
+            visibly stale. Available credit gets sky-blue so it
+            doesn't compete with the red/emerald balance and the
+            white rewards — three distinct colors at a glance. */}
         <div
           className={
-            'relative grid grid-cols-2 gap-4 my-2 transition-opacity ' +
+            'relative grid grid-cols-3 gap-3 my-2 transition-opacity ' +
             (snapshotLoading && snapshot ? 'opacity-50' : '')
           }
         >
@@ -926,6 +928,17 @@ function ChaseBankCard({
               title={balance || 'Not yet fetched'}
             >
               {balance || (snapshotLoading ? '…' : '—')}
+            </div>
+          </div>
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-wider text-blue-200/60">
+              Available
+            </div>
+            <div
+              className="text-2xl font-mono tabular-nums font-semibold text-sky-300 truncate"
+              title={snapshot?.availableCredit || 'Not yet fetched'}
+            >
+              {snapshot?.availableCredit || (snapshotLoading ? '…' : '—')}
             </div>
           </div>
           <div className="min-w-0 text-right">

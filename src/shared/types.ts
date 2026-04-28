@@ -259,6 +259,13 @@ export type ChaseAccountSnapshot = {
    *  block on the page (no pending activity). Optional for backwards-
    *  compat; renderers should treat undefined as empty. */
   pendingCharges?: string;
+  /** "Available credit" from the recon row on the summary page —
+   *  what the user has left to spend before hitting the credit limit
+   *  (credit limit minus current balance minus pending), e.g.
+   *  "$18,709.67". Empty when the recon row didn't surface it.
+   *  Optional for backwards-compat with snapshots written before this
+   *  field existed; renderers should treat undefined as empty. */
+  availableCredit?: string;
   /** Payments scraped from the secure.chase.com payment-activity page
    *  whose status is "In process" / "Pending" / "Scheduled" / similar
    *  not-yet-completed value. Newest first by Chase's own ordering.

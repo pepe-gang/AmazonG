@@ -118,6 +118,39 @@ export function parsePendingChargesFromHtml(html: string): string {
 }
 
 /**
+ * Pull the "Available credit" amount from the recon row on the
+ * summary page — what the cardholder has left to spend before
+ * hitting the credit limit (credit limit minus posted balance
+ * minus pending charges, computed by Chase server-side).
+ *
+ * Markup the regex anchors on:
+ *   <div ... data-testid="availableCreditWithTransferBalance">
+ *     ...nested spans...
+ *     <span ...>$18,709.67</span>
+ *
+ * The label "Available credit" sits in a sibling div before the
+ * data-testid container. We anchor on the data-testid because it's
+ * the more stable identifier — the label text could be rephrased
+ * but Chase's testid attributes survive across redesigns.
+ *
+ * Fallback: walks text near the literal "Available credit" label
+ * for any future Chase build that drops or renames the testid.
+ */
+export function parseAvailableCreditFromHtml(html: string): string {
+  const primary = html.match(
+    /data-testid=[\\"]+availableCreditWithTransferBalance[\\"]+[\s\S]{0,800}?(\$[\d,]+\.\d{2})/i,
+  );
+  if (primary?.[1]) return primary[1];
+  const labelIdx = html.search(/Available\s+credit/i);
+  if (labelIdx >= 0) {
+    const slice = html.slice(labelIdx, labelIdx + 800);
+    const fallback = slice.match(/(\$[\d,]+\.\d{2})/);
+    if (fallback?.[1]) return fallback[1];
+  }
+  return '';
+}
+
+/**
  * Pull every payment row whose status is "In process" / "Pending" /
  * "Scheduled" / "Processing" — anything not yet finalized — out of
  * the payment-activity table on secure.chase.com.

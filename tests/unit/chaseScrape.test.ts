@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   isChaseAuthPromptUrl,
+  parseAvailableCreditFromHtml,
   parseCreditBalanceFromHtml,
   parseInProcessPaymentsFromHtml,
   parsePendingChargesFromHtml,
@@ -197,6 +198,39 @@ describe('parsePendingChargesFromHtml', () => {
 
   it('returns empty when the pending-charges block is absent', () => {
     expect(parsePendingChargesFromHtml('<div>No pending</div>')).toBe('');
+  });
+});
+
+describe('parseAvailableCreditFromHtml', () => {
+  it('extracts the available credit from the summary fixture', async () => {
+    const html = await loadFixture('summary.html');
+    // The fixture's recon row labels Available credit and the
+    // testid-anchored value is $18,709.67.
+    expect(parseAvailableCreditFromHtml(html)).toBe('$18,709.67');
+  });
+
+  it('reads from clean HTML using the testid anchor', () => {
+    const html =
+      '<div data-testid="availableCreditWithTransferBalance">' +
+      '<span>$2,345.67</span></div>';
+    expect(parseAvailableCreditFromHtml(html)).toBe('$2,345.67');
+  });
+
+  it('tolerates JSON-escaped attribute quotes', () => {
+    const html =
+      '<div data-testid=\\"availableCreditWithTransferBalance\\">' +
+      '<span>$1,000.00</span></div>';
+    expect(parseAvailableCreditFromHtml(html)).toBe('$1,000.00');
+  });
+
+  it('falls back to a $-amount near the Available credit label', () => {
+    const html =
+      '<div>Available credit</div><div><span>$987.65</span></div>';
+    expect(parseAvailableCreditFromHtml(html)).toBe('$987.65');
+  });
+
+  it('returns empty string when nothing matches', () => {
+    expect(parseAvailableCreditFromHtml('<div>statement summary</div>')).toBe('');
   });
 });
 

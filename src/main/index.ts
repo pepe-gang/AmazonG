@@ -395,6 +395,38 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
     }
   }
 
+  // Auto-prune local terminal-state orphans. When BG's poll succeeded
+  // (serverRows is the result of a successful listPurchases call —
+  // we'd have returned `local` early on failure) and a local row in
+  // failed / cancelled_by_amazon state has no matching BG row, BG
+  // either never persisted it or the user deleted it server-side
+  // (e.g. via the dashboard's "Delete cancelled & failed" button).
+  // Either way the local cache should drop it so the desktop table
+  // stops showing rows BG no longer holds. The 60s grace window
+  // protects against the race where /status hasn't yet synced a
+  // fresh local fail to BG.
+  const serverKeys = new Set(serverRows.map((s) => keyOf(s)));
+  const TERMINAL_LOCAL_AGE_MS = 60_000;
+  const cutoff = Date.now() - TERMINAL_LOCAL_AGE_MS;
+  const orphanIds: string[] = [];
+  for (const l of local) {
+    const isTerminal = l.status === 'failed' || l.status === 'cancelled_by_amazon';
+    if (!isTerminal) continue;
+    if (serverKeys.has(keyOf(l))) continue;
+    const lastTouched = Date.parse(l.updatedAt ?? l.createdAt);
+    if (Number.isFinite(lastTouched) && lastTouched > cutoff) continue;
+    orphanIds.push(l.attemptId);
+    merged.delete(keyOf(l));
+  }
+  if (orphanIds.length > 0) {
+    await storeDeleteAttempts(orphanIds).catch((err) => {
+      logger.warn('listMergedAttempts.orphanPrune.error', {
+        count: orphanIds.length,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
   // Respect the user's local "deleted from view" set. Server rows for
   // these ids otherwise rematerialize every merge because BG still
   // holds them. Also prune any ids whose rows are no longer in either
