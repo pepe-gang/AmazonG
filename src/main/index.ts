@@ -244,6 +244,51 @@ async function bulkSyncDisplayNamesToBG(): Promise<void> {
   }
 }
 
+/**
+ * Cross-PC sync: fetch the AmazonAccount list from BG and create local
+ * profile rows for any account on BG that isn't already in the local
+ * profiles.json. Used at startup so a fresh AmazonG install on a new
+ * machine pre-populates the Accounts page with email + displayName,
+ * leaving the user just needing to click Login on each one.
+ *
+ * Conservative merge — only ever ADDS rows, never modifies or removes
+ * existing local entries. Local-only state (loggedIn, lastLoginAt,
+ * enabled, headless, buyWithFillers) is the source of truth for
+ * already-known profiles. Best-effort: a network blip just leaves the
+ * user with whatever's already on disk.
+ */
+async function pullAmazonAccountsFromBG(): Promise<void> {
+  if (!apiKey) return;
+  const settingsNow = await loadSettings().catch(() => null);
+  if (!settingsNow) return;
+  let bgList: { accounts: { email: string; displayName: string | null }[] };
+  try {
+    const bg = createBGClient(settingsNow.bgBaseUrl, apiKey);
+    bgList = await bg.listAmazonAccounts();
+  } catch (err) {
+    logger.info('pullAmazonAccountsFromBG.skip', {
+      reason: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+  if (bgList.accounts.length === 0) return;
+
+  const local = await loadProfiles().catch(() => [] as AmazonProfile[]);
+  const localEmails = new Set(local.map((p) => p.email.toLowerCase()));
+
+  let added = 0;
+  for (const acc of bgList.accounts) {
+    const email = acc.email.toLowerCase();
+    if (localEmails.has(email)) continue;
+    await upsertProfile(newProfile(email, acc.displayName ?? undefined));
+    added++;
+  }
+  if (added > 0) {
+    logger.info('pullAmazonAccountsFromBG.added', { count: added });
+    await broadcastProfiles();
+  }
+}
+
 // Coalesce job-list broadcasts so a fan-out across N profiles doesn't
 // fire 2N+ full-list IPC sends. 250ms trailing timer collapses burst
 // updates further than the previous 100ms — not perceptibly less
@@ -812,15 +857,24 @@ app.whenReady().then(async () => {
   // live `apiKey` so connect/disconnect cycles don't need to restart it.
   startAutoEnqueueScheduler({ getApiKey: () => apiKey });
 
-  // One-shot bulk sync of every locally-known profile's displayName
-  // to BG. Catches the existing user base — names live in the local
-  // profiles.json today, and BG's Account column needs them pushed
-  // up before it can render anything friendlier than the email. Best-
-  // effort: skips silently if not connected; subsequent renames sync
-  // individually via the profilesAdd / profilesRename IPC handlers.
-  // void to detach from the whenReady chain — no need to block window
-  // creation on a network round-trip.
-  void bulkSyncDisplayNamesToBG();
+  // Bidirectional Amazon-account sync at startup.
+  //
+  //  1. Pull from BG  — pre-populate local profiles.json with any
+  //     AmazonAccount rows that exist on BG but not on this machine.
+  //     Lets the user move between PCs and have all their account
+  //     emails + names already there; they just click Login per
+  //     account to attach a fresh local browser session.
+  //  2. Push to BG    — push every local profile's displayName up so
+  //     BG's Account column can render the friendly name. Idempotent
+  //     for already-synced rows. Catches users who renamed offline.
+  //
+  // Both detached from the whenReady chain via void — no reason to
+  // block window creation on a network round-trip. Pull runs first
+  // so the push has the merged list to operate on.
+  void (async () => {
+    await pullAmazonAccountsFromBG();
+    await bulkSyncDisplayNamesToBG();
+  })();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -1014,6 +1068,24 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC.profilesRemove, async (_e, email: string) => {
     const list = await removeProfileFn(email);
     await broadcastProfiles(list);
+    // Cross-PC sync: also drop the row on BG so the next
+    // pullAmazonAccountsFromBG on this or another machine doesn't
+    // resurrect it. Best-effort — local removal is authoritative
+    // for "user wants this gone right now," even if the BG sync
+    // fails (offline, no AutoG key). Worst case: row reappears on
+    // next pull and the user re-removes.
+    if (apiKey) {
+      try {
+        const settingsNow = await loadSettings();
+        const bg = createBGClient(settingsNow.bgBaseUrl, apiKey);
+        await bg.removeAmazonAccount(email.toLowerCase());
+      } catch (err) {
+        logger.warn('profilesRemove.bgSync.error', {
+          email,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     return list;
   });
 

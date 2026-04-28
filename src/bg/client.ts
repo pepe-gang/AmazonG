@@ -61,6 +61,11 @@ export type VersionInfo = {
  *  worker needs to honor at buy time. Fetched once per claim poll. */
 export type AmazonAccountSetting = {
   email: string;
+  /** Human-friendly name set by the user in AmazonG's Accounts page
+   *  (e.g. "Mom", "Cuong 1"). Pushed up by AmazonG; surfaced here so
+   *  a fresh AmazonG install on a new machine can pull the names back
+   *  along with the email list and pre-populate the Accounts page. */
+  displayName: string | null;
   /** When false, skip the worker's min-cashback gate for this account
    *  (user flipped the toggle on the web dashboard). Default true. */
   requireMinCashback: boolean;
@@ -175,6 +180,14 @@ export type BGClient = {
     email: string,
     bgAccountId: string | null,
   ): Promise<AmazonAccountSetting>;
+  /**
+   * Delete an Amazon-account row on BG. Called when the user removes
+   * an Amazon profile from AmazonG so the deletion syncs across
+   * machines (the next pullAmazonAccountsFromBG won't resurrect it).
+   * Best-effort — caller should `.catch()` since BG might be
+   * unreachable or the user might not have an AutoG key yet.
+   */
+  removeAmazonAccount(email: string): Promise<{ ok: true; deleted: number }>;
 };
 
 /**
@@ -377,6 +390,20 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         {
           method: 'POST',
           body: JSON.stringify({ email, bgAccountId }),
+        },
+      );
+      if (!r) {
+        throw new BGApiError(500, '/api/autog/amazon-accounts', 'empty response');
+      }
+      return r;
+    },
+
+    async removeAmazonAccount(email) {
+      const r = await request<{ ok: true; deleted: number }>(
+        '/api/autog/amazon-accounts',
+        {
+          method: 'DELETE',
+          body: JSON.stringify({ email }),
         },
       );
       if (!r) {
