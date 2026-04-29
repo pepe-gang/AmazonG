@@ -214,6 +214,9 @@ function normalizeJob(raw: unknown): AutoGJob | null {
     placedOrderId: typeof j.placedOrderId === 'string' ? j.placedOrderId : null,
     placedEmail: typeof j.placedEmail === 'string' ? j.placedEmail : null,
     viaFiller: Boolean(j.viaFiller),
+    // Default true on missing/non-bool — pre-feature BG deployments don't
+    // send this field, and we want the gate enforced unless explicitly off.
+    requireMinCashback: typeof j.requireMinCashback === 'boolean' ? j.requireMinCashback : true,
   };
 }
 

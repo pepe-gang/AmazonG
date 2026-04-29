@@ -860,16 +860,22 @@ async function handleJob(
   const requireMinByEmail = new Map<string, boolean>(
     accountOverrides.accounts.map((a) => [a.email.toLowerCase(), a.requireMinCashback]),
   );
+  // Per-job override AND-combines with the per-account flag — either side
+  // saying "skip" means skip. Defaults to true (gate enforced) so older BG
+  // deployments that don't send the field keep the existing behavior.
+  const jobRequiresMinCashback = job.requireMinCashback !== false;
   const effectiveMinByEmail = new Map<string, number>(
     eligible.map((p) => {
-      const require = requireMinByEmail.get(p.email.toLowerCase()) ?? true;
-      return [p.email, require ? deps.minCashbackPct : 0];
+      const accountRequires = requireMinByEmail.get(p.email.toLowerCase()) ?? true;
+      const enforce = accountRequires && jobRequiresMinCashback;
+      return [p.email, enforce ? deps.minCashbackPct : 0];
     }),
   );
   logger.info(
     'job.accounts.gates',
     {
       jobId: job.id,
+      jobRequiresMinCashback,
       gates: eligible.map((p) => ({
         email: p.email,
         requireMinCashback: requireMinByEmail.get(p.email.toLowerCase()) ?? true,

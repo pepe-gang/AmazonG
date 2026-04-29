@@ -16,6 +16,10 @@ export type AutoGJob = {
   placedOrderId: string | null;
   placedEmail: string | null;
   viaFiller: boolean;
+  /** Per-job override for the min-cashback gate. When false, the worker
+   *  skips its 6%-CB check at /spc time for this specific job, regardless
+   *  of the per-account `requireMinCashback` setting. Default true. */
+  requireMinCashback: boolean;
 };
 
 export type ProductCondition = 'new' | 'used' | 'renewed';
