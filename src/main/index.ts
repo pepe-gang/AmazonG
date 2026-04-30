@@ -27,11 +27,6 @@ import { BGApiError } from '../shared/errors.js';
 import { loadIdentity, saveIdentity, clearIdentity } from './identity.js';
 import { loadSettings, saveSettings } from './settings.js';
 import {
-  startAutoEnqueueScheduler,
-  stopAutoEnqueueScheduler,
-  getAutoEnqueueStatus,
-} from './autoEnqueueScheduler.js';
-import {
   loadProfiles,
   newProfile,
   removeProfile as removeProfileFn,
@@ -851,11 +846,10 @@ app.whenReady().then(async () => {
     });
   }
 
-  // Background scheduler always runs while the app is open. It checks
-  // its own enabled flag inside each tick, so starting it here costs
-  // nothing when the feature is off. The getApiKey closure tracks the
-  // live `apiKey` so connect/disconnect cycles don't need to restart it.
-  startAutoEnqueueScheduler({ getApiKey: () => apiKey });
+  // Auto-enqueue scheduler is removed in favor of BetterBG's Auto Trigger
+  // (per-user schedule configured in the BG dashboard). Keep imports
+  // compiling but never start the loop — pre-existing users with an
+  // enabled flag in settings.json no longer have it run silently.
 
   // Bidirectional Amazon-account sync at startup.
   //
@@ -935,7 +929,6 @@ let quittingCleanly = false;
 app.on('before-quit', async (e) => {
   if (quittingCleanly) return;
   e.preventDefault();
-  stopAutoEnqueueScheduler();
   try {
     await closeAllChromiumSessions();
   } catch (err) {
@@ -1213,7 +1206,18 @@ function registerIpcHandlers(): void {
     },
   );
 
-  ipcMain.handle(IPC.autoEnqueueStatus, () => getAutoEnqueueStatus());
+  // Legacy IPC kept so older builds of the renderer (Deals tab) don't
+  // crash on a missing handler. Always returns disabled now.
+  ipcMain.handle(IPC.autoEnqueueStatus, () => ({
+    nextRunAt: null,
+    lastRunAt: null,
+    lastResult: null,
+    autoEnqueueEnabled: false,
+    autoEnqueueIntervalHours: 6,
+    autoEnqueueShipToFilter: 'oregon',
+    autoEnqueueMinMarginPct: 0,
+    autoEnqueueMaxPerTick: 50,
+  }));
 
   // ─── Chase profile handlers ───────────────────────────────────────
   // Entirely local. No BG sync, no remote storage. Login is a hands-on
