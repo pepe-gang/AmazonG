@@ -235,7 +235,10 @@ function MainShell({ status }: { status: RendererStatus }) {
   const [manualCheck, setManualCheck] = useState<'idle' | 'checking' | 'up_to_date' | 'failed'>('idle');
   useEffect(() => {
     void window.autog.appVersion().then(setAppVersion);
-    // Check for updates on mount + every 6 hours
+    // Check for updates on mount + every hour. The check is a single
+    // small JSON GET to BG's /api/autog/version so the cost is
+    // negligible; tightening from 6h → 1h means a freshly-cut release
+    // typically reaches every running install within an hour.
     const check = () => {
       void window.autog.versionCheck().then((r) => {
         if (r.updateAvailable && r.latest) {
@@ -244,7 +247,7 @@ function MainShell({ status }: { status: RendererStatus }) {
       }).catch(() => undefined);
     };
     check();
-    const t = setInterval(check, 6 * 60 * 60 * 1000);
+    const t = setInterval(check, 60 * 60 * 1000);
     return () => clearInterval(t);
   }, []);
 
