@@ -612,7 +612,7 @@ function fillerToBuyResult(f: BuyWithFillersResult): BuyResult {
 
 type ProfileResult = {
   email: string;
-  status: 'completed' | 'failed';
+  status: 'completed' | 'failed' | 'action_required';
   orderId: string | null;
   placedPrice: string | null;
   placedCashbackPct: number | null;
@@ -962,6 +962,7 @@ async function handleJob(
   const successes = results.filter((r) => r.status === 'completed' && !r.dryRun);
   const dryRunPasses = results.filter((r) => r.status === 'completed' && r.dryRun);
   const failures = results.filter((r) => r.status === 'failed');
+  const actionRequireds = results.filter((r) => r.status === 'action_required');
 
   // Summary log line — celebratory for dry-run all-pass, neutral otherwise.
   if (dryRunPasses.length === results.length && results.length > 0) {
@@ -983,6 +984,7 @@ async function handleJob(
         placed: successes.length,
         dryRunPassed: dryRunPasses.length,
         failed: failures.length,
+        actionRequired: actionRequireds.length,
       },
       cid,
     );
@@ -1000,10 +1002,18 @@ async function handleJob(
   // — the verify-phase job (~10 min later) flips them to 'completed'
   // once Amazon confirms the order is still active. This matches the
   // AmazonG Jobs-table label "Waiting for Verification".
-  let overallStatus: 'awaiting_verification' | 'partial' | 'failed';
+  //
+  // action_required ranks ABOVE failed in the rollup so a job where
+  // every profile needs human attention surfaces as Action Required
+  // (the user gets a cleaner signal of what to fix). When there's at
+  // least one success, partial still wins regardless — a partial fan-
+  // out's user value is the success rows, not the action-required ones.
+  let overallStatus: 'awaiting_verification' | 'partial' | 'failed' | 'action_required';
   let parentError: string | null = null;
   if (successes.length > 0) {
-    overallStatus = failures.length === 0 ? 'awaiting_verification' : 'partial';
+    overallStatus = failures.length === 0 && actionRequireds.length === 0
+      ? 'awaiting_verification'
+      : 'partial';
   } else if (dryRunPasses.length > 0) {
     // All dry-run successes (no live orders) — BG status is 'failed' (no
     // real order to verify), but the message clearly marks it as a
@@ -1013,6 +1023,13 @@ async function handleJob(
       failures.length === 0
         ? `[DRY RUN OK] All ${dryRunPasses.length} profile(s) passed all checks and would have placed orders. No real Place Order click — flip to LIVE mode to actually buy.`
         : `[DRY RUN] ${dryRunPasses.length} profile(s) would have placed orders; ${failures.length} failed verification.`;
+  } else if (actionRequireds.length > 0) {
+    // No success, no dry-run pass, but at least one profile needs human
+    // attention. Surface as action_required (not failed) so the user can
+    // resolve it; failures.length > 0 alongside this still rolls up here
+    // because the actionable signal is what the user can do something about.
+    overallStatus = 'action_required';
+    parentError = actionRequireds[0]!.error ?? 'profile needs attention';
   } else {
     overallStatus = 'failed';
     parentError = failures[0]?.error ?? 'all profiles failed';
@@ -1032,7 +1049,9 @@ async function handleJob(
       ? ('failed' as const)
       : r.status === 'completed'
         ? ('awaiting_verification' as const)
-        : ('failed' as const),
+        : r.status === 'action_required'
+          ? ('action_required' as const)
+          : ('failed' as const),
     ...(fillerByEmail.get(r.email) && !r.dryRun && r.status === 'completed'
       ? { viaFiller: true as const }
       : {}),
@@ -1928,9 +1947,13 @@ async function runForProfile(
       const error = (report.detail ?? report.reason ?? 'verification failed').replace(/\.\s*$/, '');
       logger.error('step.verify.fail', { jobId: job.id, profile, reason: report.reason }, cid);
       await maybeSnapshot(error, page, attemptId, session, deps, cid, { jobId: job.id, profile });
+      // signed_out is the canonical action_required trigger from the
+      // verify pipeline — anything else is a product-side issue and stays
+      // a plain failure.
+      const needsHuman = report.reason === 'signed_out';
       await deps.jobAttempts
         .update(attemptId, {
-          status: 'failed',
+          status: needsHuman ? 'action_required' : 'failed',
           error,
           cost: info.priceText,
           cashbackPct: info.cashbackPct,
@@ -1942,7 +1965,7 @@ async function runForProfile(
       // reason is captured in the attempt row + snapshot, so nothing
       // is lost by closing.
       await closeAndForgetSession(sessions, profile);
-      return failed(profile, error);
+      return needsHuman ? actionRequired(profile, error) : failed(profile, error);
     }
     logger.info('step.verify.ok', { jobId: job.id, profile }, cid);
 
@@ -1987,16 +2010,21 @@ async function runForProfile(
         cid,
       );
       await maybeSnapshot(error, page, attemptId, session, deps, cid, { jobId: job.id, profile });
+      // PMTS "Verify your card" challenge needs the user to satisfy it
+      // in the Amazon UI — the bot can't proceed automatically. Anything
+      // else is a buy-flow failure (selector miss, address picker, etc.)
+      // that the worker can retry on the next claim.
+      const needsHuman = isActionRequiredReason(buy.reason);
       await deps.jobAttempts
         .update(attemptId, {
-          status: 'failed',
+          status: needsHuman ? 'action_required' : 'failed',
           error,
           cost: info.priceText,
           cashbackPct: info.cashbackPct,
         })
         .catch(() => undefined);
       await closeAndForgetSession(sessions, profile);
-      return failed(profile, error);
+      return needsHuman ? actionRequired(profile, error) : failed(profile, error);
     }
 
     if (session && deps.snapshotOnFailure) await discardTracing(session.context);
@@ -2127,6 +2155,50 @@ function failed(email: string, error: string): ProfileResult {
     dryRun: false,
     fillerOrderIds: [],
   };
+}
+
+/**
+ * Per-profile outcome for situations the bot can't resolve on its own —
+ * the user has to step in (re-login, complete a card-verification
+ * challenge, etc.). Distinct from `failed` so the dashboard can flag
+ * actionable rows separately from rows that failed for product-side
+ * reasons (oos, price, etc.). The reason text is what the user sees in
+ * the table, so callers should phrase it as instructions ("Account
+ * signed out — re-login from Accounts tab").
+ */
+function actionRequired(email: string, error: string): ProfileResult {
+  return {
+    email,
+    status: 'action_required',
+    orderId: null,
+    placedPrice: null,
+    placedCashbackPct: null,
+    placedAt: null,
+    placedQuantity: 0,
+    error,
+    dryRun: false,
+    fillerOrderIds: [],
+  };
+}
+
+/**
+ * Reasons the bot maps to action_required instead of failed. Kept narrow
+ * intentionally — only situations where the user has a clear next step.
+ * Verify-stage card challenges (PMTS "Verify your card") and signed-out
+ * sessions both fit; product-side issues (out of stock, wrong region) do
+ * not — those are environmental and the bot retries them on the next
+ * round naturally.
+ */
+function isActionRequiredReason(reason: string | null | undefined): boolean {
+  if (!reason) return false;
+  const s = reason.toLowerCase();
+  // signed_out reason from the verifyProductDetailed signedIn step
+  // surfaces as "Amazon account is signed out — …" in the report.detail.
+  if (s.includes('signed out')) return true;
+  // PMTS "Verify your card" buyNow place_order failure, surfaced
+  // verbatim by the place-order helper when the challenge is detected.
+  if (s.includes('verify your card')) return true;
+  return false;
 }
 
 function friendlyJobError(raw: string, profile: string): string {

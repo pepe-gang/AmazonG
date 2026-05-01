@@ -175,7 +175,7 @@ export function JobsTable({
   // after you picked a single account.
   const statusGroupCounts = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const c: Record<StatusGroup, number> = { pending: 0, success: 0, cancelled: 0, failed: 0 };
+    const c: Record<StatusGroup, number> = { pending: 0, success: 0, cancelled: 0, failed: 0, action_required: 0 };
     for (const a of attempts) {
       if (accountFilter.size > 0 && !accountFilter.has(a.amazonEmail)) continue;
       if (q.length > 0) {

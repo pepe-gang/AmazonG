@@ -1637,6 +1637,14 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   color: hsl(25 95% 78%);
   border: 1px solid hsl(25 90% 60% / 0.28);
 }
+/* Action Required — purple. Sits visually outside the green/amber/red
+ * happy-path/in-flight/failed continuum so the user can pick out rows
+ * that need their attention at a glance. */
+.badge-purple {
+  background: hsl(270 70% 65% / 0.18);
+  color: hsl(270 90% 85%);
+  border: 1px solid hsl(270 70% 65% / 0.30);
+}
 
 /* Inline status-filter pills (Jobs table). Each hue has an "active"
  * state that tints the full pill, and a dimmed "inactive" state so
@@ -1686,6 +1694,11 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   background: var(--danger-bg);
   color: hsl(0 80% 85%);
   border-color: hsl(0 80% 60% / 0.28);
+}
+.status-filter-pill.is-active.action_required {
+  background: hsl(270 70% 65% / 0.18);
+  color: hsl(270 90% 85%);
+  border-color: hsl(270 70% 65% / 0.30);
 }
 
 /* Logs view (full-page) */

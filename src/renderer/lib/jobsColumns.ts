@@ -81,6 +81,7 @@ export const STATUS_LABEL: Record<JobAttemptStatus, string> = {
   dry_run_success: 'Success',
   cancelled_by_amazon: 'Cancelled',
   failed: 'Failed',
+  action_required: 'Action Required',
 };
 
 /**
@@ -91,7 +92,7 @@ export const STATUS_LABEL: Record<JobAttemptStatus, string> = {
  * folded into Success; the in-flight three (queued / in_progress /
  * awaiting_verification) all read as Pending.
  */
-export type StatusGroup = 'pending' | 'success' | 'cancelled' | 'failed';
+export type StatusGroup = 'pending' | 'success' | 'cancelled' | 'failed' | 'action_required';
 
 export const STATUS_GROUP: Record<JobAttemptStatus, StatusGroup> = {
   queued: 'pending',
@@ -102,15 +103,19 @@ export const STATUS_GROUP: Record<JobAttemptStatus, StatusGroup> = {
   dry_run_success: 'success',
   cancelled_by_amazon: 'cancelled',
   failed: 'failed',
+  action_required: 'action_required',
 };
 
-export const ALL_STATUS_GROUPS: StatusGroup[] = ['pending', 'success', 'cancelled', 'failed'];
+export const ALL_STATUS_GROUPS: StatusGroup[] = [
+  'pending', 'success', 'action_required', 'cancelled', 'failed',
+];
 
 export const STATUS_GROUP_LABEL: Record<StatusGroup, string> = {
   pending: 'Pending',
   success: 'Success',
   cancelled: 'Cancelled',
   failed: 'Failed',
+  action_required: 'Action Required',
 };
 
 export const STATUS_GROUP_BADGE_CLASS: Record<StatusGroup, string> = {
@@ -122,6 +127,11 @@ export const STATUS_GROUP_BADGE_CLASS: Record<StatusGroup, string> = {
   // as the same thing at a glance.
   cancelled: 'badge-orange',
   failed: 'badge-red',
+  // Action Required is "the bot can't proceed without you" —
+  // visually distinct from failed so the user can find rows they
+  // need to personally resolve. Purple gives it a separate visual
+  // identity from the red/orange terminal-bad pair.
+  action_required: 'badge-purple',
 };
 
 /** Default visible: in-flight + finished-good. Settled bad rows hidden. */

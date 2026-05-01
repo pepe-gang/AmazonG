@@ -107,7 +107,7 @@ export type ProductInfo = {
 
 /** Payload shape accepted by POST /api/autog/jobs/[id]/status */
 export type JobStatusReport = {
-  status: 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'partial' | 'failed' | 'cancelled';
+  status: 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'action_required';
   error?: string | null;
   placedAt?: string | null;
   placedQuantity?: number | null;
@@ -120,7 +120,7 @@ export type JobStatusReport = {
   trackingIds?: string[] | null;
   purchases?: {
     amazonEmail: string;
-    status: 'queued' | 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'failed' | 'cancelled';
+    status: 'queued' | 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'failed' | 'cancelled' | 'action_required';
     /**
      * When true, this purchase used the "Buy with Fillers" flow (cart
      * padded with random items). BG reads this flag to decide whether
@@ -338,6 +338,13 @@ export type JobAttemptStatus =
    *  and by legacy buy attempts pre-verify-phase. */
   | 'completed'
   | 'failed'
+  /** The bot couldn't proceed and a human needs to step in. Distinct
+   *  from `failed` so users can quickly find rows they personally need
+   *  to act on (re-login, satisfy a card-verification challenge, etc.)
+   *  rather than rows that failed for product-side reasons (oos, price,
+   *  etc.). Set when verify reports `signed_out` or buyNow hits the
+   *  PMTS "Verify your card" challenge. */
+  | 'action_required'
   | 'dry_run_success';
 
 export type JobAttempt = {
