@@ -166,6 +166,14 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         warn('step.buy.unavailable', { reason: checkoutPage.reason, detail: checkoutPage.detail });
         return fail('item_unavailable', checkoutPage.reason, checkoutPage.detail);
       }
+      // Per-item quantity cap (e.g. Amazon Echo Dot purchase limit). The
+      // "Make updates to your items" page is unrecoverable for the bot —
+      // Continue is a no-op until the user removes the item — so surface
+      // as item_unavailable with Amazon's own message for the row.
+      if (checkoutPage.kind === 'quantity_limit') {
+        warn('step.buy.quantity_limit', { reason: checkoutPage.reason });
+        return fail('item_unavailable', checkoutPage.reason);
+      }
       return fail('checkout_wait', checkoutPage.reason, checkoutPage.detail);
     }
     step('step.buy.checkout', { detected: checkoutPage.detected });
@@ -488,7 +496,7 @@ async function addToCartThenCheckout(
 
 export type CheckoutReadyResult =
   | { ok: true; detected: string }
-  | { ok: false; reason: string; detail?: string; kind?: 'unavailable' | 'timeout' };
+  | { ok: false; reason: string; detail?: string; kind?: 'unavailable' | 'quantity_limit' | 'timeout' };
 
 export async function waitForCheckout(
   page: Page,
@@ -539,6 +547,27 @@ export async function waitForCheckout(
             kind: 'unavailable' as const,
             message: headline ? headline.trim() : 'This item is currently unavailable',
             detail: detail ? detail.trim().slice(0, 250) : null,
+          };
+        }
+
+        // 0b. Per-item quantity-cap rejection on the "Make updates to your
+        //     items" page. Fires when Amazon enforces a purchase limit the
+        //     account has hit (Echo Dot bulk caps, etc.). The Continue
+        //     button is a no-op here — clicking advances nothing — so we
+        //     must catch this BEFORE the 'updates' handler routes us into
+        //     a retry loop that times out into "unexpected error in buyNow
+        //     flow". Stable selector: `[data-messageId*="Limit" i]`
+        //     (covers QuantityLimitsCVMessage and any sibling rename).
+        const limitEl = document.querySelector(
+          '[data-messageId*="Limit" i], [data-messageid*="Limit" i]',
+        ) as HTMLElement | null;
+        if (limitEl) {
+          const text = (limitEl.textContent ?? '').replace(/\s+/g, ' ').trim();
+          return {
+            kind: 'quantity_limit' as const,
+            message:
+              text ||
+              "Sorry, you've reached the purchase limit for this item. Please remove the item to continue.",
           };
         }
 
@@ -725,6 +754,14 @@ export async function waitForCheckout(
         kind: 'unavailable',
         reason: state.message,
         ...(state.detail ? { detail: state.detail } : {}),
+      };
+    }
+
+    if (state.kind === 'quantity_limit') {
+      return {
+        ok: false,
+        kind: 'quantity_limit',
+        reason: state.message,
       };
     }
 

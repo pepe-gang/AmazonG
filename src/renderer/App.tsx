@@ -35,6 +35,7 @@ import {
   DollarIcon,
   InfoIcon,
   PlayIcon,
+  RefreshIcon,
   ShoppingIcon,
   StopIcon,
 } from './components/icons.js';
@@ -226,6 +227,12 @@ function MainShell({ status }: { status: RendererStatus }) {
   const [appVersion, setAppVersion] = useState<string>('');
   const [updateInfo, setUpdateInfo] = useState<{ latest: string; downloadUrl: string | null } | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  // Manual "Check for update" header button state. Distinct from the
+  // 6-hour background poll so the user can force a fresh check (e.g.
+  // right after a release was cut) without waiting for the timer.
+  // 'idle' / 'checking' = no inline message. 'up_to_date' / 'failed'
+  // = transient flash next to the button (cleared 3s later).
+  const [manualCheck, setManualCheck] = useState<'idle' | 'checking' | 'up_to_date' | 'failed'>('idle');
   useEffect(() => {
     void window.autog.appVersion().then(setAppVersion);
     // Check for updates on mount + every 6 hours
@@ -240,6 +247,27 @@ function MainShell({ status }: { status: RendererStatus }) {
     const t = setInterval(check, 6 * 60 * 60 * 1000);
     return () => clearInterval(t);
   }, []);
+
+  const checkForUpdateNow = async () => {
+    if (manualCheck === 'checking') return;
+    setManualCheck('checking');
+    try {
+      const r = await window.autog.versionCheck();
+      if (r.updateAvailable && r.latest) {
+        setUpdateInfo({ latest: r.latest, downloadUrl: r.downloadUrl });
+        // Don't show a transient — the banner will appear and speak for
+        // itself. Reset to idle so the button returns to its normal state.
+        setManualCheck('idle');
+        setUpdateDismissed(false); // re-show the banner if user previously dismissed
+      } else {
+        setManualCheck('up_to_date');
+        setTimeout(() => setManualCheck('idle'), 3_000);
+      }
+    } catch {
+      setManualCheck('failed');
+      setTimeout(() => setManualCheck('idle'), 3_000);
+    }
+  };
   useEffect(() => {
     // Update the dashboard's "Jobs" stat card by listening to the same log
     // stream the worker emits. Cheaper than maintaining a separate counter
@@ -319,6 +347,27 @@ function MainShell({ status }: { status: RendererStatus }) {
         <span className="font-medium text-sm">AmazonG</span>
         {appVersion && (
           <span className="text-xs text-muted-foreground">v{appVersion}</span>
+        )}
+        {appVersion && (
+          <button
+            type="button"
+            onClick={() => void checkForUpdateNow()}
+            disabled={manualCheck === 'checking'}
+            title="Check for a newer AmazonG version"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-white/[0.06] transition-colors disabled:opacity-60"
+          >
+            <RefreshIcon spinning={manualCheck === 'checking'} />
+            <span>
+              {manualCheck === 'checking'
+                ? 'Checking…'
+                : manualCheck === 'up_to_date'
+                  ? 'Up to date'
+                  : manualCheck === 'failed'
+                    ? 'Check failed'
+                    : 'Check for update'}
+            </span>
+          </button>
         )}
 
         <div
