@@ -22,6 +22,7 @@ export function parseAmazonProduct(doc: Document, url: string): ProductInfo {
   const shipsToAddress = findShipsToAddress(doc);
   const isPrime = findIsPrime(doc);
   const hasBuyNow = findHasBuyNow(doc);
+  const hasAddToCart = findHasAddToCart(doc);
   const buyBlocker = findBuyBlocker(doc);
 
   return {
@@ -36,6 +37,7 @@ export function parseAmazonProduct(doc: Document, url: string): ProductInfo {
     shipsToAddress,
     isPrime,
     hasBuyNow,
+    hasAddToCart,
     buyBlocker,
   };
 }
@@ -292,5 +294,26 @@ export function findHasBuyNow(doc: Document): boolean | null {
   // blocking the purchase (variation not picked, sold out, region-restricted).
   if (doc.querySelector('#productTitle')) return false;
 
+  return null;
+}
+
+/**
+ * Add-to-Cart fallback detector. Some PDPs (Echo Dot, certain Prime
+ * exclusives) hide Buy Now and only expose Add to Cart — see
+ * fixtures/echo-dot-no-buy-now. We treat those as buyable via the
+ * cart route. Mirrors findHasBuyNow's visibility/disabled checks so a
+ * cart button that's there but greyed out doesn't false-positive.
+ */
+export function findHasAddToCart(doc: Document): boolean | null {
+  const candidates = doc.querySelectorAll(
+    '#add-to-cart-button, input[name="submit.add-to-cart"]',
+  );
+  for (const el of candidates) {
+    if (isHidden(el)) continue;
+    if (el.hasAttribute('disabled')) continue;
+    if (el.getAttribute('aria-disabled') === 'true') continue;
+    return true;
+  }
+  if (doc.querySelector('#productTitle')) return false;
   return null;
 }

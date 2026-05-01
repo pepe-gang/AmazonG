@@ -15,6 +15,7 @@ function info(overrides: Partial<ProductInfo> = {}): ProductInfo {
     shipsToAddress: true,
     isPrime: true,
     hasBuyNow: true,
+    hasAddToCart: true,
     buyBlocker: null,
     ...overrides,
   };
@@ -107,7 +108,11 @@ describe('verifyProductDetailed', () => {
 
   it('reports quantity_limit before running any other check', () => {
     const report = verifyProductDetailed(
-      info({ buyBlocker: 'Quantity limit met for this seller.', hasBuyNow: false }),
+      info({
+        buyBlocker: 'Quantity limit met for this seller.',
+        hasBuyNow: false,
+        hasAddToCart: false,
+      }),
       defaults,
     );
     expect(report.ok).toBe(false);

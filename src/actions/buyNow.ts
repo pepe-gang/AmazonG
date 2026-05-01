@@ -101,14 +101,15 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
   try {
     step('step.buy.start', { dryRun: opts.dryRun, productUrl: page.url() });
 
-    // 1. Confirm the page is on a product page with a Buy Now button.
-    //    scrapeProduct already loaded + hydrated the page; just verify the
-    //    button is still there before clicking.
-    try {
-      await page.waitForSelector('#buy-now-button', { state: 'visible', timeout: 10_000 });
-    } catch (err) {
-      return fail('buy_click', 'buy-now button never appeared', String(err));
+    // 1. Pick the buy path. Buy Now is preferred (one click → /spc), but
+    //    some PDPs (Echo Dot and other Prime exclusives) hide it entirely
+    //    and only surface Add to Cart. Detect what's actually clickable;
+    //    if neither is there after the timeout, fail fast.
+    const path = await detectBuyPath(page);
+    if (path === 'none') {
+      return fail('buy_click', 'neither buy-now nor add-to-cart button appeared');
     }
+    step('step.buy.path', { path });
 
     // 1.5. Set quantity to the highest numeric option in the #quantity
     //      dropdown (skipping "10+" / custom-input entries). Mirrors old
@@ -130,12 +131,23 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       step('step.buy.quantity.skip', { reason: qty.reason });
     }
 
-    // 2. Click Buy Now.
-    step('step.buy.click', { button: 'buy-now' });
-    try {
-      await page.locator('#buy-now-button').first().click({ timeout: 10_000 });
-    } catch (err) {
-      return fail('buy_click', 'failed to click Buy Now', String(err));
+    // 2. Click the chosen button + transition to /spc. Buy Now is the
+    //    one-click path (waitForCheckout below handles any address /
+    //    payment interstitial). Add to Cart routes us through the cart
+    //    page → Proceed to Checkout, which converges on the same /spc.
+    if (path === 'buy-now') {
+      step('step.buy.click', { button: 'buy-now' });
+      try {
+        await page.locator('#buy-now-button').first().click({ timeout: 10_000 });
+      } catch (err) {
+        return fail('buy_click', 'failed to click Buy Now', String(err));
+      }
+    } else {
+      step('step.buy.click', { button: 'add-to-cart' });
+      const cartFallback = await addToCartThenCheckout(page, step, warn);
+      if (!cartFallback.ok) {
+        return fail('buy_click', cartFallback.reason, cartFallback.detail);
+      }
     }
 
     // 3. Wait for /spc — may show "Deliver to this address" interstitial
@@ -370,6 +382,109 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
 /* ============================================================
    Sub-steps
    ============================================================ */
+
+/**
+ * Decide whether to use Buy Now or fall back to Add to Cart on the
+ * currently-loaded PDP. Polls up to 10s — Amazon hydrates the buy box
+ * asynchronously, so a brief wait avoids racing the parser. Returns
+ * `'buy-now'` when both are available (one-click path is preferred),
+ * `'add-to-cart'` when only the cart button is clickable, `'none'`
+ * when neither shows up in time.
+ */
+async function detectBuyPath(page: Page): Promise<'buy-now' | 'add-to-cart' | 'none'> {
+  // Race a Buy Now visible-wait against an Add-to-Cart visible-wait.
+  // Whichever resolves first wins; both rejecting → 'none'.
+  const buy = page
+    .waitForSelector('#buy-now-button', { state: 'visible', timeout: 10_000 })
+    .then(() => 'buy-now' as const)
+    .catch(() => null);
+  const cart = page
+    .waitForSelector(
+      '#add-to-cart-button, input[name="submit.add-to-cart"]',
+      { state: 'visible', timeout: 10_000 },
+    )
+    .then(() => 'add-to-cart' as const)
+    .catch(() => null);
+  const winner = await Promise.race([buy, cart]);
+  if (winner) return winner;
+  // Race lost — settle both to surface the slower of the two if it
+  // arrives just after the race resolved with null.
+  const [b, c] = await Promise.all([buy, cart]);
+  return b ?? c ?? 'none';
+}
+
+const ATC_CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
+
+const ATC_PROCEED_SELECTORS = [
+  'input[name="proceedToRetailCheckout"]',
+  '#sc-buy-box-ptc-button input',
+  '#sc-buy-box-ptc-button span input',
+];
+
+/**
+ * Add-to-Cart fallback for PDPs that hide Buy Now (Echo Dot et al.).
+ * Click ATC → dismiss any AppleCare/warranty modal → navigate to the
+ * cart page → click Proceed to Checkout. Caller's existing
+ * `waitForCheckout()` then handles the /spc landing exactly the same
+ * as the Buy Now path, so the rest of the flow (price/address/cashback/
+ * place-order) is unchanged.
+ *
+ * Failures are surfaced through the `fail('buy_click', ...)` channel
+ * since this whole step substitutes for the Buy Now click.
+ */
+async function addToCartThenCheckout(
+  page: Page,
+  step: StepEmitter,
+  warn: StepEmitter,
+): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }> {
+  try {
+    await page
+      .locator('#add-to-cart-button, input[name="submit.add-to-cart"]')
+      .first()
+      .click({ timeout: 10_000 });
+  } catch (err) {
+    return { ok: false, reason: 'failed to click Add to Cart', detail: String(err) };
+  }
+
+  // AppleCare / protection-plan modal — common on tech items. Same
+  // selectors the buyWithFillers loop uses. 2s window: if no modal
+  // appears we assume the add committed without one.
+  await page
+    .locator('#attachSiNoCoverage input.a-button-input, .warranty-twister-no-thanks-text')
+    .first()
+    .click({ timeout: 2_000 })
+    .catch(() => undefined);
+
+  // Let Amazon's POST settle so the cart navigation doesn't race the
+  // in-flight add. Same 8s cap buyWithFillers uses.
+  await page.waitForLoadState('domcontentloaded', { timeout: 8_000 }).catch(() => undefined);
+
+  try {
+    await page.goto(ATC_CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  } catch (err) {
+    return { ok: false, reason: 'failed to load cart page', detail: String(err) };
+  }
+
+  let clicked = false;
+  for (const sel of ATC_PROCEED_SELECTORS) {
+    const ok = await page
+      .locator(sel)
+      .first()
+      .click({ timeout: 8_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (ok) {
+      clicked = true;
+      step('step.buy.atc.proceed', { selector: sel });
+      break;
+    }
+  }
+  if (!clicked) {
+    warn('step.buy.atc.proceed.notfound', { url: page.url() });
+    return { ok: false, reason: 'Proceed to Checkout button not found on cart page' };
+  }
+  return { ok: true };
+}
 
 export type CheckoutReadyResult =
   | { ok: true; detected: string }

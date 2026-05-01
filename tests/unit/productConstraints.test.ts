@@ -18,6 +18,7 @@ function info(overrides: Partial<ProductInfo> = {}): ProductInfo {
     shipsToAddress: true,
     isPrime: true,
     hasBuyNow: true,
+    hasAddToCart: true,
     buyBlocker: null,
     ...overrides,
   };
@@ -156,15 +157,30 @@ describe('checkProductConstraints', () => {
     expect(r).toEqual({ ok: true });
   });
 
-  it('rejects when Buy Now is missing and requireBuyNow', () => {
-    const r = checkProductConstraints(info({ hasBuyNow: false }), DEFAULT);
+  it('rejects when both Buy Now and Add to Cart are missing and requireBuyNow', () => {
+    const r = checkProductConstraints(
+      info({ hasBuyNow: false, hasAddToCart: false }),
+      DEFAULT,
+    );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('no_buy_now');
   });
 
+  it('accepts Add to Cart as a fallback when Buy Now is missing', () => {
+    const r = checkProductConstraints(
+      info({ hasBuyNow: false, hasAddToCart: true }),
+      DEFAULT,
+    );
+    expect(r).toEqual({ ok: true });
+  });
+
   it('reports quantity_limit when blocker text mentions it', () => {
     const r = checkProductConstraints(
-      info({ hasBuyNow: false, buyBlocker: 'Quantity limit met for this seller.' }),
+      info({
+        hasBuyNow: false,
+        hasAddToCart: false,
+        buyBlocker: 'Quantity limit met for this seller.',
+      }),
       DEFAULT,
     );
     expect(r.ok).toBe(false);
@@ -180,6 +196,7 @@ describe('checkProductConstraints', () => {
         inStock: false,
         availabilityText: null,
         hasBuyNow: false,
+        hasAddToCart: false,
         buyBlocker: 'Quantity limit met for this seller.',
       }),
       DEFAULT,
@@ -190,7 +207,11 @@ describe('checkProductConstraints', () => {
 
   it('uses buyBlocker as detail for generic no_buy_now', () => {
     const r = checkProductConstraints(
-      info({ hasBuyNow: false, buyBlocker: 'Please choose a size before continuing.' }),
+      info({
+        hasBuyNow: false,
+        hasAddToCart: false,
+        buyBlocker: 'Please choose a size before continuing.',
+      }),
       DEFAULT,
     );
     expect(r.ok).toBe(false);

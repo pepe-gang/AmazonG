@@ -256,25 +256,34 @@ export function verifyProductDetailed(
     steps.push({ name: 'prime', pass: true, skipped: true, observed: '-', expected: 'n/a' });
   }
 
-  // 6. Buy Now available
+  // 6. Buyability — accept either a visible Buy Now button OR a visible
+  //    Add to Cart button. Some PDPs (Echo Dot, certain Prime exclusives)
+  //    hide Buy Now entirely; buyNow() routes those through a cart-then-
+  //    checkout fallback and reaches the same /spc page in the end.
   if (c.requireBuyNow) {
-    if (info.hasBuyNow === false) {
+    const buyOk = info.hasBuyNow !== false; // true OR null (indeterminate) → ok
+    const cartOk = info.hasAddToCart !== false;
+    if (!buyOk && !cartOk) {
       const step: CheckStep = {
         name: 'buyNow',
         pass: false,
-        observed: blocker ?? 'no buy-now button',
-        expected: 'buy-now button',
+        observed: blocker ?? 'no buy-now or add-to-cart button',
+        expected: 'buy-now or add-to-cart button',
         reason: 'no_buy_now',
-        detail: blocker ?? 'Buy Now button is not available (variation required or unavailable)',
+        detail: blocker ?? 'Neither Buy Now nor Add to Cart is available (variation required or unavailable)',
       };
       steps.push(step);
       return { ok: false, reason: step.reason, detail: step.detail, steps };
     }
+    const observedPath =
+      info.hasBuyNow === true ? 'buy-now button ready'
+        : info.hasAddToCart === true ? 'add-to-cart fallback'
+        : 'indeterminate (assumed ok)';
     steps.push({
       name: 'buyNow',
       pass: true,
-      observed: info.hasBuyNow === true ? 'buy-now button ready' : 'indeterminate (assumed ok)',
-      expected: 'buy-now button',
+      observed: observedPath,
+      expected: 'buy-now or add-to-cart button',
     });
   } else {
     steps.push({ name: 'buyNow', pass: true, skipped: true, observed: '-', expected: 'n/a' });

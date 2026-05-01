@@ -28,11 +28,16 @@ export async function scrapeProduct(page: Page, url: string): Promise<ProductInf
   if (runtime) {
     if (runtime.isPrime !== null) info.isPrime = runtime.isPrime;
     if (runtime.hasBuyNow !== null) info.hasBuyNow = runtime.hasBuyNow;
+    if (runtime.hasAddToCart !== null) info.hasAddToCart = runtime.hasAddToCart;
   }
   return info;
 }
 
-type RuntimeChecks = { isPrime: boolean | null; hasBuyNow: boolean | null };
+type RuntimeChecks = {
+  isPrime: boolean | null;
+  hasBuyNow: boolean | null;
+  hasAddToCart: boolean | null;
+};
 
 async function runtimeVisibilityChecks(page: Page): Promise<RuntimeChecks> {
   return page.evaluate(() => {
@@ -91,7 +96,28 @@ async function runtimeVisibilityChecks(page: Page): Promise<RuntimeChecks> {
       hasBuyNow = false;
     }
 
-    return { isPrime, hasBuyNow };
+    // hasAddToCart — visible & enabled Add to Cart button. Same
+    // visibility/disabled gating as Buy Now so a greyed-out button
+    // doesn't read as a usable fallback.
+    let hasAddToCart: boolean | null = null;
+    const cartCandidates = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '#add-to-cart-button, input[name="submit.add-to-cart"]',
+      ),
+    );
+    const cartVisible = cartCandidates.some((el) => {
+      if (!isVisible(el)) return false;
+      if (el.hasAttribute('disabled')) return false;
+      if (el.getAttribute('aria-disabled') === 'true') return false;
+      return true;
+    });
+    if (cartVisible) {
+      hasAddToCart = true;
+    } else if (hasProductUi) {
+      hasAddToCart = false;
+    }
+
+    return { isPrime, hasBuyNow, hasAddToCart };
   });
 }
 

@@ -90,6 +90,11 @@ export type ProductInfo = {
   shipsToAddress: boolean | null;
   isPrime: boolean | null;
   hasBuyNow: boolean | null;
+  /** Add-to-Cart fallback. Some product pages (Echo Dot, certain Prime
+   *  exclusives) hide Buy Now entirely and surface only Add to Cart.
+   *  Set true when the page exposes a clickable Add to Cart, false when
+   *  we have a product UI but no add-to-cart, null when indeterminate. */
+  hasAddToCart: boolean | null;
   buyBlocker: string | null;
 };
 
