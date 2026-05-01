@@ -23,6 +23,7 @@ export function parseAmazonProduct(doc: Document, url: string): ProductInfo {
   const isPrime = findIsPrime(doc);
   const hasBuyNow = findHasBuyNow(doc);
   const hasAddToCart = findHasAddToCart(doc);
+  const isSignedIn = findIsSignedIn(doc);
   const buyBlocker = findBuyBlocker(doc);
 
   return {
@@ -38,6 +39,7 @@ export function parseAmazonProduct(doc: Document, url: string): ProductInfo {
     isPrime,
     hasBuyNow,
     hasAddToCart,
+    isSignedIn,
     buyBlocker,
   };
 }
@@ -316,4 +318,20 @@ export function findHasAddToCart(doc: Document): boolean | null {
   }
   if (doc.querySelector('#productTitle')) return false;
   return null;
+}
+
+/**
+ * Read the account-area nav line to decide whether the session is signed
+ * in. Amazon renders "Hello, sign in" for guests and "Hello, <name>"
+ * once the at-main cookie is recognized — same selector loginAmazon's
+ * probeSignedInState uses on amazon.com home. Returns null when the nav
+ * isn't on this page (rare error pages strip the global header).
+ */
+export function findIsSignedIn(doc: Document): boolean | null {
+  const el = doc.querySelector('#nav-link-accountList-nav-line-1');
+  if (!el) return null;
+  const txt = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+  if (!txt) return null;
+  if (/^hello,?\s*sign in$/i.test(txt)) return false;
+  return true;
 }

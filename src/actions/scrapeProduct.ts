@@ -29,6 +29,7 @@ export async function scrapeProduct(page: Page, url: string): Promise<ProductInf
     if (runtime.isPrime !== null) info.isPrime = runtime.isPrime;
     if (runtime.hasBuyNow !== null) info.hasBuyNow = runtime.hasBuyNow;
     if (runtime.hasAddToCart !== null) info.hasAddToCart = runtime.hasAddToCart;
+    if (runtime.isSignedIn !== null) info.isSignedIn = runtime.isSignedIn;
   }
   return info;
 }
@@ -37,6 +38,7 @@ type RuntimeChecks = {
   isPrime: boolean | null;
   hasBuyNow: boolean | null;
   hasAddToCart: boolean | null;
+  isSignedIn: boolean | null;
 };
 
 async function runtimeVisibilityChecks(page: Page): Promise<RuntimeChecks> {
@@ -117,7 +119,17 @@ async function runtimeVisibilityChecks(page: Page): Promise<RuntimeChecks> {
       hasAddToCart = false;
     }
 
-    return { isPrime, hasBuyNow, hasAddToCart };
+    // isSignedIn — read the account-area greeting. "Hello, sign in" =
+    // signed out; anything else (including "Hello, <name>") = signed in.
+    // Null when the global header isn't on this page.
+    let isSignedIn: boolean | null = null;
+    const navAccount = document.querySelector('#nav-link-accountList-nav-line-1');
+    if (navAccount) {
+      const txt = (navAccount.textContent ?? '').replace(/\s+/g, ' ').trim();
+      if (txt) isSignedIn = !/^hello,?\s*sign in$/i.test(txt);
+    }
+
+    return { isPrime, hasBuyNow, hasAddToCart, isSignedIn };
   });
 }
 

@@ -16,6 +16,7 @@ function info(overrides: Partial<ProductInfo> = {}): ProductInfo {
     isPrime: true,
     hasBuyNow: true,
     hasAddToCart: true,
+    isSignedIn: true,
     buyBlocker: null,
     ...overrides,
   };
@@ -35,8 +36,21 @@ describe('verifyProductDetailed', () => {
     const report = verifyProductDetailed(info(), defaults);
     expect(report.ok).toBe(true);
     const names = report.steps.filter((s) => !s.skipped).map((s) => s.name);
-    expect(names).toEqual(['inStock', 'condition', 'shipping', 'buyNow']);
+    expect(names).toEqual(['signedIn', 'inStock', 'condition', 'shipping', 'buyNow']);
     for (const s of report.steps.filter((x) => !x.skipped)) expect(s.pass).toBe(true);
+  });
+
+  it('fails fast with signed_out when isSignedIn is false, even if downstream checks would also fail', () => {
+    // Signed-out sessions cause Amazon to drop the Prime badge AND Buy Now
+    // button. We must surface "signed out" as the cause, not "not_prime"
+    // or "no_buy_now" — those are downstream symptoms.
+    const report = verifyProductDetailed(
+      info({ isSignedIn: false, isPrime: false, hasBuyNow: false, hasAddToCart: false }),
+      { ...defaults, requirePrime: true },
+    );
+    expect(report.ok).toBe(false);
+    expect(report.reason).toBe('signed_out');
+    expect(report.steps.map((s) => s.name)).toEqual(['signedIn']);
   });
 
   it('marks price as skipped when no maxPrice set', () => {
@@ -52,7 +66,8 @@ describe('verifyProductDetailed', () => {
     expect(report.ok).toBe(false);
     expect(report.reason).toBe('oos');
     // No 'price' step should appear — we stopped at the inStock failure.
-    expect(report.steps.map((s) => s.name)).toEqual(['inStock']);
+    // signedIn always runs first as a precondition.
+    expect(report.steps.map((s) => s.name)).toEqual(['signedIn', 'inStock']);
   });
 
   it('allows price up to $1 over the cap (Amazon .99 pricing pattern)', () => {
@@ -117,7 +132,9 @@ describe('verifyProductDetailed', () => {
     );
     expect(report.ok).toBe(false);
     expect(report.reason).toBe('quantity_limit');
-    expect(report.steps.map((s) => s.name)).toEqual(['buyNow']);
+    // signedIn precedes the quantity-limit short-circuit; quantity_limit
+    // is reported under buyNow as before.
+    expect(report.steps.map((s) => s.name)).toEqual(['signedIn', 'buyNow']);
   });
 
   it('logs a prime step when requirePrime is on', () => {

@@ -10,6 +10,7 @@ export type Constraints = {
 };
 
 export type VerifyReason =
+  | 'signed_out'
   | 'oos'
   | 'price_too_high'
   | 'price_unknown'
@@ -25,6 +26,7 @@ export type VerifyResult =
   | { ok: false; reason: VerifyReason; detail: string };
 
 export type CheckName =
+  | 'signedIn'
   | 'inStock'
   | 'price'
   | 'condition'
@@ -84,6 +86,32 @@ export function verifyProductDetailed(
   c: Constraints,
 ): VerifyReport {
   const steps: CheckStep[] = [];
+
+  // 0. Sign-in gate. Runs before anything else: when the session is
+  //    signed out, Amazon hides the Prime badge AND the Buy Now button
+  //    regardless of the product's actual eligibility, so downstream
+  //    checks would surface misleading reasons (not_prime / no_buy_now).
+  //    A signed-in account is the precondition for every other constraint.
+  //    Null = indeterminate (nav not rendered) → don't fail; let the
+  //    downstream checks run.
+  if (info.isSignedIn === false) {
+    const step: CheckStep = {
+      name: 'signedIn',
+      pass: false,
+      observed: 'header reads "Hello, sign in"',
+      expected: 'signed in to amazon.com',
+      reason: 'signed_out',
+      detail: 'Amazon account is signed out — re-login from the Accounts tab',
+    };
+    steps.push(step);
+    return { ok: false, reason: 'signed_out', detail: step.detail!, steps };
+  }
+  steps.push({
+    name: 'signedIn',
+    pass: true,
+    observed: info.isSignedIn === true ? 'signed in' : 'indeterminate (assumed ok)',
+    expected: 'signed in to amazon.com',
+  });
 
   // Special-case: a known "quantity limit met" blocker surfaces a specific
   // reason and short-circuits before every other check — the item isn't oos,

@@ -19,6 +19,7 @@ function info(overrides: Partial<ProductInfo> = {}): ProductInfo {
     isPrime: true,
     hasBuyNow: true,
     hasAddToCart: true,
+    isSignedIn: true,
     buyBlocker: null,
     ...overrides,
   };

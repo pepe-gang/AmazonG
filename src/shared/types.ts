@@ -95,6 +95,13 @@ export type ProductInfo = {
    *  Set true when the page exposes a clickable Add to Cart, false when
    *  we have a product UI but no add-to-cart, null when indeterminate. */
   hasAddToCart: boolean | null;
+  /** Whether the Amazon header reads "Hello, <name>" (signed in) versus
+   *  "Hello, sign in" (signed out). Critical to check before every other
+   *  buy-box constraint — when signed out, Amazon hides the Prime badge
+   *  and Buy Now button regardless of the product's actual eligibility,
+   *  so downstream checks would surface misleading reasons like
+   *  not_prime / no_buy_now. Null when indeterminate (nav not rendered). */
+  isSignedIn: boolean | null;
   buyBlocker: string | null;
 };
 
