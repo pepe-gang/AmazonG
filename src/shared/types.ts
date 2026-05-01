@@ -132,6 +132,15 @@ export type JobStatusReport = {
     purchasedCount?: number;
     orderId?: string | null;
     error?: string | null;
+    /**
+     * Structured failure category from BuyResult.stage (e.g.
+     * 'cashback_gate', 'item_unavailable', 'place_order'). Forwarded so
+     * BG can route follow-up actions like auto-rebuy with fillers on
+     * cashback_gate failures without text-matching the human-readable
+     * error string. Omitted on success / dry-run / pre-buy verify
+     * failures (no buy stage to report).
+     */
+    stage?: string | null;
     placedAt?: string | null;
     placedCashbackPct?: number | null;
     placedPrice?: string | null;

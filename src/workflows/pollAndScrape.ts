@@ -620,6 +620,11 @@ type ProfileResult = {
   /** Quantity actually checked out (max numeric option from /spc dropdown). */
   placedQuantity: number;
   error: string | null;
+  /** Failure stage from BuyResult.stage (null on success, dry run, or
+   *  pre-buy verify-stage failures). Propagated to BG so the server can
+   *  decide on follow-up actions like auto-rebuy on cashback_gate
+   *  without text-matching the reason string. */
+  stage: string | null;
   dryRun: boolean;
   /** Filler-only order ids from this profile's Place Order fan-out.
    *  Empty on single-mode / dry-run / failure. Snapshot at buy time —
@@ -1061,6 +1066,10 @@ async function handleJob(
     placedCashbackPct: r.placedCashbackPct,
     placedAt: r.placedAt,
     error: r.error,
+    // Structured failure category (e.g. 'cashback_gate'). Forwarded so
+    // BG can route follow-ups (auto-rebuy with fillers on cashback_gate)
+    // without text-matching the human-readable error string.
+    ...(r.stage ? { stage: r.stage } : {}),
     // Audit snapshot — only attach when this profile ran in filler mode
     // AND produced filler orders. BG persists on AutoBuyPurchase for
     // post-hoc reconciliation (see PurchaseReport.fillerOrderIds docs).
@@ -2024,7 +2033,13 @@ async function runForProfile(
         })
         .catch(() => undefined);
       await closeAndForgetSession(sessions, profile);
-      return needsHuman ? actionRequired(profile, error) : failed(profile, error);
+      // buy.stage is the structured failure category (e.g. 'cashback_gate',
+      // 'item_unavailable'). Forwarding it lets BG decide on follow-ups —
+      // notably auto-rebuy with fillers when a single-mode buy aborts at
+      // the cashback gate — without text-matching the reason string.
+      return needsHuman
+        ? actionRequired(profile, error, buy.stage)
+        : failed(profile, error, buy.stage);
     }
 
     if (session && deps.snapshotOnFailure) await discardTracing(session.context);
@@ -2100,6 +2115,7 @@ async function runForProfile(
       placedAt,
       placedQuantity: buy.quantity,
       error: null,
+      stage: null,
       dryRun: buy.dryRun,
       fillerOrderIds,
     };
@@ -2142,7 +2158,7 @@ async function maybeSnapshot(
   }
 }
 
-function failed(email: string, error: string): ProfileResult {
+function failed(email: string, error: string, stage: string | null = null): ProfileResult {
   return {
     email,
     status: 'failed',
@@ -2152,6 +2168,7 @@ function failed(email: string, error: string): ProfileResult {
     placedAt: null,
     placedQuantity: 0,
     error,
+    stage,
     dryRun: false,
     fillerOrderIds: [],
   };
@@ -2166,7 +2183,7 @@ function failed(email: string, error: string): ProfileResult {
  * the table, so callers should phrase it as instructions ("Account
  * signed out — re-login from Accounts tab").
  */
-function actionRequired(email: string, error: string): ProfileResult {
+function actionRequired(email: string, error: string, stage: string | null = null): ProfileResult {
   return {
     email,
     status: 'action_required',
@@ -2176,6 +2193,7 @@ function actionRequired(email: string, error: string): ProfileResult {
     placedAt: null,
     placedQuantity: 0,
     error,
+    stage,
     dryRun: false,
     fillerOrderIds: [],
   };
