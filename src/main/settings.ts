@@ -36,12 +36,14 @@ const DEFAULTS: Settings = {
   autoEnqueueLastRunAt: null,
   // How many Amazon accounts run a single deal in parallel. Single-mode
   // buys are light enough that 3 accounts at once is the historical
-  // default. Filler-mode carts are heavier and Amazon is touchier on
-  // rapid-fire filler checkouts, so default 1 (one account at a time).
-  // Customers with thermal headroom can dial these up; customers with
-  // older / fanless laptops can dial them down to 1 to stay quiet.
+  // default. Filler-mode used to default to 1 because the click-driven
+  // ATC pipeline was heavy (a tab + PDP render + JS execution per
+  // filler item × 8 fillers); now that adds run via direct HTTP POST
+  // (no tab, no render), the per-buy CPU/GPU footprint is comparable
+  // to single-mode and 3 concurrent filler buys runs cleanly.
+  // Customers with older / fanless laptops can dial these down to 1.
   maxConcurrentSingleBuys: 3,
-  maxConcurrentFillerBuys: 1,
+  maxConcurrentFillerBuys: 3,
   // Parallel tabs inside ONE filler-mode buy. Each tab fires its own
   // Add-to-Cart POSTs against Amazon's cart API; they share cookies
   // + cart server-side so all adds land on the same order. 4 has

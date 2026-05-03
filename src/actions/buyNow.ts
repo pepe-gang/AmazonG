@@ -554,19 +554,45 @@ export async function waitForCheckout(
         //     items" page. Fires when Amazon enforces a purchase limit the
         //     account has hit (Echo Dot bulk caps, etc.). The Continue
         //     button is a no-op here — clicking advances nothing — so we
-        //     must catch this BEFORE the 'updates' handler routes us into
-        //     a retry loop that times out into "unexpected error in buyNow
-        //     flow". Stable selector: `[data-messageId*="Limit" i]`
-        //     (covers QuantityLimitsCVMessage and any sibling rename).
+        //     must catch this BEFORE the 'place' / 'updates' handlers
+        //     route us into a retry loop that times out into "unexpected
+        //     error in buyNow flow", or — worse for filler mode — into
+        //     the cashback gate (which then fails because the limit page
+        //     has no "N% back" panel for the target row, surfacing as
+        //     `stage: 'cashback_gate'` and triggering the FILLER_MAX_ATTEMPTS
+        //     retry loop in pollAndScrape — exactly the wasted-time
+        //     scenario this catch is here to prevent).
+        //
+        // Two-pronged detection:
+        //   (a) Stable Amazon selector `[data-messageId*="Limit" i]`
+        //       (covers QuantityLimitsCVMessage and any sibling rename).
+        //   (b) Body-text fallback for the user-visible string. Amazon
+        //       sometimes ships the message without that data attribute
+        //       (or with a Place Order button still visible elsewhere),
+        //       in which case (a) misses and we'd fall through to the
+        //       wasted retry path described above. The regex matches the
+        //       canonical "you've reached the purchase limit" wording
+        //       across `'`/`'` apostrophe variants.
         const limitEl = document.querySelector(
           '[data-messageId*="Limit" i], [data-messageid*="Limit" i]',
         ) as HTMLElement | null;
+        const PURCHASE_LIMIT_RE =
+          /you['’]ve\s+reached\s+the\s+purchase\s+limit\s+for\s+this\s+item/i;
         if (limitEl) {
           const text = (limitEl.textContent ?? '').replace(/\s+/g, ' ').trim();
           return {
             kind: 'quantity_limit' as const,
             message:
               text ||
+              "Sorry, you've reached the purchase limit for this item. Please remove the item to continue.",
+          };
+        }
+        if (PURCHASE_LIMIT_RE.test(body)) {
+          const m = body.match(/sorry,?\s+you['’]ve\s+reached[^.]*\.?/i);
+          return {
+            kind: 'quantity_limit' as const,
+            message:
+              m?.[0]?.trim() ||
               "Sorry, you've reached the purchase limit for this item. Please remove the item to continue.",
           };
         }

@@ -88,7 +88,7 @@ function ParallelBuysPanel() {
   // historical hardcoded values until the user clicks +/-, which
   // persists the field for real.
   const single = settings.maxConcurrentSingleBuys ?? 3;
-  const filler = settings.maxConcurrentFillerBuys ?? 1;
+  const filler = settings.maxConcurrentFillerBuys ?? 3;
   const fillerTabs = settings.fillerParallelTabs ?? 4;
   const setSingle = (v: number) => {
     const clamped = Math.max(SINGLE_MIN, Math.min(SINGLE_MAX, Math.round(v)));

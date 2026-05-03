@@ -116,7 +116,7 @@ const MAX_CONCURRENT_FILLER_BUYS = 3;
  *  upgrading from a version where these didn't exist). Loadsettings
  *  itself merges defaults, so this is belt-and-suspenders. */
 const DEFAULT_CONCURRENT_SINGLE_BUYS = 3;
-const DEFAULT_CONCURRENT_FILLER_BUYS = 1;
+const DEFAULT_CONCURRENT_FILLER_BUYS = 3;
 
 /**
  * How many times we re-run the whole filler buy (clear cart → Buy Now
