@@ -742,8 +742,15 @@ async function startWorkerNow(): Promise<void> {
       };
     },
     listEligibleProfiles: async () => {
+      // Returns ALL signed-in profiles, including disabled ones. Disabling
+      // an account blocks new buys but lets verify and fetch_tracking
+      // continue running for that account's in-flight orders (otherwise a
+      // mid-day disable would orphan every awaiting_verification /
+      // pending_tracking row for that account). The buy-vs-lifecycle
+      // split is enforced in handleJob: buy-phase fans out only to
+      // `enabled` accounts, lifecycle phases use this list as-is.
       const list = await loadProfiles();
-      return list.filter((p) => p.enabled && p.loggedIn);
+      return list.filter((p) => p.loggedIn);
     },
     // Lets the worker see Chromium contexts opened elsewhere in the
     // app (currently just the "View Order" click). Without this, a

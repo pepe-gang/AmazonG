@@ -667,7 +667,7 @@ export function startWorker(deps: Deps): WorkerHandle {
         if (eligible.length === 0) {
           if (Date.now() - lastNoProfilesWarn > NO_PROFILES_WARN_INTERVAL_MS) {
             logger.warn('worker.idle.no_profiles', {
-              note: 'No enabled + signed-in Amazon accounts. Worker is polling but will not claim jobs until at least one account is ready.',
+              note: 'No signed-in Amazon accounts. Worker is polling but will not claim jobs until at least one account is signed in. (Disabled-but-signed-in accounts can still process verify/tracking; buys require enabled.)',
             });
             lastNoProfilesWarn = Date.now();
           }
@@ -825,6 +825,12 @@ async function handleJob(
     await handleFetchTrackingJob(deps, sessions, job, cid, eligible);
     return;
   }
+  // Buy / rebuy phase — disabled accounts are excluded here. `eligible`
+  // arrives carrying every signed-in account (including disabled ones,
+  // because verify/tracking phases above need them); we filter down to
+  // only `enabled` accounts before fan-out so disabling correctly
+  // blocks new buys while leaving in-flight verify/tracking jobs intact.
+  //
   // Rebuy path: when BG scopes a buy-phase job to a single Amazon account
   // (placedEmail set — e.g. the user clicked Re-buy on a cancelled row),
   // skip fan-out and run only for that account. viaFiller on a buy-phase
@@ -832,16 +838,44 @@ async function handleJob(
   // through the filler flow even if buyWithFillers is off globally.
   if (job.placedEmail) {
     const target = job.placedEmail.toLowerCase();
-    const match = eligible.find((p) => p.email.toLowerCase() === target);
+    const match = eligible.find(
+      (p) => p.email.toLowerCase() === target && p.enabled,
+    );
     if (!match) {
-      const error = `rebuy target ${job.placedEmail} is not an enabled + signed-in Amazon account`;
-      logger.error('job.rebuy.no_profile', { jobId: job.id, target: job.placedEmail }, cid);
+      const signedInButDisabled = eligible.some(
+        (p) => p.email.toLowerCase() === target && !p.enabled,
+      );
+      const error = signedInButDisabled
+        ? `rebuy target ${job.placedEmail} is signed in but disabled — re-enable in the Accounts tab to allow rebuys`
+        : `rebuy target ${job.placedEmail} is not enabled or not signed in`;
+      logger.error('job.rebuy.no_profile', { jobId: job.id, target: job.placedEmail, signedInButDisabled }, cid);
       await deps.bg
         .reportStatus(job.id, { status: 'failed', error })
         .catch(() => undefined);
       return;
     }
     eligible = [match];
+  } else {
+    // Fan-out buy: filter to enabled-only accounts. Disabled accounts that
+    // are signed in stay in the parent `eligible` list for verify/tracking
+    // but are dropped here so they can't take new buys.
+    const beforeFilter = eligible.length;
+    eligible = eligible.filter((p) => p.enabled);
+    if (eligible.length === 0) {
+      const error =
+        beforeFilter === 0
+          ? 'no signed-in Amazon accounts available for this buy'
+          : `no enabled Amazon accounts available for this buy (${beforeFilter} signed-in but all disabled)`;
+      logger.error(
+        'job.buy.no_enabled_profiles',
+        { jobId: job.id, signedInCount: beforeFilter },
+        cid,
+      );
+      await deps.bg
+        .reportStatus(job.id, { status: 'failed', error })
+        .catch(() => undefined);
+      return;
+    }
   }
   // Per-profile filler decision. The returned map lets every downstream
   // step (row create, BG report, runForProfile branch) agree on which
