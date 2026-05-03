@@ -321,65 +321,108 @@ export async function buyWithFillers(
     );
   }
 
-  // 3. Click Buy Now. We do NOT drive the subsequent checkout — we just
-  //    need Amazon's Buy Now POST to commit so the item lands in the
-  //    main cart. Once we see a /gp/buy/ or /spc URL we know the POST
-  //    is done and it's safe to navigate away without losing the item.
-  try {
-    await page
-      .locator('#buy-now-button')
-      .first()
-      .click({ timeout: 10_000 });
-  } catch (err) {
-    return {
-      ok: false,
-      stage: 'buy_now_click',
-      reason: 'failed to click Buy Now',
-      detail: String(err),
-    };
-  }
-  logger.info('step.fillerBuy.buyNow.clicked', {}, cid);
-
-  // Wait for the URL to leave the product page and reach a buy/spc page —
-  // that's our signal the Buy Now POST committed and the item is in cart.
-  try {
-    await page.waitForURL(BUY_NOW_URL_MATCH, { timeout: 20_000 });
-  } catch {
-    return {
-      ok: false,
-      stage: 'buy_now_nav',
-      reason: 'Buy Now did not reach /spc within 20s',
-      detail: `url=${page.url()}`,
-    };
-  }
-  const spcUrl = page.url();
-  logger.info('step.fillerBuy.buyNow.onSpc', { url: spcUrl }, cid);
-
-  // 4. Verify the item actually landed in the shared cart (not just an
-  //    ephemeral buy-now session). We navigate away from /spc — the item
-  //    stays parked in cart as a side effect of the Buy Now POST.
+  // 3. Add target to cart. Two-tier path:
+  //
+  //    1. HTTP-add fast path — same /cart/add-to-cart/ref=... endpoint
+  //       used for fillers, with the strengthened ASIN-in-response check
+  //       (catches phantom commits where Amazon returns a cart page that
+  //       doesn't actually contain our item). The PDP we just loaded
+  //       carries the tokens; the POST commits the item to the server-
+  //       side cart synchronously. Saves ~7-13s by skipping the Buy Now
+  //       click + /spc navigation + separate cart-verify navigation —
+  //       the response body itself proves the target landed.
+  //
+  //    2. Buy Now click fallback — if the HTTP path fails (bot challenge,
+  //       missing form, response missing target ASIN), fall through to
+  //       the original Buy Now click flow. Worst-case behavior matches
+  //       what shipped before this experiment.
+  //
+  //    The cart navigation that's downstream (just before the Proceed-
+  //    to-Checkout click) still runs after fillers are added; it serves
+  //    as belt-and-suspenders verification AND is required for the
+  //    Proceed form to carry the full cart state.
   const targetAsin = parseAsinFromUrl(opts.productUrl);
-  try {
-    await page.goto(CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  } catch (err) {
-    return {
-      ok: false,
-      stage: 'cart_verify',
-      reason: 'failed to load cart page',
-      detail: String(err),
-    };
-  }
+  const httpTarget = await addFillerViaHttp(
+    page,
+    targetAsin ?? parseAsinFromUrl(page.url()) ?? '',
+  );
+  if (httpTarget.kind === 'committed') {
+    logger.info(
+      'step.fillerBuy.target.http.ok',
+      {
+        targetAsin,
+        status: httpTarget.status,
+        tookMs: httpTarget.tookMs,
+      },
+      cid,
+    );
+  } else {
+    logger.info(
+      'step.fillerBuy.target.http.fallback',
+      {
+        targetAsin,
+        reason: httpTarget.reason,
+        ...(httpTarget.status != null ? { status: httpTarget.status } : {}),
+      },
+      cid,
+    );
 
-  const inCart = await hasTargetInCart(page, targetAsin);
-  if (!inCart) {
-    return {
-      ok: false,
-      stage: 'cart_verify',
-      reason: 'target item did not land in cart after Buy Now',
-      detail: `asin=${targetAsin ?? '(unknown)'}`,
-    };
+    // Tier 2 — original Buy Now click flow. Identical to the pre-
+    // experiment behavior. Click Buy Now, wait for /spc URL, navigate
+    // to /cart, verify target landed.
+    try {
+      await page
+        .locator('#buy-now-button')
+        .first()
+        .click({ timeout: 10_000 });
+    } catch (err) {
+      return {
+        ok: false,
+        stage: 'buy_now_click',
+        reason: 'failed to click Buy Now (HTTP add also failed)',
+        detail: String(err),
+      };
+    }
+    logger.info('step.fillerBuy.buyNow.clicked', {}, cid);
+
+    try {
+      await page.waitForURL(BUY_NOW_URL_MATCH, { timeout: 20_000 });
+    } catch {
+      return {
+        ok: false,
+        stage: 'buy_now_nav',
+        reason: 'Buy Now did not reach /spc within 20s',
+        detail: `url=${page.url()}`,
+      };
+    }
+    logger.info('step.fillerBuy.buyNow.onSpc', { url: page.url() }, cid);
+
+    // Cart-verify nav — only needed in fallback path; the HTTP path's
+    // ASIN-in-response check already proved the target landed.
+    try {
+      await page.goto(CART_URL, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30_000,
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        stage: 'cart_verify',
+        reason: 'failed to load cart page',
+        detail: String(err),
+      };
+    }
+    const inCart = await hasTargetInCart(page, targetAsin);
+    if (!inCart) {
+      return {
+        ok: false,
+        stage: 'cart_verify',
+        reason: 'target item did not land in cart after Buy Now',
+        detail: `asin=${targetAsin ?? '(unknown)'}`,
+      };
+    }
+    logger.info('step.fillerBuy.cart.hasTarget', { targetAsin }, cid);
   }
-  logger.info('step.fillerBuy.cart.hasTarget', { targetAsin }, cid);
 
   // 5. Add filler items one-at-a-time on the same tab. Playwright tabs in
   //    the shared BrowserContext all write to the same Amazon cart, so a
@@ -2083,6 +2126,25 @@ async function addFillerViaHttp(page: Page, asin: string): Promise<PostAddResult
     return {
       kind: 'failed',
       reason: 'response_not_cart_shape',
+      status: postRes.status(),
+    };
+  }
+  // Phantom-commit guard: a successful add MUST echo our ASIN back in
+  // the response cart-page HTML. Verified live: 1-of-3 parallel POSTs
+  // returned 200 + cart-shape but the response body did NOT contain the
+  // ASIN we sent — and a follow-up cart inspection confirmed the item
+  // was NOT in the cart. Without this check we'd treat that as a
+  // success, the worker's slot counter would never decrement, and we'd
+  // proceed with one fewer filler than expected. With it, the worker
+  // bails on this ASIN, releases the slot, and tries another one.
+  const escapedAsin = itemAsin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const responseHasAsin = new RegExp(`data-asin=["']${escapedAsin}["']`).test(
+    respText,
+  );
+  if (!responseHasAsin) {
+    return {
+      kind: 'failed',
+      reason: 'response_missing_asin',
       status: postRes.status(),
     };
   }
