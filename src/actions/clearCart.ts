@@ -3,18 +3,13 @@ import { JSDOM } from 'jsdom';
 import { logger } from '../shared/logger.js';
 import { NavigationError } from '../shared/errors.js';
 import { ACTIVE_CART_DELETE_SELECTOR as ACTIVE_CART_DELETE } from '../parsers/amazonCart.js';
+import { HTTP_BROWSERY_HEADERS } from './amazonHttp.js';
 
 const CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
 
 const OVERALL_DEADLINE_MS = 60_000;
 const CLICK_TIMEOUT_MS = 10_000;
 const ROW_DROP_TIMEOUT_MS = 15_000;
-
-const HTTP_BROWSERY_HEADERS: Record<string, string> = {
-  Accept:
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
-};
 
 export type ClearCartResult =
   | { ok: true; wasEmpty: boolean; removed: number }

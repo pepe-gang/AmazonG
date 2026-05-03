@@ -31,6 +31,13 @@ import { isTargetInActiveCart } from '../parsers/amazonCart.js';
 import { parsePrice } from '../parsers/amazonProduct.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import type { ProductInfo } from '../shared/types.js';
+import {
+  CART_ADD_CLIENT_NAME,
+  CART_ADD_URL,
+  CART_RESPONSE_RE_SOURCE,
+  HTTP_BROWSERY_HEADERS,
+  looksLikeCartResponse,
+} from './amazonHttp.js';
 
 type BuyWithFillersOptions = {
   productUrl: string;
@@ -1825,34 +1832,6 @@ async function searchFillerAsinsViaHttp(
   return { kind: 'ok', asins, tookMs: Date.now() - t0 };
 }
 
-/**
- * Headers we set on `context.request.{get,post}` calls so the wire shape
- * looks like a real navigation. Cookies + User-Agent are inherited from
- * the BrowserContext automatically — these fill in the Accept / Lang
- * pair that APIRequestContext doesn't auto-attach.
- */
-const HTTP_BROWSERY_HEADERS: Record<string, string> = {
-  Accept:
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
-};
-
-/**
- * The modern cart-add endpoint Amazon's recommendation/carousel forms
- * POST to. Discovered live: the legacy `/gp/product/handle-buy-box/...`
- * endpoint that the main `<form id="addToCart">` declares as its action
- * is a deprecated 404'er; the click works because Amazon's JS submits
- * via a different mechanism. This endpoint accepts a 5-field body
- * (anti-csrftoken-a2z + asin + offerListingId + quantity + clientName)
- * and returns 200 + cart-page HTML on success.
- *
- * The `ref=` portion is a tracking marker — Amazon doesn't validate it,
- * any string works. Using one of Amazon's own values for natural-looking
- * traffic. Verified end-to-end with three live ASINs.
- */
-const CART_ADD_URL =
-  'https://www.amazon.com/cart/add-to-cart/ref=emc_s_m_5_i_atc_c';
-const CART_ADD_CLIENT_NAME = 'Aplus_BuyableModules_DetailPage';
 
 /**
  * Add one ASIN's product to the cart on `page`.
@@ -2100,10 +2079,7 @@ async function addFillerViaHttp(page: Page, asin: string): Promise<PostAddResult
   } catch {
     respText = '';
   }
-  const looksLikeCart =
-    /sub\s*total|"itemCount"|added\s+to\s+(your\s+)?cart|your\s+(shopping\s+)?cart/i
-      .test(respText);
-  if (!looksLikeCart) {
+  if (!looksLikeCartResponse(respText)) {
     return {
       kind: 'failed',
       reason: 'response_not_cart_shape',
@@ -2133,7 +2109,7 @@ async function addFillerViaHttp(page: Page, asin: string): Promise<PostAddResult
 async function postFillerAddToCart(page: Page): Promise<PostAddResult> {
   return page
     .evaluate(
-      async ({ cartAddUrl, clientName }) => {
+      async ({ cartAddUrl, clientName, cartResponseRe }) => {
         const form = document.getElementById('addToCart') as HTMLFormElement | null;
         if (!form) return { kind: 'failed' as const, reason: 'no_form' };
 
@@ -2188,15 +2164,12 @@ async function postFillerAddToCart(page: Page): Promise<PostAddResult> {
             status: r.status,
           };
         }
-        // Sniff the response. A successful add returns the cart page HTML
-        // (contains "Subtotal" / "Your Cart" / "smart-wagon") or a JSON
-        // cart-update payload (contains "itemCount"). Bot challenges and
-        // 5xx gateways won't carry any of these markers.
+        // Sniff the response. Regex source comes from CART_RESPONSE_RE in
+        // amazonHttp.ts so the in-page check stays in sync with the
+        // Node-side `looksLikeCartResponse(...)` helper used by
+        // addFillerViaHttp + clearCartViaHttp.
         const text = await r.text().catch(() => '');
-        const looksLikeCart =
-          /sub\s*total|"itemCount"|added\s+to\s+(your\s+)?cart|your\s+(shopping\s+)?cart|smart-?wagon/i
-            .test(text);
-        if (!looksLikeCart) {
+        if (!new RegExp(cartResponseRe, 'i').test(text)) {
           return {
             kind: 'failed' as const,
             reason: 'response_not_cart_shape',
@@ -2205,7 +2178,11 @@ async function postFillerAddToCart(page: Page): Promise<PostAddResult> {
         }
         return { kind: 'committed' as const, status: r.status, tookMs };
       },
-      { cartAddUrl: CART_ADD_URL, clientName: CART_ADD_CLIENT_NAME },
+      {
+        cartAddUrl: CART_ADD_URL,
+        clientName: CART_ADD_CLIENT_NAME,
+        cartResponseRe: CART_RESPONSE_RE_SOURCE,
+      },
     )
     .catch((err) => ({
       kind: 'failed' as const,
