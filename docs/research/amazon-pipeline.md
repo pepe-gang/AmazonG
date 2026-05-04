@@ -414,6 +414,80 @@ Buy-Now-click and ATC-fallback paths preserved for non-buyable PDPs
 
 ---
 
+## Thank-you page hidden inputs: `latestOrderId` + `latestPurchaseId`
+
+**Date observed:** 2026-05-04
+
+Amazon renders the just-placed fulfillment orderId AND the checkout-
+session purchaseId as hidden form inputs on the thank-you page (and
+ALSO on the post-thank-you recommendations page that the auto-refresh
+serves). The same value is duplicated into 6+ hidden p13n / Rufus /
+cart-recommend forms.
+
+```html
+<input type="hidden" name="latestPurchaseId" value="106-0438588-1084236">
+<input type="hidden" name="latestOrderId"    value="112-3432161-4747415">
+```
+
+Adjacent metadata fields seen on the same forms:
+- `openDeliveryId` — Amazon's internal delivery-promise id
+- `addressId` — internal address record id
+- `paymentInstrumentId` — opaque payment-method handle
+- `paymentMethodCode` — `CC` / `Gift` / etc.
+- `offerListingId` — offer the order was placed against
+- `shippingCostAmount`, `currencyCode`, `promiseDateStartTime` — order metadata
+
+### Live verification
+
+**Test 1 — single-fulfillment buy ($15.95 whey, cancelled cleanly):**
+- URL `purchaseId=106-0438588-1084236`
+- DOM `latestPurchaseId="106-0438588-1084236"` ✅ matches
+- DOM `latestOrderId="112-3432161-4747415"` matched actual orderId on
+  `/gp/your-account/order-details?orderID=112-3432161-4747415`
+
+**Test 2 — multi-fulfillment fan-out ($1378.98 MacBook + Jackery, both
+cancelled cleanly):**
+- URL `purchaseId=106-2077434-8293866`
+- DOM `latestPurchaseId="106-2077434-8293866"` (one value across all 6 occurrences)
+- DOM `latestOrderId="112-8816875-9503447"` (one value across all 6 occurrences)
+- `/gp/css/order-history` walk found TWO orders:
+  - `112-8816875-9503447` → MacBook ✅ (matches DOM)
+  - `112-0624058-6992233` → Jackery ❌ (not on thank-you page)
+
+### Implication
+
+**The thank-you page renders only the *canonical* / first orderId, not
+all fan-out orders.** This is a partial replacement for
+`fetchOrderIdFromHistory`:
+
+- **Buy-now mode** (typically single-fulfillment): the DOM read is a
+  drop-in replacement. Saves ~15s vs the order-history nav.
+- **Buy-now mode with rare warehouse split**: the DOM read still
+  captures the canonical order; the second order is lost — but the
+  pre-existing `fetchOrderIdFromHistory` body-text regex ALSO loses
+  the second order in this case. So the DOM read has no worse
+  coverage than what shipped before.
+- **Filler mode** (always fan-out by design): the DOM read captures
+  the target's order quickly, but the filler-only orders' ids still
+  need the `fetchOrderIdsForAsins` history walk for the cancel sweep.
+  Net: NOT a useful replacement here, since the history walk runs
+  anyway. Keep the existing flow.
+
+### Implementation shipped
+
+`buyNow.ts` step 12 now does the DOM read first; falls through to
+`fetchOrderIdFromHistory` only when the input is missing. See commit
+`76ff85e` on feat/checkout-speed-tier3.
+
+### Caveat about the URL `purchaseId` vs DOM `latestPurchaseId`
+
+Both should match (verified across 2 live tests). If they diverge in
+some future scenario, trust the DOM input — it's what Amazon emitted
+server-side after the order was committed. The URL `purchaseId` could
+be tampered with via browser-back / refresh / shared link.
+
+---
+
 ## Header dropdown / mini order list (not used)
 
 Amazon's header "Returns & Orders" dropdown shows the most recent few
