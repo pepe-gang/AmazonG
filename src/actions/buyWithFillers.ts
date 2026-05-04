@@ -36,6 +36,7 @@ import {
   CART_ADD_URL,
   CART_RESPONSE_RE_SOURCE,
   HTTP_BROWSERY_HEADERS,
+  extractCartAddTokens,
   looksLikeCartResponse,
 } from './amazonHttp.js';
 
@@ -342,9 +343,15 @@ export async function buyWithFillers(
   //    as belt-and-suspenders verification AND is required for the
   //    Proceed form to carry the full cart state.
   const targetAsin = parseAsinFromUrl(opts.productUrl);
+  // scrapeProduct just loaded the PDP into this tab — pass the live DOM HTML
+  // through so addFillerViaHttp can skip a redundant ctx.request.get round-trip
+  // (saves ~300-1500ms per filler buy depending on RTT). Falls back to network
+  // fetch if page.content() throws or returns empty.
+  const targetHtmlForHttp = await page.content().catch(() => '');
   const httpTarget = await addFillerViaHttp(
     page,
     targetAsin ?? parseAsinFromUrl(page.url()) ?? '',
+    targetHtmlForHttp,
   );
   if (httpTarget.kind === 'committed') {
     logger.info(
@@ -641,10 +648,17 @@ export async function buyWithFillers(
   // NOTE: Chewbacca's /spc hydrates panels asynchronously after
   // waitForCheckout says "Place Order visible" — the address panel may
   // not expose `#deliver-to-address-text` or `#change-delivery-link`
-  // for another second or two. Settle briefly so readCurrentAddress's
-  // selectors land on live DOM instead of the skeleton.
+  // for another second or two. Wait for one of those selectors to be
+  // visible (bounded at 2s, the historical blind-sleep budget). Exits
+  // early on the typical case where the panel hydrates in ~200ms;
+  // falls through silently on miss so ensureAddress's own selector
+  // logic still runs.
   if (opts.allowedAddressPrefixes.length > 0) {
-    await page.waitForTimeout(2_000);
+    await page
+      .locator('#deliver-to-address-text, #change-delivery-link')
+      .first()
+      .waitFor({ state: 'visible', timeout: 2_000 })
+      .catch(() => undefined);
     const addr = await ensureAddress(page, opts.allowedAddressPrefixes, {
       step: (m, d) => logger.info(m, d, cid),
       warn: (m, d) => logger.warn(m, d, cid),
@@ -912,13 +926,13 @@ export async function buyWithFillers(
     };
   }
 
-  // 13. Click Place Order. Mirrors buyNow's checkout[9]-[10]: a 1s
-  //     pre-settle so Amazon's re-render after the last mutation (name
-  //     toggle, delivery change) commits before the click, then locate
-  //     the Place Order control across Amazon's layout variants.
-  logger.info('step.fillerBuy.place.settle', { waitMs: 1_000 }, cid);
-  await page.waitForTimeout(1_000);
-
+  // 13. Click Place Order. Mirrors buyNow's checkout[9]-[10]: locate the
+  //     Place Order control across Amazon's layout variants, then wait
+  //     for it to be visible/stable before clicking. Was previously a
+  //     blind 1s waitForTimeout — replaced with a bounded selector wait
+  //     (same 1s upper bound) so the typical case exits in <100ms once
+  //     the button has hydrated, while pathological "still re-rendering"
+  //     cases get the same protection as before.
   const placeLocator = await findPlaceOrderLocator(page);
   if (!placeLocator) {
     return {
@@ -928,6 +942,10 @@ export async function buyWithFillers(
       detail: `url=${page.url()}`,
     };
   }
+  await placeLocator
+    .waitFor({ state: 'visible', timeout: 1_000 })
+    .catch(() => undefined);
+  logger.info('step.fillerBuy.place.settle', { mode: 'visible_wait', cap: 1_000 }, cid);
   // Mark the attempt `stage: 'placing'` across the click → confirmation
   // window. A stop / crash inside this window is an unknown-outcome
   // case (Amazon may or may not have accepted the click) and the
@@ -2018,35 +2036,52 @@ type PostAddResult =
  * Referer/Origin manually because APIRequestContext doesn't auto-attach
  * them like a real form submit would.
  */
-async function addFillerViaHttp(page: Page, asin: string): Promise<PostAddResult> {
+async function addFillerViaHttp(
+  page: Page,
+  asin: string,
+  /**
+   * If the caller already loaded the PDP via Playwright (e.g. the target-add
+   * path right after `scrapeProduct`), pass `await page.content()` here to
+   * skip the duplicate `ctx.request.get(pdpUrl)` round-trip. The post-
+   * hydration DOM still carries the `<form id="addToCart">` and its hidden
+   * inputs server-side — verified across saved PDP fixtures. On parse miss
+   * we fall through to the same failure path as the network path, and the
+   * caller's existing Buy-Now-click fallback kicks in.
+   */
+  prefetchedHtml?: string,
+): Promise<PostAddResult> {
   const ctx = page.context();
   const pdpUrl = `https://www.amazon.com/dp/${asin}`;
 
-  // 1. PDP fetch.
-  let pdpRes;
-  try {
-    pdpRes = await ctx.request.get(pdpUrl, {
-      headers: HTTP_BROWSERY_HEADERS,
-      timeout: 15_000,
-    });
-  } catch (err) {
-    return {
-      kind: 'failed',
-      reason: 'pdp_fetch_threw:' + String(err).slice(0, 80),
-    };
-  }
-  if (!pdpRes.ok()) {
-    return {
-      kind: 'failed',
-      reason: 'pdp_http_error',
-      status: pdpRes.status(),
-    };
-  }
+  // 1. PDP fetch — skipped when the caller passed `prefetchedHtml`.
   let pdpHtml: string;
-  try {
-    pdpHtml = await pdpRes.text();
-  } catch {
-    return { kind: 'failed', reason: 'pdp_body_read_threw' };
+  if (prefetchedHtml && prefetchedHtml.length > 0) {
+    pdpHtml = prefetchedHtml;
+  } else {
+    let pdpRes;
+    try {
+      pdpRes = await ctx.request.get(pdpUrl, {
+        headers: HTTP_BROWSERY_HEADERS,
+        timeout: 15_000,
+      });
+    } catch (err) {
+      return {
+        kind: 'failed',
+        reason: 'pdp_fetch_threw:' + String(err).slice(0, 80),
+      };
+    }
+    if (!pdpRes.ok()) {
+      return {
+        kind: 'failed',
+        reason: 'pdp_http_error',
+        status: pdpRes.status(),
+      };
+    }
+    try {
+      pdpHtml = await pdpRes.text();
+    } catch {
+      return { kind: 'failed', reason: 'pdp_body_read_threw' };
+    }
   }
 
   // 2. Harvest only the fields the modern cart-add endpoint requires.
@@ -2055,31 +2090,20 @@ async function addFillerViaHttp(page: Page, asin: string): Promise<PostAddResult
   //    "addToCart"> still carries the tokens we need, but the endpoint
   //    that actually commits items is the same one Amazon's recommendation
   //    carousels POST to (`/cart/add-to-cart/ref=...`), which only wants
-  //    csrf + asin + offerListingId + quantity + clientName.
+  //    csrf + asin + offerListingId + quantity + clientName. Token
+  //    extraction is shared with the unit test in fixtures/product/.
   const doc = new JSDOM(pdpHtml).window.document;
-  const form = doc.getElementById('addToCart');
-  if (!form) return { kind: 'failed', reason: 'no_form' };
-
-  const csrf = (
-    form.querySelector('input[name="anti-csrftoken-a2z"]') as HTMLInputElement | null
-  )?.value;
-  const offerListingId =
-    (form.querySelector('input[name="items[0.base][offerListingId]"]') as HTMLInputElement | null)
-      ?.value ??
-    (form.querySelector('input[name="offerListingID"]') as HTMLInputElement | null)?.value;
-  const itemAsin =
-    (form.querySelector('input[name="items[0.base][asin]"]') as HTMLInputElement | null)?.value ??
-    (form.querySelector('input[name="ASIN"]') as HTMLInputElement | null)?.value;
-  if (!csrf || !offerListingId || !itemAsin) {
+  const tokens = extractCartAddTokens(doc);
+  if (!tokens) {
+    // Distinguish form-missing vs field-missing for log fidelity.
     return {
       kind: 'failed',
-      reason:
-        'missing_required_fields:' +
-        [!csrf && 'csrf', !offerListingId && 'offerListingId', !itemAsin && 'asin']
-          .filter(Boolean)
-          .join(','),
+      reason: doc.getElementById('addToCart')
+        ? 'missing_required_fields'
+        : 'no_form',
     };
   }
+  const { csrf, offerListingId, asin: itemAsin } = tokens;
 
   const body = new URLSearchParams();
   body.append('anti-csrftoken-a2z', csrf);

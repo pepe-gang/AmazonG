@@ -65,3 +65,34 @@ export function looksLikeCartResponse(text: string): boolean {
  *  callbacks where imports aren't available. Keep in sync with
  *  CART_RESPONSE_RE above. */
 export const CART_RESPONSE_RE_SOURCE = CART_RESPONSE_RE.source;
+
+/**
+ * The three hidden inputs the modern `/cart/add-to-cart/ref=...` endpoint
+ * needs from a PDP's `<form id="addToCart">`. Pure DOM read so it works
+ * against either a JSDOM document (Node-side, from `ctx.request.get` or
+ * `page.content()`) OR a Playwright `evaluate` shim that exposes the
+ * same `document` API. Returns null on any missing field — caller treats
+ * that as a fall-through to the click path.
+ */
+export type CartAddTokens = {
+  csrf: string;
+  offerListingId: string;
+  asin: string;
+};
+
+export function extractCartAddTokens(doc: Document): CartAddTokens | null {
+  const form = doc.getElementById('addToCart');
+  if (!form) return null;
+  const csrf = (
+    form.querySelector('input[name="anti-csrftoken-a2z"]') as HTMLInputElement | null
+  )?.value;
+  const offerListingId =
+    (form.querySelector('input[name="items[0.base][offerListingId]"]') as HTMLInputElement | null)
+      ?.value ??
+    (form.querySelector('input[name="offerListingID"]') as HTMLInputElement | null)?.value;
+  const asin =
+    (form.querySelector('input[name="items[0.base][asin]"]') as HTMLInputElement | null)?.value ??
+    (form.querySelector('input[name="ASIN"]') as HTMLInputElement | null)?.value;
+  if (!csrf || !offerListingId || !asin) return null;
+  return { csrf, offerListingId, asin };
+}

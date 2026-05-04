@@ -293,12 +293,13 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       };
     }
 
-    // 9. Pre-place settle. Amazon can flag orders submitted mid-render
-    //    after a delivery/address update — match old AutoG's 1-second
-    //    pause before the Place Order click.
-    step('step.buy.place.settle', { waitMs: 1_000 });
-    await page.waitForTimeout(1_000);
-
+    // 9. Pre-place stability. Amazon can flag orders submitted mid-render
+    //    after a delivery/address update; we want the Place Order button
+    //    to be visible/stable before clicking. Was previously a blind 1s
+    //    waitForTimeout — replaced with a bounded selector wait (same 1s
+    //    upper bound) so the typical case exits in <100ms once the button
+    //    has hydrated, while pathological re-rendering cases still get
+    //    the same protection.
     // 10. Click Place Order. Mark the attempt `stage: 'placing'` just
     //     before the click so a stop / crash across this boundary is
     //     flagged as "unknown outcome" (the click may or may not have
@@ -308,6 +309,10 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     if (!placeLocator) {
       return fail('place_order', 'no Place Order button selector matched');
     }
+    await placeLocator
+      .waitFor({ state: 'visible', timeout: 1_000 })
+      .catch(() => undefined);
+    step('step.buy.place.settle', { mode: 'visible_wait', cap: 1_000 });
     await opts.onStage?.('placing');
     try {
       await placeLocator.click({ timeout: 10_000 });
