@@ -286,6 +286,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         ok: true,
         dryRun: true,
         orderId: null,
+        amazonPurchaseId: null,
         finalPrice: null,
         finalPriceText: null,
         cashbackPct,
@@ -348,6 +349,18 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       return fail('confirm_parse', confirmWait.reason);
     }
     await opts.onStage?.(null);
+    // Capture Amazon's checkout-session purchaseId BEFORE any subsequent
+    // navigation or page refresh. The thank-you URL is
+    // /gp/buy/thankyou/handlers/display.html?purchaseId=106-...; the
+    // value is distinct from the actual orderId (different number-space)
+    // and is not exposed on any post-checkout endpoint, so this is the
+    // only chance to record it. Audit-only field. See
+    // docs/research/amazon-pipeline.md.
+    const amazonPurchaseId =
+      page.url().match(/[?&]purchaseId=(\d{3}-\d{7}-\d{7})/)?.[1] ?? null;
+    if (amazonPurchaseId) {
+      step('step.buy.purchaseId.captured', { amazonPurchaseId });
+    }
     // Optional: parse the confirmation page for the final price (the
     // orderId pulled from it is unreliable — recommendation sections and
     // "items you may like" carousels can contain stale order ids that
@@ -371,6 +384,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
 
     step('step.buy.placed', {
       orderId,
+      amazonPurchaseId,
       finalPrice: confirmation.finalPrice,
       finalPriceText: confirmation.finalPriceText,
     });
@@ -379,6 +393,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       ok: true,
       dryRun: false,
       orderId,
+      amazonPurchaseId,
       finalPrice: confirmation.finalPrice,
       finalPriceText: confirmation.finalPriceText,
       cashbackPct,

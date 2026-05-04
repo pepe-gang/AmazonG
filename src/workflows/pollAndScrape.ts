@@ -603,6 +603,7 @@ function fillerToBuyResult(f: BuyWithFillersResult): BuyResult {
     ok: true,
     dryRun: isDryRun,
     orderId: 'orderId' in f ? f.orderId : null,
+    amazonPurchaseId: f.amazonPurchaseId,
     finalPrice: 'finalPrice' in f ? f.finalPrice : null,
     finalPriceText: 'finalPriceText' in f ? f.finalPriceText : null,
     cashbackPct: f.targetCashbackPct,
@@ -630,6 +631,11 @@ type ProfileResult = {
    *  Empty on single-mode / dry-run / failure. Snapshot at buy time —
    *  propagated to BG via the /status report for the audit trail. */
   fillerOrderIds: string[];
+  /** Amazon's checkout-session purchaseId from the thank-you URL.
+   *  Distinct from orderId; one per Place Order click, persists across
+   *  fan-out splits. Null when the buy didn't reach Place Order or was
+   *  a dry-run. Audit-only — see docs/research/amazon-pipeline.md. */
+  amazonPurchaseId: string | null;
 };
 
 export function startWorker(deps: Deps): WorkerHandle {
@@ -1136,6 +1142,11 @@ async function handleJob(
     // AND produced filler orders. BG persists on AutoBuyPurchase for
     // post-hoc reconciliation (see PurchaseReport.fillerOrderIds docs).
     ...(r.fillerOrderIds.length > 0 ? { fillerOrderIds: r.fillerOrderIds } : {}),
+    // Amazon's checkout-session purchaseId from the thank-you URL —
+    // distinct from orderId, captured at click time. Audit-only field;
+    // attach only when present (failed/dry-run buys leave it null and
+    // we don't bother sending null-only payloads).
+    ...(r.amazonPurchaseId ? { amazonPurchaseId: r.amazonPurchaseId } : {}),
   }));
 
   try {
@@ -2270,6 +2281,7 @@ async function runForProfile(
       stage: null,
       dryRun: buy.dryRun,
       fillerOrderIds,
+      amazonPurchaseId: buy.amazonPurchaseId,
     };
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
@@ -2323,6 +2335,7 @@ function failed(email: string, error: string, stage: string | null = null): Prof
     stage,
     dryRun: false,
     fillerOrderIds: [],
+    amazonPurchaseId: null,
   };
 }
 
@@ -2348,6 +2361,7 @@ function actionRequired(email: string, error: string, stage: string | null = nul
     stage,
     dryRun: false,
     fillerOrderIds: [],
+    amazonPurchaseId: null,
   };
 }
 

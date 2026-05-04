@@ -45,6 +45,16 @@ export type BuyResult =
       ok: true;
       dryRun: boolean;
       orderId: string | null;
+      /**
+       * Amazon's checkout-session ID from the thank-you URL (`?purchaseId=`).
+       * **Distinct from `orderId`** — Amazon's number-spaces don't overlap.
+       * One per Place Order click; persists across cart fan-out (multiple
+       * orders share one purchaseId). Captured here at order-placement
+       * because Amazon does NOT expose this correlation on any
+       * post-checkout endpoint — see `docs/research/amazon-pipeline.md`.
+       * Useful only for audit / cross-reference; never use for order lookup.
+       */
+      amazonPurchaseId: string | null;
       finalPrice: number | null;
       finalPriceText: string | null;
       cashbackPct: number | null;
@@ -154,6 +164,16 @@ export type JobStatusReport = {
      * single-mode purchases.
      */
     fillerOrderIds?: string[] | null;
+    /**
+     * Amazon's checkout-session ID from the thank-you URL (`?purchaseId=`).
+     * Distinct from `orderId`; one per Place Order click, persists across
+     * fan-out splits. Audit-only — Amazon does NOT expose a purchaseId↔
+     * orderId mapping endpoint, so AmazonG must capture this at the time
+     * of the click or it's permanently lost. See
+     * `docs/research/amazon-pipeline.md` for the empirical research
+     * behind this field.
+     */
+    amazonPurchaseId?: string | null;
   }[];
 };
 

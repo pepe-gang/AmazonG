@@ -141,6 +141,17 @@ type BuyWithFillersSuccessBase = {
    *  order — more reliable than the confirmation-page badge which is
    *  hidden for qty=1. */
   placedQuantity: number | null;
+  /**
+   * Amazon's checkout-session ID from the thank-you URL (`?purchaseId=`).
+   * Distinct from any orderId — Amazon's number-spaces don't overlap.
+   * One per Place Order click; persists across the cart fan-out (every
+   * fan-out orderId in `orderIds` shares this same purchaseId). Audit-
+   * only field — Amazon does NOT expose a purchaseId↔orderId mapping
+   * endpoint, so AmazonG must capture this at the time of the click or
+   * it's permanently lost. See `docs/research/amazon-pipeline.md`.
+   * Null on dry-run (no Place Order click happened).
+   */
+  amazonPurchaseId: string | null;
 };
 
 export type BuyWithFillersResult =
@@ -900,6 +911,9 @@ export async function buyWithFillers(
     placeOrderSelector: ready.detected,
     targetCashbackPct,
     placedQuantity,
+    // Filled in below on the placed path; null on dry-run since Place
+    // Order was never clicked.
+    amazonPurchaseId: null as string | null,
   };
 
   // 12. Dry-run gate. Every mutation above this line is intentional —
@@ -994,6 +1008,19 @@ export async function buyWithFillers(
     };
   }
   await opts.onStage?.(null);
+
+  // Capture Amazon's checkout-session purchaseId BEFORE any subsequent
+  // navigation. The thank-you URL is /gp/buy/thankyou/handlers/display.html
+  // ?purchaseId=106-...; this is distinct from the orderId(s) we map below
+  // (different number-space) and is not exposed on any post-checkout
+  // endpoint, so this is the only chance to record it. The next
+  // navigation in fetchOrderIdsForAsins will move us away from this URL.
+  // See docs/research/amazon-pipeline.md.
+  const amazonPurchaseId =
+    page.url().match(/[?&]purchaseId=(\d{3}-\d{7}-\d{7})/)?.[1] ?? null;
+  if (amazonPurchaseId) {
+    logger.info('step.fillerBuy.purchaseId.captured', { amazonPurchaseId }, cid);
+  }
 
   // Parse the confirmation page for `finalPrice` + `finalPriceText`.
   // NOTE: we intentionally ignore the orderId parsed here — Amazon's
@@ -1139,6 +1166,7 @@ export async function buyWithFillers(
     ok: true,
     stage: 'placed',
     ...successBase,
+    amazonPurchaseId,
     orderId,
     orderIds: orderMatches,
     fillerOrderIds,
