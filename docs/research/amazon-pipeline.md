@@ -88,6 +88,25 @@ hypothesis "purchaseId == orderId for non-split buys" is **disproved**.
    is trustworthy; `purchaseId` is the checkout session, NOT an order.
 4. **Body-text regex** — UNSAFE, false-matches recommendation cards.
 
+### purchaseId↔orderId mapping is NOT exposed post-checkout
+
+**Date observed:** 2026-05-04
+
+Verified empirically by inspecting (a) order-history page, (b) order-details
+page for our just-placed orderId. Both pages contain **zero references**
+to the purchaseId that produced the order. The orderId is present, the
+purchaseId is absent. There is no programmatic lookup like "given this
+purchaseId, find its orders" available from a customer session.
+
+**Implication:** the purchaseId↔orderId correlation is only knowable at
+order-placement time, when AmazonG sees the URL `purchaseId` AND walks
+the just-updated order-history page. If the worker doesn't record the
+purchaseId at that moment, the mapping is permanently lost.
+
+This is the strongest argument for storing `amazonPurchaseId` on
+`AutoBuyJob` (BG-side schema). It's a write-once, read-anytime audit
+value with no fallback source.
+
 ---
 
 ## Thank-you page is fragile to refresh
