@@ -312,6 +312,87 @@ the original thank-you DOM.
 
 ---
 
+## Cart→/spc direct entry shortcut (`/checkout/entry/cart`)
+
+**Date observed:** 2026-05-04
+
+Massive speedup found while investigating Tier 3 candidates. Amazon's
+BYG ("Need anything else?") "Continue to checkout" button points at
+`/checkout/entry/cart?proceedToCheckout=1`. This is a server-side
+handler that:
+
+1. Reads the user's current cart server-side
+2. Spins up a fresh checkout session (new `purchaseId`)
+3. Returns 302 → `/checkout/p/p-{purchaseId}/spc?referrer=spc`
+
+**Hitting it directly via `page.goto` bypasses three navigation-bound
+steps in one shot:**
+- the full cart-page render (was `page.goto(/cart)`, ~1-3s)
+- the Proceed-to-Checkout click (form submit + URL nav, 1-3s)
+- the BYG "Need anything else?" interstitial click (1-3s)
+
+**Live measurements (signed-in account, 2026-05-04):**
+
+| Run | URL | Took (ms) | Status | Body | Landed on /spc? |
+|---|---|---|---|---|---|
+| 1 | `/checkout/entry/cart?proceedToCheckout=1` | 248 | 200 | 354KB | yes (purchaseId 106-5470794-9078601) |
+| 2 | same | 165 | 200 | 354KB | yes (purchaseId 106-8978053-6938658) |
+| 3 | same | 161 | 200 | 355KB | yes (purchaseId 106-7257132-4899468) |
+| 4 | same | 166 | 200 | 354KB | yes (purchaseId 106-9087009-0649853) |
+| 5 | same | 166 | 200 | 354KB | yes (purchaseId 106-5226090-9524261) |
+
+100% consistent. Every run gets a fresh purchaseId (so each page.goto
+creates one session — perfect for the per-click model AmazonG uses).
+`page.goto` (browser-side) verification: URL bar landed at
+`/checkout/p/p-106-7373858-8417011/spc?referrer=spc` directly, no
+intermediate cart or BYG render.
+
+### Net savings
+
+~3-8s per filler buy. Replaces a multi-step navigate-and-click
+sequence with a single page.goto.
+
+### Implementation (shipped in feat/checkout-speed-tier3)
+
+In `buyWithFillers.ts` step 6, after fillers are HTTP-added:
+
+```ts
+const SPC_ENTRY_URL =
+  'https://www.amazon.com/checkout/entry/cart?proceedToCheckout=1';
+await page.goto(SPC_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+if (SPC_URL_MATCH.test(page.url())) {
+  // happy path — we're on /spc directly
+} else {
+  // fallback to old click-based flow
+  await page.goto(CART_URL, ...);
+  await clickProceedToCheckout(page);
+  await waitForSpcOrHandleByg(page, cid);
+}
+```
+
+### Why this is safe
+
+- Amazon's checkout-entry handler reads from the **server-side cart**.
+  HTTP filler adds returned 200 only after Amazon committed each item
+  (verified by the ASIN-echo guard at `buyWithFillers.ts:2140`), so
+  the items are guaranteed present when the handler reads.
+- Fallback preserves correctness if Amazon ever shifts the URL pattern.
+  Worst case = same wall-clock as before this optimization.
+- `waitForSpcOrHandleByg` (`buyWithFillers.ts:2434`) is now dead code
+  on the happy path but kept for the fallback. Don't remove without
+  also removing the fallback.
+
+### Caveats
+
+- Each call creates a checkout session. If a page.goto somehow fires
+  twice (retry on transient failure), two sessions are spun up — both
+  cheap to abandon, but worth knowing.
+- Cart-empty edge case: not probed live. The current `clearCart` step
+  at filler-mode start makes this unreachable in practice (we always
+  add at least the target before reaching this URL).
+
+---
+
 ## Header dropdown / mini order list (not used)
 
 Amazon's header "Returns & Orders" dropdown shows the most recent few
