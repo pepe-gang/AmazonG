@@ -21,24 +21,47 @@ involved live in **two distinct number spaces** that are easy to confuse:
 | `purchaseId` (also `checkoutId`) | `106-0433446-4196253` | SPC URL path; thank-you `?purchaseId=`; `<form action>` | The **checkout session** — one per Place Order click |
 | `orderId` (fulfillment) | `112-9701571-1565829` | Order-history page; order-details URLs; emails | An **actual fulfillment order** — N per click after split |
 
-**Empirical:** placed a $348 cart with 4 items (cotton swabs, iPad,
-toilet paper, speakers). One click. Amazon split into:
+**Empirical observation 1 (multi-fulfillment, 2026-05-04):** placed a $348
+cart with 4 items (cotton swabs, iPad, toilet paper, speakers). One
+click. Amazon split into:
 - `112-9701571-1565829` → iPad + toilet paper
 - `112-5185628-8528221` → swabs + speakers
 
 The URL `purchaseId=106-0433446-4196253` matched **neither** order.
 Different prefix space (`106-` vs `112-`).
 
+**Empirical observation 2 (single-fulfillment, 2026-05-04):** placed a
+$2.37 single-item cart (Amazon-Basics cotton swabs, Amazon-fulfilled,
+guaranteed no warehouse split). One item, one fulfillment.
+
+| | Value |
+|---|---|
+| SPC URL `/checkout/p/p-XXX/spc` | `p-106-7831913-7719454` |
+| Thank-you URL `?purchaseId=` | `106-7831913-7719454` (same as SPC) |
+| **Actual orderId** | **`112-0005434-4738662`** |
+
+**Even with zero possibility of fan-out, `purchaseId ≠ orderId`. Always.**
+The `106-` and `112-` are completely separate number spaces. The earlier
+hypothesis "purchaseId == orderId for non-split buys" is **disproved**.
+
 ### Why this matters
-- **Trusting the URL `purchaseId` as an orderId is unsafe.** A worker
-  that records it would later query
+- **Trusting the URL `purchaseId` as an orderId is unsafe — period.** Not
+  just for fan-out splits. Even for single-item, single-fulfillment,
+  Amazon-Basics, Amazon-warehouse buys (the most boring case possible)
+  the `purchaseId` is in a different number-space from the orderId. A
+  worker that records it would later query
   `/gp/your-account/order-details?orderID=106-...` and get nothing back.
   Verify-phase would silently fail.
-- The current `parseOrderConfirmation` parser (`src/parsers/amazonCheckout.ts`)
-  has a `readOrderIdFromUrl` path that catches `?orderId=` or
-  `?purchaseId=`. Treat the `purchaseId` source as **untrusted** for
-  order-lookup purposes — it's only useful as a *checkout session
-  marker*, not as a real order key.
+- **Latent bug in `readOrderIdFromUrl`** (`src/parsers/amazonCheckout.ts:57`):
+  the function accepts `?orderId=` OR `?purchaseId=` as equivalent
+  fallback. The `purchaseId` branch is **wrong** — it returns the
+  checkout session ID, not an order ID. Currently dormant because
+  `buyNow.ts:351` discards `parseOrderConfirmation`'s `orderId` and
+  goes to history nav, but any future "trust parseOrderConfirmation"
+  optimization would silently break. Recommendation: remove the
+  `purchaseId` fallback from that line, or add a `source` discriminator
+  so callers can tell apart trusted DOM/URL-orderId hits from the
+  unsafe purchaseId hit.
 - The body-regex fallback in `parseOrderConfirmation` is also unreliable:
   measured 2/3 saved thank-you fixtures returned the WRONG orderId
   (matched a recommendation card's order number) — exactly why
