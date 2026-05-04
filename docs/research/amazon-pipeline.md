@@ -1,0 +1,302 @@
+# Amazon checkout pipeline — empirical research notes
+
+Living notes on how Amazon's retail checkout flow actually behaves under real
+network + auth conditions. Data here is **measured**, not inferred from
+saved fixtures or docs. Use this when designing changes that touch the
+hot path (buy / cashback gate / order-id capture / tracking / cancel).
+
+Each finding has a date so we can spot when Amazon has shifted under us.
+
+---
+
+## Order ID hierarchy and fan-out
+
+**Date observed:** 2026-05-04
+
+A single Place Order click can produce 0, 1, or N actual orders. The IDs
+involved live in **two distinct number spaces** that are easy to confuse:
+
+| Term | Example | Where it appears | What it identifies |
+|---|---|---|---|
+| `purchaseId` (also `checkoutId`) | `106-0433446-4196253` | SPC URL path; thank-you `?purchaseId=`; `<form action>` | The **checkout session** — one per Place Order click |
+| `orderId` (fulfillment) | `112-9701571-1565829` | Order-history page; order-details URLs; emails | An **actual fulfillment order** — N per click after split |
+
+**Empirical:** placed a $348 cart with 4 items (cotton swabs, iPad,
+toilet paper, speakers). One click. Amazon split into:
+- `112-9701571-1565829` → iPad + toilet paper
+- `112-5185628-8528221` → swabs + speakers
+
+The URL `purchaseId=106-0433446-4196253` matched **neither** order.
+Different prefix space (`106-` vs `112-`).
+
+### Why this matters
+- **Trusting the URL `purchaseId` as an orderId is unsafe.** A worker
+  that records it would later query
+  `/gp/your-account/order-details?orderID=106-...` and get nothing back.
+  Verify-phase would silently fail.
+- The current `parseOrderConfirmation` parser (`src/parsers/amazonCheckout.ts`)
+  has a `readOrderIdFromUrl` path that catches `?orderId=` or
+  `?purchaseId=`. Treat the `purchaseId` source as **untrusted** for
+  order-lookup purposes — it's only useful as a *checkout session
+  marker*, not as a real order key.
+- The body-regex fallback in `parseOrderConfirmation` is also unreliable:
+  measured 2/3 saved thank-you fixtures returned the WRONG orderId
+  (matched a recommendation card's order number) — exactly why
+  `buyNow.ts` does the order-history nav.
+- For multi-order splits, `fetchOrderIdsForAsins`
+  (`buyWithFillers.ts:1154`) is the **correct** mechanism: navigate
+  `/gp/css/order-history`, walk the DOM in document order, attribute
+  each `/dp/<asin>` link to the most-recently-seen order id. Verified
+  on this experiment — its output matched the actual split.
+- `fetchOrderIdFromHistory` in `buyNow.ts:1945` (single-order path)
+  **has a latent bug for fan-out cases**: it body-regexes the FIRST
+  match only. If a buy-now click ever splits, the second order is
+  silently dropped from the buy-now's record. Fan-out can happen even
+  on a single-target buy if Amazon decides to split by warehouse —
+  rare but real.
+
+### Reliable order-ID sources, ranked
+1. **Order-history walk** (`/gp/css/order-history`, document-order
+   tree-walker) — only authoritative source for ASIN→orderId mapping.
+2. **`#orderId` or `[data-order-id]` element on the live thank-you
+   DOM** — scoped, reliable IF you can capture the page before
+   Amazon's auto-refresh-to-recommendations kicks in (see below).
+3. **URL `?purchaseId=` / `?orderId=`** — only the URL `orderId` form
+   is trustworthy; `purchaseId` is the checkout session, NOT an order.
+4. **Body-text regex** — UNSAFE, false-matches recommendation cards.
+
+---
+
+## Thank-you page is fragile to refresh
+
+**Date observed:** 2026-05-04
+
+The thank-you URL is `/gp/buy/thankyou/handlers/display.html?purchaseId=...`.
+Refreshing it (intentionally OR accidentally — e.g. via `location.reload`,
+browser back-then-forward, or a `chk_typ_browserRefresh` redirect) makes
+Amazon serve a **recommendations page** instead, with markers like
+"Inspired by your browsing history" and "Deals on items viewed in the
+last month." All `#orderId` elements and order-card structure are gone.
+The URL adds `&isRefresh=1`.
+
+### Implications
+- A "save the thank-you HTML" approach via right-click → Save Page As
+  is fragile. The browser may have already reloaded the page once on
+  arrival. Use DevTools `Network` tab → the original response, OR
+  `document.documentElement.outerHTML` paste from Console BEFORE any
+  refresh, OR HAR export.
+- AmazonG's `waitForConfirmationOrPending` (`buyNow.ts:1564`) detects
+  the thank-you URL and proceeds. If it doesn't capture the DOM
+  immediately, it can race the recommendations refresh. Currently
+  works because `parseOrderConfirmation` runs before the next
+  `page.goto`, but a slower variant could lose the original DOM.
+- We do NOT have a saved fixture of an original (pre-refresh)
+  thank-you page. Saved fixtures in `fixtures/thankyou/` are
+  post-refresh recommendation pages — useful for testing the
+  fall-through path but NOT for testing real order-id extraction.
+
+---
+
+## Cart-add HTTP endpoint (`/cart/add-to-cart/ref=...`)
+
+**Date observed:** 2026-05-04 (multiple sessions)
+
+The modern cart-add endpoint is `https://www.amazon.com/cart/add-to-cart/ref=...`.
+The `ref=` portion is tracking metadata; Amazon doesn't validate it,
+any string works. Production code uses
+`Aplus_BuyableModules_DetailPage` as the `clientName` value.
+
+### Required POST body fields (5 total)
+- `anti-csrftoken-a2z` (104 chars in production)
+- `items[0.base][asin]` (or legacy `ASIN`)
+- `items[0.base][offerListingId]` (or legacy `offerListingID`) — typically 158-206 chars
+- `items[0.base][quantity]` (default `1`)
+- `clientName` (`Aplus_BuyableModules_DetailPage`)
+
+All 5 fields live inside the PDP's `<form id="addToCart">`. The form's
+declared `action` attribute (`/gp/product/handle-buy-box/...`) is a
+**deprecated 404'er** — do not POST there. The modern endpoint above
+accepts the harvested tokens directly.
+
+### Live timing measurements
+Across 12 separate live HTTP-add round-trips against a real signed-in
+account (covering 5 distinct ASIN classes — books, electronics, kitchen,
+digital, marketplace):
+- **Buyable items:** 278–326ms per round-trip on the optimized path
+  (page.content() reused, no second network fetch)
+- **Non-buyable items** (Echo Dot 5th gen, AirPods, certain whey
+  protein variants): `addToCart` form is missing `offerListingId`
+  → helper returns null → caller falls through to Buy-Now click
+  fallback. Same as before optimization.
+- Response body to a successful POST is the rendered cart page
+  (~600-700KB) containing `data-asin="<sent ASIN>"` — the
+  phantom-commit guard regex (`buyWithFillers.ts:2140`) is correct.
+
+### Endpoint stability signal
+csrf token length consistent at 104 chars across all 9 PDPs probed.
+offerListingId length varies 158–206 chars depending on product. ASIN
+appears in both `items[0.base][asin]` and legacy `ASIN` inputs in
+buyable PDPs.
+
+---
+
+## SPC delivery-radio click recalc (`eligibleshipoption` XHR)
+
+**Date observed:** 2026-05-04
+
+When AmazonG's `pickBestCashbackDelivery` clicks a delivery-radio on
+`/spc`, the radio's enclosing `<div>` carries
+`data-setactionurl="/checkout/p/p-{purchaseId}/eligibleshipoption?pipelineType=Chewbacca&referrer=spc&ref_=chk_spc_chgEligibleShipOption"`.
+That URL is the recalc XHR Amazon's tango component fires.
+
+### Live timing (signed-in account, single test cart, real network)
+
+| t (ms) | event |
+|---|---|
+| 0 | click on unchecked delivery radio |
+| 5–6 | XHR opens: `POST /checkout/p/p-XXX/eligibleshipoption` |
+| 32 | sync click effect lands: `:checked=true` on **same** DOM node, `[checked]` HTML attr **NOT** yet present |
+| **1918** | **XHR returns 200** |
+| 1925 | radio's DOM node **REPLACED** by tango re-render; new node has `[checked]` baked in |
+
+### Implications
+- **The XHR takes ~1.9s on real network.** Current code waits 500ms
+  inner + 1500ms outer = 2000ms total — barely covers it on slow
+  connections.
+- After click, the `:checked` *property* is correct on the old node.
+  The `[checked]` *attribute* is not. `page.content()` serializes
+  attributes only, which is exactly why
+  `verifyTargetCashback` runs `syncCheckedAttribute` first (copies
+  `:checked` PROP → `[checked]` ATTR) before `page.content()`.
+- The radio's label text (where the "% back" string lives) is
+  server-rendered static HTML and identical between old and new
+  node. So `readTargetCashbackFromDom` reads correctly regardless
+  of whether you read pre-swap or post-swap.
+
+### The rare 6%→5% strip case
+User-reported: occasionally after clicking a 6% delivery radio,
+Amazon's XHR settles the cashback at the default 5% (Chase Amazon
+card baseline) — the 6% offer was rescinded mid-XHR. The post-XHR
+DOM correctly reflects the 5%, but the pre-XHR DOM still shows the
+6% label that the picker clicked.
+
+**Critical:** the 1.5s outer wait at `buyWithFillers.ts:686` is
+specifically there to read POST-XHR. Reading earlier would mask
+the strip and place an order at 5% expecting 6%. **Do not optimize
+this wait without preserving the post-XHR-read invariant.**
+
+A previously-considered optimization to drop this wait was rejected
+on these grounds. See feat/checkout-speed-tier1 commit message for
+the full rationale.
+
+### `eligibleshipoption` URL pattern across fixtures
+Stable. 5/5 saved /spc fixtures match
+`/checkout/p/p-[\d-]+/eligibleshipoption?pipelineType=Chewbacca`.
+Safe to use as a `page.waitForResponse` predicate IF needed for
+future precise-wait optimization.
+
+---
+
+## Place Order form submission
+
+**Date observed:** 2026-05-04
+
+The Place Order button submits a form with:
+- `action="/checkout/p/p-{purchaseId}/spc/place-order?pipelineType=Chewbacca&referrer=spc&ref_=chk_spc_chw_placeOrder"`
+- `method="post"`
+- `<input name="placeYourOrder1">` is the visible button input.
+
+### Page navigates, no XHR
+The submission goes via a regular HTML form POST, not via fetch/XHR.
+This means:
+- Wrapping `window.fetch` or `XMLHttpRequest` in a `page.evaluate`
+  pre-click does **NOT** capture the response — the browser navigates
+  the page entirely (response IS the new page).
+- Playwright's `page.on('response')` *can* observe the response, BUT
+  must be registered before the click and the navigation that follows.
+- Capture the redirect chain via `page.on('framenavigated')` if you
+  want the URL sequence, or the response via `page.waitForResponse`
+  on the `place-order` URL pattern.
+
+### Observed redirect chain
+For a high-value cart triggering payment auth:
+
+```
+POST /checkout/p/p-{purchaseId}/spc/place-order
+  → 302 /cpe/executions?...&pageType=CPEFront&subPageType=Redirections
+  → 302 /gp/buy/thankyou/handlers/display.html?purchaseId=<aggregate>
+  → (auto refresh) /gp/buy/thankyou/...?purchaseId=...&isRefresh=1
+  → recommendations page
+```
+
+The `/cpe/executions` step is Amazon's payment-authorization redirector
+(handles 3DS-like challenges). For Prime Visa or already-authorized
+cards it auto-passes through.
+
+### Implication for `parseOrderConfirmation`
+By the time AmazonG's worker reads `page.content()` after Place Order,
+the page may have already auto-refreshed past the original thank-you.
+The current code mostly avoids this because Playwright's
+`waitForURL(/thankyou/)` matches BEFORE the refresh, then
+`page.content()` runs immediately. But timing is tight; future changes
+that add latency between URL detection and content capture risk losing
+the original thank-you DOM.
+
+---
+
+## Header dropdown / mini order list (not used)
+
+Amazon's header "Returns & Orders" dropdown shows the most recent few
+orders via an XHR endpoint. Not currently used by AmazonG. Could
+theoretically be cheaper than full `/gp/css/order-history` for "give me
+just the most recent orderId" — but doesn't solve ASIN→orderId mapping
+for filler mode, and would be a new code path to maintain. Not
+investigated in depth.
+
+---
+
+## Amazon Business Reporting API — does NOT apply
+
+The Amazon Business Reporting API
+(<https://docs.business.amazon.com/docs/reporting-api-overview>)
+exposes order data programmatically, but only for Amazon Business B2B
+accounts — a separate product from regular `amazon.com` retail. Orders
+placed via the retail site **do not** appear in this API even if the
+same email is associated. Not usable for AmazonG's flow without a full
+migration to Amazon Business (different cart, different pricing,
+different payment terms — would break BG's deal-arbitrage strategy).
+
+---
+
+## What we do NOT yet have empirical data on
+
+- **Original thank-you DOM (pre-refresh)** for a real multi-order buy.
+  Need to capture via DevTools Network → save response, or
+  `document.documentElement.outerHTML` paste from Console immediately
+  on arrival. Without this, we can't prove or disprove that all
+  fan-out order IDs are present on the thank-you page itself.
+- **Place Order POST response body**. Failed to capture in the
+  2026-05-04 session because in-page fetch override doesn't fire on
+  form submission and Playwright's per-page network log was reset by
+  the subsequent nav. Future capture: register
+  `page.on('response')` on the `/place-order` URL pattern BEFORE the
+  click.
+- **Multi-order thank-you-page DOM** — same as above. The 2026-05-04
+  experiment confirmed the cart fan-out behavior but missed the
+  thank-you DOM capture.
+
+---
+
+## Outstanding items / future work
+
+- Fix the latent fan-out bug in `fetchOrderIdFromHistory`
+  (`buyNow.ts:1945`) — currently returns only the first orderId-shaped
+  match in body text; should return all of them, or use the
+  document-order walk like `fetchOrderIdsForAsins`. (Correctness fix,
+  not perf.)
+- Capture an original thank-you fixture for a multi-order split next
+  time one happens organically — that fixture would unblock multiple
+  optimizations.
+- Add `page.on('response')` instrumentation around Place Order in the
+  Worker so production telemetry can show what Amazon's POST response
+  actually contains. Read-only, no behavior change.
