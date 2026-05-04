@@ -982,6 +982,32 @@ async function handleJob(
     ),
   );
 
+  // Sibling-abort controller — shared across the fan-out. When ONE
+  // profile detects a PRODUCT-level failure (out_of_stock or
+  // price_exceeds), it fires `abortController.abort(reason)` to short-
+  // circuit every other profile. In-flight siblings catch it at the
+  // next checkpoint and bail with `stage: 'aborted_by_sibling'`; queued
+  // workers (waiting for an in-flight slot) bail at preflight without
+  // doing any PDP load. ACCOUNT-level failures (cashback_gate,
+  // checkout_address, etc.) do NOT propagate — they may be specific to
+  // one account's eligibility / address state, so we let other profiles
+  // run independently.
+  //
+  // Critical invariant: the abort signal is checked BEFORE buyNow /
+  // runFillerBuyWithRetries. We never abort during or after the Place
+  // Order click — once the buy is in flight at Amazon, killing it
+  // would leave us not knowing if it succeeded.
+  const abortController = new AbortController();
+  const abortSiblings = (reason: 'out_of_stock' | 'price_exceeds'): void => {
+    if (abortController.signal.aborted) return;
+    logger.info(
+      'job.fanout.abort.fired',
+      { jobId: job.id, reason },
+      cid,
+    );
+    abortController.abort(reason);
+  };
+
   const results = await pMap(eligible, concurrency, (profile) =>
     runForProfile(
       deps,
@@ -994,6 +1020,8 @@ async function handleJob(
       requireMinByEmail.get(profile.email.toLowerCase()) ?? true,
       parallelism.fillerParallelTabs,
       parallelism.wheyProteinFillerOnly,
+      abortController.signal,
+      abortSiblings,
     ),
   );
 
@@ -1901,6 +1929,19 @@ async function runForProfile(
    *  whey-protein-only term pool with a 10–12 random count. Re-read
    *  per claim same as fillerParallelTabs. Single-mode buys ignore. */
   wheyProteinFillerOnly: boolean,
+  /** Shared kill-switch fired when ONE profile in the fan-out detects
+   *  a PRODUCT-level failure (out_of_stock / price_exceeds). When this
+   *  signal is aborted, every other profile bails at its next
+   *  checkpoint — saves ~25-50s on a 3-profile fan-out where the deal
+   *  itself is dead (item OOS, price drifted past the cap). Account-
+   *  specific failures (cashback_gate, signed_out, etc.) DON'T fire
+   *  this, since other profiles may have different eligibility. */
+  signal: AbortSignal,
+  /** Callback for THIS profile to fire when it detects a PRODUCT-level
+   *  failure that should kill siblings. Reasons map 1:1 to the
+   *  AbortController.abort() reason argument so log lines and the
+   *  sibling's abort-detection message stay consistent. */
+  abortSiblings: (reason: 'out_of_stock' | 'price_exceeds') => void,
 ): Promise<ProfileResult> {
   const profile = profileData.email;
   // Per-profile correlation id so logs across the parallel runs are
@@ -1908,15 +1949,50 @@ async function runForProfile(
   const cid = `${parentCid}/${profile}`;
   const attemptId = makeAttemptId(job.id, profile);
 
+  // Centralized abort checkpoint. Returns a ProfileResult if the
+  // sibling-abort signal has fired, null otherwise. Caller pattern:
+  //   const aborted = checkAbortPoint('preflight'); if (aborted) return aborted;
+  // Used at every major await boundary in the buy flow (but NOT after
+  // Place Order click — past that point we can't safely bail).
+  const checkAbortPoint = (stage: string): ProfileResult | null => {
+    if (!signal.aborted) return null;
+    const reason = String(signal.reason ?? 'unknown');
+    const error = `Aborted: sibling reported ${reason}`;
+    logger.info(
+      'job.profile.aborted_by_sibling',
+      { jobId: job.id, profile, reason, stage },
+      cid,
+    );
+    void deps.jobAttempts
+      .update(attemptId, { status: 'failed', error })
+      .catch(() => undefined);
+    return failed(profile, error, 'aborted_by_sibling');
+  };
+
   await deps.jobAttempts
     .update(attemptId, { status: 'in_progress' })
     .catch(() => undefined);
+
+  // Earliest checkpoint — queued profiles hit this when picked up by a
+  // freed pMap slot. Bails before opening any browser session so the
+  // sibling-abort case incurs zero PDP/cookie/session cost.
+  {
+    const aborted = checkAbortPoint('preflight');
+    if (aborted) return aborted;
+  }
 
   let page: Page | null = null;
   let session: DriverSession | null = null;
   try {
     logger.info('job.profile.start', { jobId: job.id, profile }, cid);
     session = await getSession(deps, sessions, profile, profileData.headless);
+    {
+      const aborted = checkAbortPoint('after_getSession');
+      if (aborted) {
+        await closeAndForgetSession(sessions, profile);
+        return aborted;
+      }
+    }
     if (deps.snapshotOnFailure) await startTracing(session.context);
     // Always open our own page. A borrowed session (user previously
     // clicked "Order ID" on this profile, opening a window tracked in
@@ -1947,6 +2023,13 @@ async function runForProfile(
       },
       cid,
     );
+    {
+      const aborted = checkAbortPoint('after_scrape');
+      if (aborted) {
+        await closeAndForgetSession(sessions, profile);
+        return aborted;
+      }
+    }
 
     const constraints = { ...DEFAULT_CONSTRAINTS, maxPrice: job.maxPrice };
     const enabledChecks = [
@@ -2008,9 +2091,30 @@ async function runForProfile(
       // reason is captured in the attempt row + snapshot, so nothing
       // is lost by closing.
       await closeAndForgetSession(sessions, profile);
+      // Sibling-abort trigger: PDP-level oos / price-exceeds are
+      // deterministic across accounts (same product, same Amazon
+      // display, regardless of who's looking). Fire the abort so other
+      // in-flight + queued profiles bail at their next checkpoint
+      // instead of all loading the same dead PDP.
+      // 'oos' is the explicit OOS signal. 'price_unknown' means the
+      // PDP price block was hidden — per productConstraints.ts:166-170
+      // that's almost always the "Currently unavailable" buy box, so
+      // treat it as OOS too. 'price_too_high' is the cap-exceeded case.
+      if (report.reason === 'oos' || report.reason === 'price_unknown') {
+        abortSiblings('out_of_stock');
+      } else if (report.reason === 'price_too_high') {
+        abortSiblings('price_exceeds');
+      }
       return needsHuman ? actionRequired(profile, error) : failed(profile, error);
     }
     logger.info('step.verify.ok', { jobId: job.id, profile }, cid);
+    {
+      const aborted = checkAbortPoint('after_verify');
+      if (aborted) {
+        await closeAndForgetSession(sessions, profile);
+        return aborted;
+      }
+    }
 
     // Drive a real (or dry-run) Amazon checkout on the SAME tab. Branch
     // on the global filler switch: filler mode replaces the entire
@@ -2067,6 +2171,20 @@ async function runForProfile(
         })
         .catch(() => undefined);
       await closeAndForgetSession(sessions, profile);
+      // Sibling-abort trigger: stage='checkout_price' means the price
+      // drifted past the cap on /spc (between PDP load and checkout).
+      // Same as PDP-level price-exceeds — propagate to siblings.
+      // stage='item_unavailable' is also product-level (covers both the
+      // "this item is currently unavailable" page and the per-account
+      // quantity-cap page; for the latter, propagating wastes minimal
+      // work since other accounts may not have hit the cap yet — but
+      // out_of_stock is the closer match and the deal is dead either
+      // way, so propagation is the right call).
+      if (buy.stage === 'checkout_price') {
+        abortSiblings('price_exceeds');
+      } else if (buy.stage === 'item_unavailable') {
+        abortSiblings('out_of_stock');
+      }
       // buy.stage is the structured failure category (e.g. 'cashback_gate',
       // 'item_unavailable'). Forwarding it lets BG decide on follow-ups —
       // notably auto-rebuy with fillers when a single-mode buy aborts at
