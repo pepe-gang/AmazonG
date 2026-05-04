@@ -36,6 +36,8 @@ import {
   CART_ADD_URL,
   CART_RESPONSE_RE_SOURCE,
   HTTP_BROWSERY_HEADERS,
+  SPC_ENTRY_URL,
+  SPC_URL_MATCH,
   extractCartAddTokens,
   looksLikeCartResponse,
 } from './amazonHttp.js';
@@ -206,7 +208,6 @@ export type BuyWithFillersResult =
     };
 
 const BUY_NOW_URL_MATCH = /\/gp\/buy\/|\/checkout\/|\/spc\//i;
-const SPC_URL_MATCH = /\/gp\/buy\/|\/checkout\/p\/|\/spc\//i;
 const CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
 
 const FILLER_COUNT = 8;
@@ -358,11 +359,21 @@ export async function buyWithFillers(
   // through so addFillerViaHttp can skip a redundant ctx.request.get round-trip
   // (saves ~300-1500ms per filler buy depending on RTT). Falls back to network
   // fetch if page.content() throws or returns empty.
+  //
+  // CRITICAL: thread the quantity from setMaxQuantity (above) so the
+  // HTTP cart-add commits the right number of units. Without this the
+  // body builder defaults to 1 — pre-v0.13.13 filler-mode used Buy Now
+  // click which respected the dropdown setMaxQuantity sets, but the
+  // HTTP-add path commits via POST body and needs the explicit quantity.
+  // Bug surfaced in user telemetry as "all filler buys committing at
+  // qty=1 instead of max"; verified against the placedQuantity column
+  // in BG dashboard.
+  const targetQuantity = qty.ok ? qty.selected : 1;
   const targetHtmlForHttp = await page.content().catch(() => '');
   const httpTarget = await addFillerViaHttp(
     page,
     targetAsin ?? parseAsinFromUrl(page.url()) ?? '',
-    targetHtmlForHttp,
+    { prefetchedHtml: targetHtmlForHttp, quantity: targetQuantity },
   );
   if (httpTarget.kind === 'committed') {
     logger.info(
@@ -495,69 +506,97 @@ export async function buyWithFillers(
     );
   }
 
-  // 6. Proceed to checkout. Reload the cart page once so the Proceed-
-  //    to-Checkout button submits a form containing the FULL cart
-  //    (target + fillers).
+  // 6. Enter checkout directly. /checkout/entry/cart?proceedToCheckout=1
+  //    is the URL Amazon's BYG ("Need anything else?") "Continue to
+  //    checkout" button points at — a server-side handler that reads
+  //    the user's current cart, spins up a fresh checkout session, and
+  //    302-redirects to /checkout/p/p-{purchaseId}/spc. Hitting it
+  //    directly via page.goto bypasses three navigation-bound steps in
+  //    one shot:
+  //      - the full cart-page render (page.goto /cart, ~1-3s)
+  //      - the Proceed-to-Checkout click (form submit + URL nav, 1-3s)
+  //      - the BYG "Need anything else?" interstitial click (1-3s)
+  //    Net savings ~3-8s per filler buy.
   //
-  //    Why the reload is necessary: clicking Proceed submits the
-  //    `activeCartViewForm` whose item list reflects what was rendered
-  //    on the page when the cart last loaded. HTTP filler adds commit
-  //    items into the server-side cart but DON'T re-render this tab
-  //    (no navigation, no reload), so without an explicit reload the
-  //    submitted form has only the target item — and /spc shows just
-  //    the target, fillers vanish from view. (Verified: this exact
-  //    bug surfaced when the reload was removed entirely.)
+  //    Verified live 2026-05-04 against a real signed-in account: the
+  //    fetch returned /spc HTML in 161-248ms across 5 consecutive runs
+  //    (avg ~180ms); page.goto landed the browser at
+  //    /checkout/p/p-XXX/spc with all cart items populated, no BYG.
+  //    See docs/research/amazon-pipeline.md.
   //
-  //    What we removed: the 2-second `waitForTimeout` + the 20-second
-  //    polling while-loop (cart-row count + reload + sleep). Those
-  //    existed to work around the OLD click-based Add-to-Cart path
-  //    where clicks returned before Amazon's cart-server committed
-  //    (2-5s lag). The HTTP add path returns 200 only after commit,
-  //    so the count polling is dead weight — items are already in the
-  //    server-side cart by the time we get here. One reload is enough
-  //    to pull them into the form view.
+  //    Server-side cart sync: HTTP filler adds returned 200 only after
+  //    Amazon committed each item. Amazon's checkout-entry handler
+  //    reads from that server-side cart, so the items are guaranteed
+  //    to be present without a client-side reload.
   //
-  //    Net: ~2-7s shaved per filler buy vs the old polling path.
+  //    Fallback: if the navigation lands somewhere other than /spc
+  //    (Amazon shifts the URL pattern, or the entry handler returns
+  //    cart/BYG instead), fall through to the click-based flow we
+  //    used to ship — full cart-page render, Proceed click,
+  //    waitForSpcOrHandleByg. Worst case: same wall-clock as before.
+  let usedShortcut = false;
   try {
-    await page.goto(CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.goto(SPC_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   } catch (err) {
     return {
       ok: false,
       stage: 'proceed_checkout',
-      reason: 'failed to reload cart before checkout',
+      reason: 'failed to enter checkout via shortcut',
       detail: String(err),
     };
   }
-  logger.info(
-    'step.fillerBuy.cart.preCheckout',
-    {
-      fillersReportedAdded: fillersAdded,
-      expectedTotal: fillerTargetCount + 1,
-      mode: 'http-synchronous',
-    },
-    cid,
-  );
-
-  const clicked = await clickProceedToCheckout(page);
-  if (!clicked) {
-    return {
-      ok: false,
-      stage: 'proceed_checkout',
-      reason: 'Proceed to Checkout button not found',
-      detail: `url=${page.url()}`,
-    };
+  if (SPC_URL_MATCH.test(page.url())) {
+    usedShortcut = true;
+    logger.info(
+      'step.fillerBuy.spc.shortcut.ok',
+      {
+        url: page.url(),
+        fillersReportedAdded: fillersAdded,
+        expectedTotal: fillerTargetCount + 1,
+      },
+      cid,
+    );
+  } else {
+    // Fallback: shortcut didn't land on /spc (unexpected Amazon response).
+    // Use the click-based flow as we did before this optimization.
+    logger.warn(
+      'step.fillerBuy.spc.shortcut.fallback',
+      { landedUrl: page.url(), note: 'entry-cart shortcut did not redirect to /spc; using click-based flow' },
+      cid,
+    );
+    try {
+      await page.goto(CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    } catch (err) {
+      return {
+        ok: false,
+        stage: 'proceed_checkout',
+        reason: 'failed to reload cart before checkout (fallback path)',
+        detail: String(err),
+      };
+    }
+    const clicked = await clickProceedToCheckout(page);
+    if (!clicked) {
+      return {
+        ok: false,
+        stage: 'proceed_checkout',
+        reason: 'Proceed to Checkout button not found (fallback path)',
+        detail: `url=${page.url()}`,
+      };
+    }
+    const transition = await waitForSpcOrHandleByg(page, cid);
+    if (!transition.ok) {
+      return {
+        ok: false,
+        stage: 'spc_wait',
+        reason: transition.reason,
+        detail: `url=${page.url()}`,
+      };
+    }
+    logger.info('step.fillerBuy.spc.reached.fallback', { url: page.url() }, cid);
   }
-
-  const transition = await waitForSpcOrHandleByg(page, cid);
-  if (!transition.ok) {
-    return {
-      ok: false,
-      stage: 'spc_wait',
-      reason: transition.reason,
-      detail: `url=${page.url()}`,
-    };
-  }
-  logger.info('step.fillerBuy.spc.reached', { url: page.url() }, cid);
+  // Lint silencer — usedShortcut is captured for telemetry/debugging
+  // even when the value isn't routed elsewhere.
+  void usedShortcut;
 
   // 7. Wait for SPC to finish rendering — we have the /spc URL but the
   //    Place Order button may still be hydrating. Reuse the same helper
@@ -2084,9 +2123,30 @@ async function addOneFillerToCart(
   return true;
 }
 
-type PostAddResult =
+export type PostAddResult =
   | { kind: 'committed'; status: number; tookMs: number }
   | { kind: 'failed'; reason: string; status?: number };
+
+export type AddViaHttpOptions = {
+  /**
+   * If the caller already loaded the PDP via Playwright (e.g. the target-add
+   * path right after `scrapeProduct`), pass `await page.content()` here to
+   * skip the duplicate `ctx.request.get(pdpUrl)` round-trip. The post-
+   * hydration DOM still carries the `<form id="addToCart">` and its hidden
+   * inputs server-side — verified across saved PDP fixtures. On parse miss
+   * we fall through to the same failure path as the network path, and the
+   * caller's existing Buy-Now-click fallback kicks in.
+   */
+  prefetchedHtml?: string;
+  /**
+   * Quantity to commit. Defaults to 1 — that's right for fillers (one of
+   * each random item). Single-buy mode passes the value read from the
+   * PDP's `#quantity` dropdown via setMaxQuantity, so multi-unit single
+   * buys (BG always wants the cap) commit correctly through the HTTP
+   * path. Quantities clamped to [1, 99] in the body builder.
+   */
+  quantity?: number;
+};
 
 /**
  * Fully-HTTP add-to-cart: fetch the PDP via `context.request.get`,
@@ -2104,52 +2164,59 @@ type PostAddResult =
  * Referer/Origin manually because APIRequestContext doesn't auto-attach
  * them like a real form submit would.
  */
-async function addFillerViaHttp(
+export async function addFillerViaHttp(
   page: Page,
   asin: string,
-  /**
-   * If the caller already loaded the PDP via Playwright (e.g. the target-add
-   * path right after `scrapeProduct`), pass `await page.content()` here to
-   * skip the duplicate `ctx.request.get(pdpUrl)` round-trip. The post-
-   * hydration DOM still carries the `<form id="addToCart">` and its hidden
-   * inputs server-side — verified across saved PDP fixtures. On parse miss
-   * we fall through to the same failure path as the network path, and the
-   * caller's existing Buy-Now-click fallback kicks in.
-   */
-  prefetchedHtml?: string,
+  opts: AddViaHttpOptions = {},
 ): Promise<PostAddResult> {
+  const { prefetchedHtml, quantity } = opts;
   const ctx = page.context();
   const pdpUrl = `https://www.amazon.com/dp/${asin}`;
 
-  // 1. PDP fetch — skipped when the caller passed `prefetchedHtml`.
-  let pdpHtml: string;
-  if (prefetchedHtml && prefetchedHtml.length > 0) {
-    pdpHtml = prefetchedHtml;
-  } else {
-    let pdpRes;
+  async function fetchPdpHtml(): Promise<
+    { ok: true; html: string } | { ok: false; reason: string; status?: number }
+  > {
+    let res;
     try {
-      pdpRes = await ctx.request.get(pdpUrl, {
+      res = await ctx.request.get(pdpUrl, {
         headers: HTTP_BROWSERY_HEADERS,
         timeout: 15_000,
       });
     } catch (err) {
-      return {
-        kind: 'failed',
-        reason: 'pdp_fetch_threw:' + String(err).slice(0, 80),
-      };
+      return { ok: false, reason: 'pdp_fetch_threw:' + String(err).slice(0, 80) };
     }
-    if (!pdpRes.ok()) {
-      return {
-        kind: 'failed',
-        reason: 'pdp_http_error',
-        status: pdpRes.status(),
-      };
+    if (!res.ok()) {
+      return { ok: false, reason: 'pdp_http_error', status: res.status() };
     }
     try {
-      pdpHtml = await pdpRes.text();
+      return { ok: true, html: await res.text() };
     } catch {
-      return { kind: 'failed', reason: 'pdp_body_read_threw' };
+      return { ok: false, reason: 'pdp_body_read_threw' };
     }
+  }
+
+  // 1. Try `prefetchedHtml` first (caller-provided, usually `await page.content()`
+  //    after scrapeProduct loaded the PDP). If it parses to a valid #addToCart
+  //    form we use it directly. If it doesn't — caller's tab navigated away
+  //    between scrape and here, e.g. clearCart's click-loop fallback hit /cart
+  //    in single-buy mode — we fall through to a fresh `ctx.request.get(pdpUrl)`
+  //    instead of failing the whole HTTP add. This makes prefetchedHtml a true
+  //    optimization with graceful degradation.
+  let pdpHtml: string | null = null;
+  if (prefetchedHtml && prefetchedHtml.length > 0) {
+    const prefetchedDoc = new JSDOM(prefetchedHtml).window.document;
+    if (extractCartAddTokens(prefetchedDoc)) {
+      pdpHtml = prefetchedHtml;
+    }
+  }
+  if (pdpHtml === null) {
+    const fresh = await fetchPdpHtml();
+    if (!fresh.ok) {
+      return fresh.status != null
+        ? { kind: 'failed', reason: fresh.reason, status: fresh.status }
+        : { kind: 'failed', reason: fresh.reason };
+    }
+    pdpHtml = fresh.html;
   }
 
   // 2. Harvest only the fields the modern cart-add endpoint requires.
@@ -2173,11 +2240,16 @@ async function addFillerViaHttp(
   }
   const { csrf, offerListingId, asin: itemAsin } = tokens;
 
+  // Clamp quantity to a sane range. Amazon's PDP dropdowns top out at
+  // ~30 for most items; >99 is never user-facing. Default to 1 when
+  // the caller didn't pass one (fillers, plus any legacy call site).
+  const qty = Math.max(1, Math.min(99, Math.round(quantity ?? 1)));
+
   const body = new URLSearchParams();
   body.append('anti-csrftoken-a2z', csrf);
   body.append('items[0.base][asin]', itemAsin);
   body.append('items[0.base][offerListingId]', offerListingId);
-  body.append('items[0.base][quantity]', '1');
+  body.append('items[0.base][quantity]', String(qty));
   body.append('clientName', CART_ADD_CLIENT_NAME);
 
   // 3. POST to the modern endpoint.
