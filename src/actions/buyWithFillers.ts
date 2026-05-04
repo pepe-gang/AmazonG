@@ -358,11 +358,21 @@ export async function buyWithFillers(
   // through so addFillerViaHttp can skip a redundant ctx.request.get round-trip
   // (saves ~300-1500ms per filler buy depending on RTT). Falls back to network
   // fetch if page.content() throws or returns empty.
+  //
+  // CRITICAL: thread the quantity from setMaxQuantity (above) so the
+  // HTTP cart-add commits the right number of units. Without this the
+  // body builder defaults to 1 — pre-v0.13.13 filler-mode used Buy Now
+  // click which respected the dropdown setMaxQuantity sets, but the
+  // HTTP-add path commits via POST body and needs the explicit quantity.
+  // Bug surfaced in user telemetry as "all filler buys committing at
+  // qty=1 instead of max"; verified against the placedQuantity column
+  // in BG dashboard.
+  const targetQuantity = qty.ok ? qty.selected : 1;
   const targetHtmlForHttp = await page.content().catch(() => '');
   const httpTarget = await addFillerViaHttp(
     page,
     targetAsin ?? parseAsinFromUrl(page.url()) ?? '',
-    { prefetchedHtml: targetHtmlForHttp },
+    { prefetchedHtml: targetHtmlForHttp, quantity: targetQuantity },
   );
   if (httpTarget.kind === 'committed') {
     logger.info(
