@@ -16,6 +16,7 @@ import { evaluateCashbackGate } from '../shared/cashbackGate.js';
 import { clearCart } from './clearCart.js';
 import { addFillerViaHttp } from './buyWithFillers.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
+import { SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHttp.js';
 
 type BuyOptions = {
   dryRun: boolean;
@@ -141,10 +142,6 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     //
     //    Verified live 2026-05-04 against a real signed-in account; see
     //    docs/research/amazon-pipeline.md.
-    const SPC_ENTRY_URL =
-      'https://www.amazon.com/checkout/entry/cart?proceedToCheckout=1';
-    const SPC_URL_RE = /\/gp\/buy\/|\/checkout\/p\/|\/spc\//i;
-
     const targetAsin = parseAsinFromUrl(page.url()) ?? '';
     let usedHttpPath = false;
     if (targetAsin) {
@@ -177,7 +174,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         } catch (err) {
           warn('step.buy.spc.shortcut.gotoErr', { error: String(err).slice(0, 120) });
         }
-        if (SPC_URL_RE.test(page.url())) {
+        if (SPC_URL_MATCH.test(page.url())) {
           usedHttpPath = true;
           step('step.buy.spc.shortcut.ok', { url: page.url() });
         } else {

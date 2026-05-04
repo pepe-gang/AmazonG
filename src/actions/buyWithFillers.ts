@@ -36,6 +36,8 @@ import {
   CART_ADD_URL,
   CART_RESPONSE_RE_SOURCE,
   HTTP_BROWSERY_HEADERS,
+  SPC_ENTRY_URL,
+  SPC_URL_MATCH,
   extractCartAddTokens,
   looksLikeCartResponse,
 } from './amazonHttp.js';
@@ -206,7 +208,6 @@ export type BuyWithFillersResult =
     };
 
 const BUY_NOW_URL_MATCH = /\/gp\/buy\/|\/checkout\/|\/spc\//i;
-const SPC_URL_MATCH = /\/gp\/buy\/|\/checkout\/p\/|\/spc\//i;
 const CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
 
 const FILLER_COUNT = 8;
@@ -533,8 +534,6 @@ export async function buyWithFillers(
   //    cart/BYG instead), fall through to the click-based flow we
   //    used to ship — full cart-page render, Proceed click,
   //    waitForSpcOrHandleByg. Worst case: same wall-clock as before.
-  const SPC_ENTRY_URL =
-    'https://www.amazon.com/checkout/entry/cart?proceedToCheckout=1';
   let usedShortcut = false;
   try {
     await page.goto(SPC_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
@@ -2174,35 +2173,50 @@ export async function addFillerViaHttp(
   const ctx = page.context();
   const pdpUrl = `https://www.amazon.com/dp/${asin}`;
 
-  // 1. PDP fetch — skipped when the caller passed `prefetchedHtml`.
-  let pdpHtml: string;
-  if (prefetchedHtml && prefetchedHtml.length > 0) {
-    pdpHtml = prefetchedHtml;
-  } else {
-    let pdpRes;
+  async function fetchPdpHtml(): Promise<
+    { ok: true; html: string } | { ok: false; reason: string; status?: number }
+  > {
+    let res;
     try {
-      pdpRes = await ctx.request.get(pdpUrl, {
+      res = await ctx.request.get(pdpUrl, {
         headers: HTTP_BROWSERY_HEADERS,
         timeout: 15_000,
       });
     } catch (err) {
-      return {
-        kind: 'failed',
-        reason: 'pdp_fetch_threw:' + String(err).slice(0, 80),
-      };
+      return { ok: false, reason: 'pdp_fetch_threw:' + String(err).slice(0, 80) };
     }
-    if (!pdpRes.ok()) {
-      return {
-        kind: 'failed',
-        reason: 'pdp_http_error',
-        status: pdpRes.status(),
-      };
+    if (!res.ok()) {
+      return { ok: false, reason: 'pdp_http_error', status: res.status() };
     }
     try {
-      pdpHtml = await pdpRes.text();
+      return { ok: true, html: await res.text() };
     } catch {
-      return { kind: 'failed', reason: 'pdp_body_read_threw' };
+      return { ok: false, reason: 'pdp_body_read_threw' };
     }
+  }
+
+  // 1. Try `prefetchedHtml` first (caller-provided, usually `await page.content()`
+  //    after scrapeProduct loaded the PDP). If it parses to a valid #addToCart
+  //    form we use it directly. If it doesn't — caller's tab navigated away
+  //    between scrape and here, e.g. clearCart's click-loop fallback hit /cart
+  //    in single-buy mode — we fall through to a fresh `ctx.request.get(pdpUrl)`
+  //    instead of failing the whole HTTP add. This makes prefetchedHtml a true
+  //    optimization with graceful degradation.
+  let pdpHtml: string | null = null;
+  if (prefetchedHtml && prefetchedHtml.length > 0) {
+    const prefetchedDoc = new JSDOM(prefetchedHtml).window.document;
+    if (extractCartAddTokens(prefetchedDoc)) {
+      pdpHtml = prefetchedHtml;
+    }
+  }
+  if (pdpHtml === null) {
+    const fresh = await fetchPdpHtml();
+    if (!fresh.ok) {
+      return fresh.status != null
+        ? { kind: 'failed', reason: fresh.reason, status: fresh.status }
+        : { kind: 'failed', reason: fresh.reason };
+    }
+    pdpHtml = fresh.html;
   }
 
   // 2. Harvest only the fields the modern cart-add endpoint requires.

@@ -44,6 +44,32 @@ export const CART_ADD_URL =
 export const CART_ADD_CLIENT_NAME = 'Aplus_BuyableModules_DetailPage';
 
 /**
+ * Amazon's BYG-Continue handler URL. A `page.goto` here reads the user's
+ * server-side cart, spins up a fresh checkout session, and 302-redirects
+ * to `/checkout/p/p-{purchaseId}/spc` with all cart items populated.
+ * Replaces three navigation steps in the legacy click flow (cart-page
+ * render + Proceed click + BYG interstitial click) with one nav.
+ *
+ * Used by both filler mode (buyWithFillers) and single-buy mode (buyNow)
+ * after their respective HTTP cart-adds commit.
+ */
+export const SPC_ENTRY_URL =
+  'https://www.amazon.com/checkout/entry/cart?proceedToCheckout=1';
+
+/**
+ * Regex returns true when `page.url()` is anywhere inside Amazon's checkout
+ * funnel. Matches the three URL shapes Amazon currently routes checkout
+ * sessions through:
+ *   - `/gp/buy/...`         (legacy)
+ *   - `/checkout/p/...`     (Chewbacca SPC)
+ *   - `/spc/...`            (newer SPC)
+ *
+ * Used to verify the SPC_ENTRY_URL shortcut actually landed on a checkout
+ * page (vs. a fallback to /cart or BYG).
+ */
+export const SPC_URL_MATCH = /\/gp\/buy\/|\/checkout\/p\/|\/spc\//i;
+
+/**
  * Regex that returns true if the given response body looks like a
  * successful cart-page render. A successful Amazon cart-add returns
  * either:
