@@ -442,15 +442,26 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       page.url(),
     );
 
-    // 12. Canonical orderId source: navigate to Your Orders and grep the
-    //     most recent "Order # 123-…" — matches old AutoG. Most-recent
-    //     wins because the just-placed order sits at the top.
-    step('step.buy.orderid.fetch', { url: 'https://www.amazon.com/gp/css/order-history' });
-    const orderId = await fetchOrderIdFromHistory(page).catch(() => null);
-    if (!orderId) {
-      warn('step.buy.orderid.notfound', {
-        note: 'order-history page did not reveal a parseable order id within 10s',
-      });
+    // 12. orderId capture. Fast-path first: Amazon renders the canonical
+    //     fulfillment orderId as <input name="latestOrderId"> on the
+    //     thank-you page (verified live 2026-05-04). Saves ~15s vs the
+    //     order-history nav for the common single-fulfillment case.
+    //
+    //     Fallback: the existing /gp/css/order-history grep when the
+    //     hidden input is missing (older Amazon templates, edge cases).
+    let orderId: string | null = null;
+    const fastOrderId = await readLatestOrderIdFromDom(page);
+    if (fastOrderId) {
+      orderId = fastOrderId;
+      step('step.buy.orderid.fast', { source: 'thankyou_dom', orderId });
+    } else {
+      step('step.buy.orderid.fetch', { url: 'https://www.amazon.com/gp/css/order-history' });
+      orderId = await fetchOrderIdFromHistory(page).catch(() => null);
+      if (!orderId) {
+        warn('step.buy.orderid.notfound', {
+          note: 'neither thank-you DOM nor order-history page revealed a parseable order id',
+        });
+      }
     }
 
     step('step.buy.placed', {
@@ -2026,6 +2037,49 @@ export async function pickBestCashbackDelivery(
     }
   }
   return { changes };
+}
+
+/**
+ * Fast-path: read the just-placed orderId from the thank-you page's
+ * hidden form inputs. Amazon renders the canonical fulfillment orderId
+ * as `<input type="hidden" name="latestOrderId" value="112-XXX-XXXXXXX">`
+ * on the thank-you page (and survives the post-thank-you auto-refresh
+ * to recommendations — the inputs are duplicated into multiple hidden
+ * forms across the page).
+ *
+ * Verified live 2026-05-04 with two real Place Order tests:
+ *   - Single-fulfillment whey buy: latestOrderId matched the actual
+ *     orderId on order-details. Cancelled cleanly.
+ *   - Multi-fulfillment fan-out (MacBook + Jackery, 2 orders): the
+ *     thank-you page rendered ONLY ONE latestOrderId (the canonical
+ *     order's). The second fan-out order's id was not on the page.
+ *
+ * Implication: this fast-path is reliable for SINGLE-fulfillment buys
+ * (which is the common case for buy-now mode). For fan-out cases, it
+ * captures only the canonical order — same coverage limit as the
+ * existing fetchOrderIdFromHistory body-text regex (which also only
+ * returns one orderId).
+ *
+ * Filler mode does NOT use this fast-path — `fetchOrderIdsForAsins` is
+ * still required there for the full ASIN→order mapping that drives
+ * the filler-cancel sweep. The DOM read would only give us the target's
+ * order; the filler-only orders' ids still need the order-history walk.
+ *
+ * Saves ~15s vs the order-history nav. Returns null on miss; caller
+ * falls through to the existing nav.
+ *
+ * See `docs/research/amazon-pipeline.md` for the full empirical
+ * research behind this field.
+ */
+async function readLatestOrderIdFromDom(page: Page): Promise<string | null> {
+  const value = await page
+    .locator('input[name="latestOrderId"]')
+    .first()
+    .getAttribute('value', { timeout: 1_000 })
+    .catch(() => null);
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return /^\d{3}-\d{7}-\d{7}$/.test(trimmed) ? trimmed : null;
 }
 
 /**
