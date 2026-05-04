@@ -390,6 +390,27 @@ if (SPC_URL_MATCH.test(page.url())) {
 - Cart-empty edge case: not probed live. The current `clearCart` step
   at filler-mode start makes this unreachable in practice (we always
   add at least the target before reaching this URL).
+- **Per-account quantity caps surface at `/itemselect`, not on PDP.**
+  Verified empirically 2026-05-04 with cotton swabs B09541P9WH: PDP
+  `#quantity` dropdown offered up to 27, but the user's account had
+  a per-account cap of 25 (an Amazon-imposed item-specific limit; per
+  user side note, B0GR1J6T45 also has one). HTTP cart-add committed
+  at 27 (200 OK), the shortcut redirected to
+  `/checkout/p/p-XXX/itemselect` showing "Make updates to your items".
+  The existing `waitForCheckout` handler in buyNow.ts detects this as
+  `kind: 'quantity_limit'` and fails with `item_unavailable`. **Same
+  outcome the click-based path produces** — Amazon enforces the cap
+  at checkout regardless of how the cart was populated. No code
+  change needed; the failure surfaces post-commit, not pre-add.
+
+### Single-buy mode applied the same shortcut
+
+`buyNow.ts` now uses the same flow (clearCart → HTTP-add target with
+selectMaxQuantity-derived quantity → cart→/spc shortcut). Verified
+live with a clean qty=1 test that landed directly at
+`/checkout/p/p-106-0155244-7547441/spc` with all SPC selectors present.
+Buy-Now-click and ATC-fallback paths preserved for non-buyable PDPs
+(no `offerListingId` in form — marketplace items, Echo Dot pattern).
 
 ---
 
