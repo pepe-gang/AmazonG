@@ -1229,25 +1229,44 @@ async function fetchOrderIdsForAsins(
 
   // Read once, non-retrying — we've already waited above.
   //
-  // Algorithm (document-order, nesting-agnostic):
-  //   1. Walk the full DOM in document order. For each element,
-  //      record whether its text introduces an order-id and whether
-  //      it's an /dp/ product link.
-  //   2. Stream through the two interleaved streams. Every /dp/
-  //      link is attributed to the most recently SEEN order-id.
+  // Algorithm (document-order, first-occurrence-per-ASIN):
+  //   1. Walk the full DOM in document order, collecting `id` and `link`
+  //      events. Skip text inside <script>/<style>/<noscript>/<template>
+  //      so JSON-embedded sessionIds + EWC cache keys don't pollute.
+  //   2. For each cart ASIN, take ONLY the first occurrence in document
+  //      order — by then the page is showing today's just-placed orders
+  //      at the top. Older orders that share an ASIN with our cart are
+  //      silently skipped. Each cart ASIN maps to exactly one orderId.
   //
-  // This avoids all the ancestor-walker pitfalls of the prior
-  // implementation: Amazon's order-history page nests multiple order
-  // cards under shared containers, and any "walk up until the
-  // ancestor has a /dp/ link" strategy can cross-pollute ASIN matches
-  // across sibling cards — causing filler-only orders to be tagged
-  // with the target ASIN (from a sibling card's link) and therefore
-  // excluded from the cancellation sweep. The fix is to use linear
-  // document order: a link belongs to whichever order id it most
-  // recently appeared AFTER.
+  // This fixes two empirical bugs verified live 2026-05-04 against a
+  // real signed-in account:
+  //
+  //   (a) Amazon's order-history page embeds JSON like
+  //       `{"sessionId":"147-1303082-4549660"}` inside <script> tags.
+  //       The previous walker (no `acceptNode` filter) read those text
+  //       nodes, regex'd id-shaped strings, and inserted them into
+  //       seenIds BEFORE any visible order. /dp/ links in page-header
+  //       carousels then got attributed to the phantom session ID.
+  //
+  //   (b) The "every link → most-recently-seen orderId" rule cross-
+  //       pollinated old orders. If user previously bought ASIN X and
+  //       now places another order containing X, the walker would find
+  //       X under BOTH orders and report both as containing the new
+  //       cart's ASIN. The "filler" classifier then either claimed the
+  //       new buy fanned to 2+ orders (it didn't), or attempted to
+  //       cancel a historical order (which usually fails terminally
+  //       but could in principle succeed and destroy a real prior
+  //       purchase). Either way: garbage in BG's audit fields.
+  //
+  // The fix preserves the original spirit (single document walk, no
+  // ancestor magic) while adding two surgical changes: the script-tag
+  // text filter and the first-occurrence dedup.
+  //
+  // See docs/research/amazon-pipeline.md for the live test that
+  // produced this fix.
   const raw = await page
     .evaluate(
-      ({ asinList, maxCards }) => {
+      ({ asinList }) => {
         // Walk every element + text node in document order, collecting
         // "order-id encountered at position N" and "dp link with ASIN
         // encountered at position N" events into a single stream.
@@ -1271,13 +1290,33 @@ async function fetchOrderIdsForAsins(
           if (asin) linkToAsin.set(a, asin);
         }
 
-        // Single walk over text + element nodes in document order. We
-        // use a TreeWalker that shows both types so the ordering is
-        // preserved across the DOM tree (each text node appears in
-        // its correct position relative to siblings).
+        // Single walk over text + element nodes in document order. The
+        // `acceptNode` filter rejects text inside non-rendered elements
+        // (<script>/<style>/<noscript>/<template>) so JSON-embedded
+        // sessionIds and EWC cache keys (which share the orderId shape
+        // \d{3}-\d{7}-\d{7}) can't pollute seenIds.
         const walker = document.createTreeWalker(
           document.body,
           NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+          {
+            acceptNode(node) {
+              if (node.nodeType === Node.TEXT_NODE) {
+                const p = node.parentElement;
+                if (p) {
+                  const tag = p.tagName;
+                  if (
+                    tag === 'SCRIPT' ||
+                    tag === 'STYLE' ||
+                    tag === 'NOSCRIPT' ||
+                    tag === 'TEMPLATE'
+                  ) {
+                    return NodeFilter.FILTER_REJECT;
+                  }
+                }
+              }
+              return NodeFilter.FILTER_ACCEPT;
+            },
+          },
         );
         const seenIds = new Set<string>();
         let n: Node | null = walker.currentNode;
@@ -1293,7 +1332,7 @@ async function fetchOrderIdsForAsins(
               let mm: RegExpExecArray | null;
               while ((mm = allRe.exec(text)) !== null) {
                 const id = mm[1]!;
-                if (!seenIds.has(id) && seenIds.size < maxCards) {
+                if (!seenIds.has(id)) {
                   seenIds.add(id);
                   events.push({ kind: 'id', id });
                 }
@@ -1306,47 +1345,48 @@ async function fetchOrderIdsForAsins(
           n = walker.nextNode();
         }
 
-        // Attribute each /dp/ link to the most recently seen order-id.
-        // Links that appear BEFORE any order-id (unusual — page
-        // header carousels) are ignored.
-        const matchedByOrder = new Map<string, Set<string>>();
+        // First-occurrence-per-ASIN attribution. For each cart ASIN,
+        // record the orderId most recently seen above its FIRST /dp/
+        // link only. The first /dp/<asin> link on the page is the
+        // topmost — i.e. inside the most-recently-placed order card.
+        // Subsequent /dp/<asin> links in older order cards (same ASIN,
+        // historical purchase) are ignored.
+        const asinToFirstOrder = new Map<string, string>();
         let currentId: string | null = null;
         for (const ev of events) {
           if (ev.kind === 'id') {
             currentId = ev.id;
-            if (!matchedByOrder.has(currentId)) {
-              matchedByOrder.set(currentId, new Set<string>());
-            }
-          } else if (currentId && asinList.includes(ev.asin)) {
-            matchedByOrder.get(currentId)!.add(ev.asin);
+          } else if (
+            currentId &&
+            asinList.includes(ev.asin) &&
+            !asinToFirstOrder.has(ev.asin)
+          ) {
+            asinToFirstOrder.set(ev.asin, currentId);
           }
         }
 
+        // Group: orderId → set of cart ASINs first-seen under it.
+        const matchedByOrder = new Map<string, Set<string>>();
+        for (const [asin, orderId] of asinToFirstOrder) {
+          if (!matchedByOrder.has(orderId)) matchedByOrder.set(orderId, new Set<string>());
+          matchedByOrder.get(orderId)!.add(asin);
+        }
+
         const out: { orderId: string; matchedAsins: string[] }[] = [];
-        for (const id of seenIds) {
-          const asins = Array.from(matchedByOrder.get(id) ?? []);
-          out.push({ orderId: id, matchedAsins: asins });
+        for (const [orderId, asinSet] of matchedByOrder) {
+          out.push({ orderId, matchedAsins: Array.from(asinSet) });
         }
         return out;
       },
-      { asinList: asins, maxCards: 15 },
+      { asinList: asins },
     )
     .catch(() => [] as OrderMatch[]);
 
-  // Surface empty-match orders as a warning so "filler order showed up
-  // in history but got zero ASIN matches" is diagnosable.
-  for (const r of raw) {
-    if (r.matchedAsins.length === 0) {
-      logger.warn('step.fillerBuy.history.order.no_asins', {
-        orderId: r.orderId,
-        note: 'order id found in history but no cart ASINs attributed — may indicate DOM layout Amazon changed',
-      });
-    }
-  }
-
-  // Return only orders with at least one ASIN match (the caller uses
-  // matchedAsins to classify target vs filler orders).
-  return raw.filter((r) => r.matchedAsins.length > 0);
+  // The first-occurrence-per-ASIN algorithm above only emits orderIds
+  // that ended up with at least one cart ASIN matched, so no zero-match
+  // filtering is needed (and the previous "no_asins" warning is dead
+  // code under the new algorithm).
+  return raw;
 }
 
 /**
