@@ -488,6 +488,108 @@ be tampered with via browser-back / refresh / shared link.
 
 ---
 
+## Verify-phase: direct fetch replaces page.goto + 15s poll
+
+**Date observed:** 2026-05-04
+
+`verifyOrder` previously did `page.goto(/gp/your-account/order-details?orderID=X)`
++ a 15s polling loop on `body.innerText`. Total wall-clock: 5-15s
+depending on Amazon's hydration speed.
+
+`ctx.request.get` to the same URL returns the rendered HTML in
+~830-1600ms (avg ~1.07s across 7 live tests). The HTML contains the
+same state markers, just available pre-hydration.
+
+### The cancelled discriminator
+
+`<div data-component="cancelled">` is on **every** order-details page
+regardless of state. The div's INNER content is what disambiguates:
+
+- Cancelled order: contains `"This order has been cancelled"` text
+- Active order: empty or placeholder content
+
+Reliable scoped regex:
+```
+/<div[^>]+data-component=["']cancelled["'][^>]*>[\s\S]{0,3000}?This order has been cancell?ed/i
+```
+
+The 3000-char look-ahead bounds matching cost (live-observed inner
+text is ~80-100 chars; generous bound).
+
+### Live verification
+
+7/7 correct across mixed states:
+
+| Order | State | Detected | Time |
+|---|---|---|---|
+| 112-3432161-4747415 (whey) | cancelled | cancelled | 853ms |
+| 112-8816875-9503447 (MacBook) | cancelled | cancelled | 841ms |
+| 112-0624058-6992233 (Jackery) | cancelled | cancelled | 844ms |
+| 114-7718341-1297005 | active | active | 1271ms |
+| 114-2894656-8633022 | active | active | 1037ms |
+| 111-8123438-8059432 | active | active | 1061ms |
+| 114-5740100-2596219 (iPad) | active | active | 1596ms |
+
+### Implementation shipped
+
+`src/actions/verifyOrder.ts` rewritten to use `page.context().request.get`
+instead of `page.goto`. Active-state check uses JSDOM-parsed
+`textContent` for the same orderId-rendered + content-keyword pair the
+previous in-page polling used. Payment-revision detector unchanged
+(`isPaymentRevisionRequired`). Error-page regex unchanged.
+
+Pure HTTP — no browser tab navigated. Frees the lifecycle-concurrency
+cap so verify and fetch_tracking can run on more orders in parallel.
+
+---
+
+## Ship-track: parallel fetch replaces sequential page.goto
+
+**Date observed:** 2026-05-04
+
+`fetchTracking` previously did `page.goto` per `/ship-track` URL with
+a 30s timeout cap + 10s `waitForSelector` for tracking-card hydration.
+For a 3-shipment order, this was ~30-90s sequentially.
+
+`ctx.request.get` per URL returns the same HTML in ~300-800ms each.
+With `Promise.allSettled`, N URLs can fire concurrently (Amazon's edge
+partially throttles same-cookie concurrent same-host requests, but
+total wall is still ~1-1.5s for typical N=2-3).
+
+### Live verification
+
+- Sample shipped order (`PknNR2kmC` shipment): tracking ID
+  `9361289716363731758195` extracted via the existing
+  `.pt-delivery-card-trackingId` selector — 782ms.
+- 3 not-yet-shipped order URLs from open-orders: each ~340ms parallel
+  (1260ms total wall), parser correctly returns null for each
+  (matches today's "no tracking yet, retry later" behavior).
+- Existing parsers `shipTrackLinksFor` and `trackingIdFromShipTrack`
+  work unchanged on JSDOM Documents.
+
+### Implementation shipped
+
+`src/actions/fetchTracking.ts` now fetches order-details via HTTP
+(needed since `verifyOrder` no longer leaves the page on
+order-details), then runs `Promise.allSettled` over a map of
+`ctx.request.get` calls for each ship-track URL. Per-fetch timeout
+15s — a stuck shipment falls through to "missing" → outcome = partial
+or not_shipped (same as today's null-response handling).
+
+Saves ~25-29s on a typical 3-shipment buy.
+
+### What didn't change
+
+- Failure modes (cancel-detected → cancelled outcome, error → retry,
+  null-response → missing → partial/not_shipped) — all unchanged.
+- Per-shipment selectors (`.pt-delivery-card-trackingId`,
+  `.tracking-event-trackingId-text`) — already proven correct
+  on JSDOM Documents in the prior parser tests.
+- The verify-phase paymentRevisionRequired flag still propagates
+  through every active-derived outcome.
+
+---
+
 ## Header dropdown / mini order list (not used)
 
 Amazon's header "Returns & Orders" dropdown shows the most recent few
