@@ -495,69 +495,99 @@ export async function buyWithFillers(
     );
   }
 
-  // 6. Proceed to checkout. Reload the cart page once so the Proceed-
-  //    to-Checkout button submits a form containing the FULL cart
-  //    (target + fillers).
+  // 6. Enter checkout directly. /checkout/entry/cart?proceedToCheckout=1
+  //    is the URL Amazon's BYG ("Need anything else?") "Continue to
+  //    checkout" button points at — a server-side handler that reads
+  //    the user's current cart, spins up a fresh checkout session, and
+  //    302-redirects to /checkout/p/p-{purchaseId}/spc. Hitting it
+  //    directly via page.goto bypasses three navigation-bound steps in
+  //    one shot:
+  //      - the full cart-page render (page.goto /cart, ~1-3s)
+  //      - the Proceed-to-Checkout click (form submit + URL nav, 1-3s)
+  //      - the BYG "Need anything else?" interstitial click (1-3s)
+  //    Net savings ~3-8s per filler buy.
   //
-  //    Why the reload is necessary: clicking Proceed submits the
-  //    `activeCartViewForm` whose item list reflects what was rendered
-  //    on the page when the cart last loaded. HTTP filler adds commit
-  //    items into the server-side cart but DON'T re-render this tab
-  //    (no navigation, no reload), so without an explicit reload the
-  //    submitted form has only the target item — and /spc shows just
-  //    the target, fillers vanish from view. (Verified: this exact
-  //    bug surfaced when the reload was removed entirely.)
+  //    Verified live 2026-05-04 against a real signed-in account: the
+  //    fetch returned /spc HTML in 161-248ms across 5 consecutive runs
+  //    (avg ~180ms); page.goto landed the browser at
+  //    /checkout/p/p-XXX/spc with all cart items populated, no BYG.
+  //    See docs/research/amazon-pipeline.md.
   //
-  //    What we removed: the 2-second `waitForTimeout` + the 20-second
-  //    polling while-loop (cart-row count + reload + sleep). Those
-  //    existed to work around the OLD click-based Add-to-Cart path
-  //    where clicks returned before Amazon's cart-server committed
-  //    (2-5s lag). The HTTP add path returns 200 only after commit,
-  //    so the count polling is dead weight — items are already in the
-  //    server-side cart by the time we get here. One reload is enough
-  //    to pull them into the form view.
+  //    Server-side cart sync: HTTP filler adds returned 200 only after
+  //    Amazon committed each item. Amazon's checkout-entry handler
+  //    reads from that server-side cart, so the items are guaranteed
+  //    to be present without a client-side reload.
   //
-  //    Net: ~2-7s shaved per filler buy vs the old polling path.
+  //    Fallback: if the navigation lands somewhere other than /spc
+  //    (Amazon shifts the URL pattern, or the entry handler returns
+  //    cart/BYG instead), fall through to the click-based flow we
+  //    used to ship — full cart-page render, Proceed click,
+  //    waitForSpcOrHandleByg. Worst case: same wall-clock as before.
+  const SPC_ENTRY_URL =
+    'https://www.amazon.com/checkout/entry/cart?proceedToCheckout=1';
+  let usedShortcut = false;
   try {
-    await page.goto(CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.goto(SPC_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   } catch (err) {
     return {
       ok: false,
       stage: 'proceed_checkout',
-      reason: 'failed to reload cart before checkout',
+      reason: 'failed to enter checkout via shortcut',
       detail: String(err),
     };
   }
-  logger.info(
-    'step.fillerBuy.cart.preCheckout',
-    {
-      fillersReportedAdded: fillersAdded,
-      expectedTotal: fillerTargetCount + 1,
-      mode: 'http-synchronous',
-    },
-    cid,
-  );
-
-  const clicked = await clickProceedToCheckout(page);
-  if (!clicked) {
-    return {
-      ok: false,
-      stage: 'proceed_checkout',
-      reason: 'Proceed to Checkout button not found',
-      detail: `url=${page.url()}`,
-    };
+  if (SPC_URL_MATCH.test(page.url())) {
+    usedShortcut = true;
+    logger.info(
+      'step.fillerBuy.spc.shortcut.ok',
+      {
+        url: page.url(),
+        fillersReportedAdded: fillersAdded,
+        expectedTotal: fillerTargetCount + 1,
+      },
+      cid,
+    );
+  } else {
+    // Fallback: shortcut didn't land on /spc (unexpected Amazon response).
+    // Use the click-based flow as we did before this optimization.
+    logger.warn(
+      'step.fillerBuy.spc.shortcut.fallback',
+      { landedUrl: page.url(), note: 'entry-cart shortcut did not redirect to /spc; using click-based flow' },
+      cid,
+    );
+    try {
+      await page.goto(CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    } catch (err) {
+      return {
+        ok: false,
+        stage: 'proceed_checkout',
+        reason: 'failed to reload cart before checkout (fallback path)',
+        detail: String(err),
+      };
+    }
+    const clicked = await clickProceedToCheckout(page);
+    if (!clicked) {
+      return {
+        ok: false,
+        stage: 'proceed_checkout',
+        reason: 'Proceed to Checkout button not found (fallback path)',
+        detail: `url=${page.url()}`,
+      };
+    }
+    const transition = await waitForSpcOrHandleByg(page, cid);
+    if (!transition.ok) {
+      return {
+        ok: false,
+        stage: 'spc_wait',
+        reason: transition.reason,
+        detail: `url=${page.url()}`,
+      };
+    }
+    logger.info('step.fillerBuy.spc.reached.fallback', { url: page.url() }, cid);
   }
-
-  const transition = await waitForSpcOrHandleByg(page, cid);
-  if (!transition.ok) {
-    return {
-      ok: false,
-      stage: 'spc_wait',
-      reason: transition.reason,
-      detail: `url=${page.url()}`,
-    };
-  }
-  logger.info('step.fillerBuy.spc.reached', { url: page.url() }, cid);
+  // Lint silencer — usedShortcut is captured for telemetry/debugging
+  // even when the value isn't routed elsewhere.
+  void usedShortcut;
 
   // 7. Wait for SPC to finish rendering — we have the /spc URL but the
   //    Place Order button may still be hydrating. Reuse the same helper
