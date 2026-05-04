@@ -92,11 +92,24 @@ hypothesis "purchaseId == orderId for non-split buys" is **disproved**.
 
 **Date observed:** 2026-05-04
 
-Verified empirically by inspecting (a) order-history page, (b) order-details
-page for our just-placed orderId. Both pages contain **zero references**
-to the purchaseId that produced the order. The orderId is present, the
-purchaseId is absent. There is no programmatic lookup like "given this
-purchaseId, find its orders" available from a customer session.
+Verified empirically through aggressive endpoint probing:
+
+| Avenue checked | Result |
+|---|---|
+| `/gp/css/order-history` HTML | ❌ no purchaseId anywhere on page |
+| `/gp/your-account/order-details?orderID=...` HTML | ❌ no purchaseId |
+| `/your-orders/orders/{orderId}` (AUI streaming JSON) | ❌ orderId yes, purchaseId no |
+| `/gp/your-account/order-history?detail=true&orderId=...` | ❌ same |
+| `/gp/your-account/order-details?orderID=...&output=json` | ❌ returns HTML, no purchaseId |
+| `/orders/v1/orderTrackingDetails`, `/api/orders/...`, `/gp/aw/orderdetails`, `/api/y/your-orders/orders/...` | 404 (don't exist) |
+| Order-search by purchaseId as keyword (`?search=106-...`) | ❌ returns 0 matching orders. The `hasPurchaseId: true` initially observed was a false signal — the search term is echoed back in input value/breadcrumbs but no order matches it. |
+| Order-search by orderId as keyword (control) | ✅ correctly finds the order (sanity check) |
+
+**Conclusion:** Amazon does NOT expose the purchaseId↔orderId
+correlation anywhere accessible from a customer session. Their order
+management system holds this mapping internally but it is not a
+customer-facing concept. Order-search indexes orderId, item titles,
+ASIN, seller name — but not the internal checkout session.
 
 **Implication:** the purchaseId↔orderId correlation is only knowable at
 order-placement time, when AmazonG sees the URL `purchaseId` AND walks
@@ -106,6 +119,19 @@ purchaseId at that moment, the mapping is permanently lost.
 This is the strongest argument for storing `amazonPurchaseId` on
 `AutoBuyJob` (BG-side schema). It's a write-once, read-anytime audit
 value with no fallback source.
+
+### What CAN be reached programmatically (catalogued for future use)
+
+`/your-orders/orders/{orderId}` returns ~333KB of `application/json-amazonui-streaming`
+JSON in ~340ms. Same with `/your-orders/search?keyword=...`. These are
+faster than full HTML page loads (which return ~860KB in ~300ms each).
+Could be used to fetch order details without a `page.goto` — but they
+don't expose any new IDs we don't already have. Mostly relevant if we
+ever want to verify order status without a full page navigation.
+
+`/gp/your-account/order-history?orderFilter=all&search=<orderId>` is the
+fastest order-search; resolves a single orderId to its full card in
+~300ms. Faster than scanning the entire history page.
 
 ---
 
