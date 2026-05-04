@@ -362,7 +362,7 @@ export async function buyWithFillers(
   const httpTarget = await addFillerViaHttp(
     page,
     targetAsin ?? parseAsinFromUrl(page.url()) ?? '',
-    targetHtmlForHttp,
+    { prefetchedHtml: targetHtmlForHttp },
   );
   if (httpTarget.kind === 'committed') {
     logger.info(
@@ -2114,9 +2114,30 @@ async function addOneFillerToCart(
   return true;
 }
 
-type PostAddResult =
+export type PostAddResult =
   | { kind: 'committed'; status: number; tookMs: number }
   | { kind: 'failed'; reason: string; status?: number };
+
+export type AddViaHttpOptions = {
+  /**
+   * If the caller already loaded the PDP via Playwright (e.g. the target-add
+   * path right after `scrapeProduct`), pass `await page.content()` here to
+   * skip the duplicate `ctx.request.get(pdpUrl)` round-trip. The post-
+   * hydration DOM still carries the `<form id="addToCart">` and its hidden
+   * inputs server-side — verified across saved PDP fixtures. On parse miss
+   * we fall through to the same failure path as the network path, and the
+   * caller's existing Buy-Now-click fallback kicks in.
+   */
+  prefetchedHtml?: string;
+  /**
+   * Quantity to commit. Defaults to 1 — that's right for fillers (one of
+   * each random item). Single-buy mode passes the value read from the
+   * PDP's `#quantity` dropdown via setMaxQuantity, so multi-unit single
+   * buys (BG always wants the cap) commit correctly through the HTTP
+   * path. Quantities clamped to [1, 99] in the body builder.
+   */
+  quantity?: number;
+};
 
 /**
  * Fully-HTTP add-to-cart: fetch the PDP via `context.request.get`,
@@ -2134,20 +2155,12 @@ type PostAddResult =
  * Referer/Origin manually because APIRequestContext doesn't auto-attach
  * them like a real form submit would.
  */
-async function addFillerViaHttp(
+export async function addFillerViaHttp(
   page: Page,
   asin: string,
-  /**
-   * If the caller already loaded the PDP via Playwright (e.g. the target-add
-   * path right after `scrapeProduct`), pass `await page.content()` here to
-   * skip the duplicate `ctx.request.get(pdpUrl)` round-trip. The post-
-   * hydration DOM still carries the `<form id="addToCart">` and its hidden
-   * inputs server-side — verified across saved PDP fixtures. On parse miss
-   * we fall through to the same failure path as the network path, and the
-   * caller's existing Buy-Now-click fallback kicks in.
-   */
-  prefetchedHtml?: string,
+  opts: AddViaHttpOptions = {},
 ): Promise<PostAddResult> {
+  const { prefetchedHtml, quantity } = opts;
   const ctx = page.context();
   const pdpUrl = `https://www.amazon.com/dp/${asin}`;
 
@@ -2203,11 +2216,16 @@ async function addFillerViaHttp(
   }
   const { csrf, offerListingId, asin: itemAsin } = tokens;
 
+  // Clamp quantity to a sane range. Amazon's PDP dropdowns top out at
+  // ~30 for most items; >99 is never user-facing. Default to 1 when
+  // the caller didn't pass one (fillers, plus any legacy call site).
+  const qty = Math.max(1, Math.min(99, Math.round(quantity ?? 1)));
+
   const body = new URLSearchParams();
   body.append('anti-csrftoken-a2z', csrf);
   body.append('items[0.base][asin]', itemAsin);
   body.append('items[0.base][offerListingId]', offerListingId);
-  body.append('items[0.base][quantity]', '1');
+  body.append('items[0.base][quantity]', String(qty));
   body.append('clientName', CART_ADD_CLIENT_NAME);
 
   // 3. POST to the modern endpoint.

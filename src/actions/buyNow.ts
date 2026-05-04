@@ -13,6 +13,9 @@ import {
 import { effectivePriceTolerance } from '../parsers/productConstraints.js';
 import type { BuyResult } from '../shared/types.js';
 import { evaluateCashbackGate } from '../shared/cashbackGate.js';
+import { clearCart } from './clearCart.js';
+import { addFillerViaHttp } from './buyWithFillers.js';
+import { parseAsinFromUrl } from '../shared/sanitize.js';
 
 type BuyOptions = {
   dryRun: boolean;
@@ -101,25 +104,12 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
   try {
     step('step.buy.start', { dryRun: opts.dryRun, productUrl: page.url() });
 
-    // 1. Pick the buy path. Buy Now is preferred (one click → /spc), but
-    //    some PDPs (Echo Dot and other Prime exclusives) hide it entirely
-    //    and only surface Add to Cart. Detect what's actually clickable;
-    //    if neither is there after the timeout, fail fast.
-    const path = await detectBuyPath(page);
-    if (path === 'none') {
-      return fail('buy_click', 'neither buy-now nor add-to-cart button appeared');
-    }
-    step('step.buy.path', { path });
-
-    // 1.5. Set quantity to the highest numeric option in the #quantity
-    //      dropdown (skipping "10+" / custom-input entries). Mirrors old
-    //      AutoG — BG always wants the max units per order. Best-effort:
-    //      products with no dropdown (qty fixed at 1) just skip cleanly.
+    // 1. Quantity: read the max numeric option from the PDP's #quantity
+    //    dropdown so the HTTP cart-add commits the right quantity in
+    //    one shot. Mirrors old AutoG — BG always wants the cap units
+    //    per order. Best-effort: products with no dropdown skip and
+    //    we fall through with the default 1.
     const qty = await setMaxQuantity(page);
-    // Track the quantity Amazon will actually check out with so the worker
-    // can persist it on the JobAttempt row (the "Qty" column). When the
-    // PDP has no dropdown — most items ship qty=1 — setMaxQuantity skips
-    // and we fall through to the default of 1.
     let placedQuantity = 1;
     if (qty.ok) {
       placedQuantity = qty.selected;
@@ -131,22 +121,103 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       step('step.buy.quantity.skip', { reason: qty.reason });
     }
 
-    // 2. Click the chosen button + transition to /spc. Buy Now is the
-    //    one-click path (waitForCheckout below handles any address /
-    //    payment interstitial). Add to Cart routes us through the cart
-    //    page → Proceed to Checkout, which converges on the same /spc.
-    if (path === 'buy-now') {
-      step('step.buy.click', { button: 'buy-now' });
-      try {
-        await page.locator('#buy-now-button').first().click({ timeout: 10_000 });
-      } catch (err) {
-        return fail('buy_click', 'failed to click Buy Now', String(err));
+    // 2. Cart hygiene + HTTP-add target → /spc shortcut. Mirrors filler
+    //    mode's HTTP-driven path:
+    //      - clearCart drops any leftover items so /spc only shows ours
+    //      - addFillerViaHttp POSTs to /cart/add-to-cart with the PDP's
+    //        SSR form tokens (csrf + offerListingId + ASIN) at the
+    //        correct quantity. Reuses page.content() so we don't refetch.
+    //      - page.goto('/checkout/entry/cart?proceedToCheckout=1') — Amazon's
+    //        BYG-Continue handler 302-redirects to /spc with all cart items
+    //        populated. Bypasses the cart-page render, the Proceed click,
+    //        AND the BYG interstitial. ~3-8s saved.
+    //
+    //    Fallback chain on HTTP-add failure (no offerListingId, bot
+    //    challenge, etc.):
+    //      - detectBuyPath → if Buy Now visible: click it, navigate to /spc
+    //      - if only Add to Cart visible: addToCartThenCheckout (existing)
+    //      - if neither: fail buy_click as before
+    //    Worst-case wall-clock = identical to the pre-HTTP-add behavior.
+    //
+    //    Verified live 2026-05-04 against a real signed-in account; see
+    //    docs/research/amazon-pipeline.md.
+    const SPC_ENTRY_URL =
+      'https://www.amazon.com/checkout/entry/cart?proceedToCheckout=1';
+    const SPC_URL_RE = /\/gp\/buy\/|\/checkout\/p\/|\/spc\//i;
+
+    const targetAsin = parseAsinFromUrl(page.url()) ?? '';
+    let usedHttpPath = false;
+    if (targetAsin) {
+      // Cart hygiene first — guard against leftover items from any prior
+      // partial buy. Same HTTP-driven path filler mode uses.
+      const cleared = await clearCart(page, { correlationId: cid });
+      if (!cleared.ok) {
+        warn('step.buy.cart.clear.fail', { reason: cleared.reason, removed: cleared.removed });
+        // Don't fail outright — fall through to the click-based path which
+        // doesn't depend on a clean cart (Buy Now bypasses the cart entirely).
+      } else {
+        step('step.buy.cart.ready', { wasEmpty: cleared.wasEmpty, removed: cleared.removed });
+      }
+
+      const targetHtml = await page.content().catch(() => '');
+      const httpAdd = await addFillerViaHttp(page, targetAsin, {
+        prefetchedHtml: targetHtml,
+        quantity: placedQuantity,
+      });
+      if (httpAdd.kind === 'committed') {
+        step('step.buy.target.http.ok', {
+          targetAsin,
+          status: httpAdd.status,
+          tookMs: httpAdd.tookMs,
+          quantity: placedQuantity,
+        });
+        // Direct cart→/spc shortcut. Same URL filler mode uses.
+        try {
+          await page.goto(SPC_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        } catch (err) {
+          warn('step.buy.spc.shortcut.gotoErr', { error: String(err).slice(0, 120) });
+        }
+        if (SPC_URL_RE.test(page.url())) {
+          usedHttpPath = true;
+          step('step.buy.spc.shortcut.ok', { url: page.url() });
+        } else {
+          warn('step.buy.spc.shortcut.fallback', {
+            landedUrl: page.url(),
+            note: 'entry-cart shortcut did not redirect to /spc; falling through to click-based flow',
+          });
+        }
+      } else {
+        step('step.buy.target.http.fallback', {
+          targetAsin,
+          reason: httpAdd.reason,
+          ...(httpAdd.status != null ? { status: httpAdd.status } : {}),
+        });
       }
     } else {
-      step('step.buy.click', { button: 'add-to-cart' });
-      const cartFallback = await addToCartThenCheckout(page, step, warn);
-      if (!cartFallback.ok) {
-        return fail('buy_click', cartFallback.reason, cartFallback.detail);
+      step('step.buy.target.http.skip', { reason: 'no_asin_in_url' });
+    }
+
+    if (!usedHttpPath) {
+      // Fallback: original click-based flow. detectBuyPath → click Buy Now
+      // (one-click → /spc) OR addToCartThenCheckout (cart page → Proceed).
+      const path = await detectBuyPath(page);
+      if (path === 'none') {
+        return fail('buy_click', 'neither buy-now nor add-to-cart button appeared');
+      }
+      step('step.buy.path', { path });
+      if (path === 'buy-now') {
+        step('step.buy.click', { button: 'buy-now' });
+        try {
+          await page.locator('#buy-now-button').first().click({ timeout: 10_000 });
+        } catch (err) {
+          return fail('buy_click', 'failed to click Buy Now', String(err));
+        }
+      } else {
+        step('step.buy.click', { button: 'add-to-cart' });
+        const cartFallback = await addToCartThenCheckout(page, step, warn);
+        if (!cartFallback.ok) {
+          return fail('buy_click', cartFallback.reason, cartFallback.detail);
+        }
       }
     }
 
