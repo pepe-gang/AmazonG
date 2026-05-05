@@ -262,27 +262,14 @@ export type Settings = {
   /** Epoch ms of the last successful tick. null = never run. */
   autoEnqueueLastRunAt: number | null;
   /**
-   * How many Amazon accounts run the same deal in parallel during a
-   * single-mode (no filler) buy. Default 3. Each account opens its
-   * own Chrome window — higher = faster across multiple accounts but
-   * uses more CPU/memory and runs hotter. 1-5 inclusive.
+   * How many Amazon accounts run a single deal in parallel. Default 3.
+   * Each account opens its own Chrome window — higher = faster across
+   * multiple accounts but uses more CPU/memory and runs hotter. 1-5
+   * inclusive. Applies uniformly to single-mode and filler-mode buys
+   * since the batch cart-add refactor (v0.13.19) made their per-account
+   * resource profiles comparable.
    */
-  maxConcurrentSingleBuys: number;
-  /**
-   * How many Amazon accounts run the same deal in parallel during a
-   * Buy-with-Fillers buy. Default 1. Filler carts are heavy (~10
-   * extra items) and Amazon's anti-automation is touchier on rapid-
-   * fire filler checkouts, so the safe default is one-at-a-time.
-   * 1-3 inclusive.
-   */
-  maxConcurrentFillerBuys: number;
-  /**
-   * Parallel tabs inside a single Buy-with-Fillers buy. Each tab adds
-   * filler items to the cart concurrently — all share cookies + cart
-   * server-side so the writes land on one order. Default 4 (historical).
-   * 1 = sequential (slowest but safest). 1-6 inclusive.
-   */
-  fillerParallelTabs: number;
+  maxConcurrentBuys: number;
 };
 
 /**

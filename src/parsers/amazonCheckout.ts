@@ -433,25 +433,38 @@ export function readTargetCashbackFromDom(
     };
   }
 
-  // Step 2: walk up to the enclosing shipping group. The correct scope
-  // contains BOTH the items list ("Arriving …") AND the delivery radios
-  // with cashback labels ("N% back"). A MAX_SCOPE_CHARS cap stops the
-  // walk from swallowing the whole page.
+  // Step 2: walk up to the INNERMOST shipping group containing the
+  // target. A shipping group is the smallest ancestor that contains
+  // BOTH "Arriving …" text AND at least one delivery radio. Once we
+  // find it, STOP — never expand outward looking for a "% back"
+  // string, because doing so swallows sibling shipping groups whose
+  // radios belong to OTHER items.
   //
-  // Two invariants that bit us in the wild:
-  //   1) Large fillers carts (10+ items in one shared shipping group) can
-  //      push the delivery-group container well past 15k chars of visible
-  //      text. Cap must be generous enough to contain it.
-  //   2) The Amazon Day *description* subtree sitting next to the target
-  //      title also mentions "6% back" as promotional copy but contains
-  //      NO radio inputs. Walking only on "Arriving + % back" would stop
-  //      at that description and Step 3 would then find zero checked
-  //      radios → pct=null → false gate failure even though the correct
-  //      6% radio IS checked further up the tree. So the walk additionally
-  //      requires the ancestor to contain at least one radio.
+  // The wider-scope-with-%back walk (deleted 2026-05-05) is what
+  // caused INC-2026-05-05: the iPad's own group had only a
+  // "Friday May 8" std-us radio (no Amazon Day option, so no "% back"
+  // radio at all). The old walk skipped past it looking for "% back"
+  // and matched a wider ancestor that included the fillers' shipping
+  // group. The fillers had a "6% back" radio checked, so the parser
+  // returned pct=6 for the iPad. The gate passed. The order placed at
+  // the iPad's actual 5% (Standard, no Amazon Day uplift). Real money
+  // lost.
+  //
+  // The correct answer when the target's own group has no "% back"
+  // radio is `pct: null` — there is no cashback option for this item
+  // on this delivery, period. The caller fails the gate, which is
+  // exactly what we want.
+  //
+  // Invariants the walk still needs to handle:
+  //   - Large filler carts (10+ items in one shared group) can push
+  //     the group container's visible text past 15k chars. The
+  //     MAX_SCOPE_CHARS cap is generous enough to contain it.
+  //   - The Amazon Day *description* subtree alongside the target
+  //     title mentions "% back" as promotional copy but contains no
+  //     radios. The "must contain a radio" requirement here filters
+  //     it out so we don't stop on description text.
   const MAX_SCOPE_CHARS = 200_000;
   let group: Element | null = null;
-  let fallbackGroup: Element | null = null;
   let el: Element | null = anchor.parentElement;
   let depth = 0;
   while (el && el !== doc.body && depth < 20) {
@@ -459,19 +472,17 @@ export function readTargetCashbackFromDom(
     if (text.length > MAX_SCOPE_CHARS) break;
     if (text.length > 200) {
       const hasArriving = /\bArriving\b/i.test(text);
-      const hasPctBack = /%\s*back\b/i.test(text);
       const hasRadio = el.querySelector('input[type="radio"]') !== null;
-      if (hasArriving && hasPctBack && hasRadio) {
+      if (hasArriving && hasRadio) {
         group = el;
         break;
       }
-      if (hasArriving && hasRadio && !fallbackGroup) fallbackGroup = el;
     }
     el = el.parentElement;
     depth++;
   }
   const scope: Element =
-    group ?? fallbackGroup ?? (anchor.parentElement as Element | null) ?? anchor;
+    group ?? (anchor.parentElement as Element | null) ?? anchor;
 
   // Step 3: read "% back" from the CHECKED radio's label only. Reading any
   // "% back" in scope was too loose: Amazon shows "6% back" as the label

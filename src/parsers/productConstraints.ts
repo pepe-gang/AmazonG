@@ -261,15 +261,27 @@ export function verifyProductDetailed(
   }
 
   // 5. Prime
+  // STRICT (INC-2026-05-05): when requirePrime is set, `null` is
+  // treated as a fail. Previously null passed as "indeterminate
+  // (assumed ok)", which left the gate open whenever scrapeProduct
+  // couldn't determine Prime visibility — a permissive default that
+  // doesn't match the user's expectation of "always require Prime".
+  // Pages where Prime can't be determined are typically partial loads
+  // / error states, and those are exactly the cases where we should
+  // refuse to place an order.
   if (c.requirePrime) {
-    if (info.isPrime === false) {
+    if (info.isPrime !== true) {
       const step: CheckStep = {
         name: 'prime',
         pass: false,
-        observed: 'no visible prime badge',
+        observed: info.isPrime === false
+          ? 'no visible prime badge'
+          : 'prime status indeterminate (page likely partial/blocked)',
         expected: 'prime badge',
         reason: 'not_prime',
-        detail: 'item is not Prime-eligible',
+        detail: info.isPrime === false
+          ? 'item is not Prime-eligible'
+          : 'could not confirm Prime — refusing to place order',
       };
       steps.push(step);
       return { ok: false, reason: step.reason, detail: step.detail, steps };
@@ -277,7 +289,7 @@ export function verifyProductDetailed(
     steps.push({
       name: 'prime',
       pass: true,
-      observed: info.isPrime === true ? 'prime badge visible' : 'indeterminate (assumed ok)',
+      observed: 'prime badge visible',
       expected: 'prime badge',
     });
   } else {

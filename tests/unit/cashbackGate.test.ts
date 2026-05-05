@@ -62,40 +62,64 @@ describe('evaluateCashbackGate', () => {
   });
 
   describe('permissive (requireMinCashback=false)', () => {
-    it('passes with the page reading when present, ignoring the floor', () => {
-      // 5% on the page; floor is 6 (would normally fail strict), but
-      // permissive accounts skip the floor entirely.
+    // Updated 2026-05-05 (INC-2026-05-05) — permissive mode used to
+    // pass any reading regardless of floor, which let an iPad order
+    // place at 5% under a 6% floor (the parser handed back 6 from a
+    // sibling group's radio, but the actual selected delivery on the
+    // target was Standard at 5%; even if the parser had been honest,
+    // permissive mode would have accepted 5 < 6). Permissive mode now
+    // hard-fails when the reading (or the substitute default) is below
+    // the floor. It still skips the BG1/BG2 retry path — that's what
+    // the flag was originally for.
+
+    it('passes when page reading meets or exceeds the floor', () => {
       expect(
         evaluateCashbackGate({
-          pageCashbackPct: 5,
+          pageCashbackPct: 6,
           requireMinCashback: false,
           minCashbackPct: 6,
         }),
-      ).toEqual({ kind: 'pass', cashbackPct: 5, fellBackToDefault: false });
-    });
-
-    it('passes with the page reading even when it is 0', () => {
-      // A real 0% reading is not the same as "Amazon didn't render a
-      // line". Trust the page reading as-is — no fallback substitution.
+      ).toEqual({ kind: 'pass', cashbackPct: 6, fellBackToDefault: false });
       expect(
         evaluateCashbackGate({
-          pageCashbackPct: 0,
+          pageCashbackPct: 8,
           requireMinCashback: false,
           minCashbackPct: 6,
         }),
-      ).toEqual({ kind: 'pass', cashbackPct: 0, fellBackToDefault: false });
+      ).toEqual({ kind: 'pass', cashbackPct: 8, fellBackToDefault: false });
     });
 
-    it('substitutes DEFAULT_MISSING_CASHBACK_PCT when page reading is null', () => {
-      // The crux of the feature: Amazon doesn't show a "% back" line
-      // (e.g. the active payment card doesn't qualify for the visible
-      // promo) but the order still earns the implicit baseline. Record
-      // 5% so the dashboard isn't blank.
+    it('FAILS when the page reading is below the floor (was: passed before INC-2026-05-05)', () => {
+      const v = evaluateCashbackGate({
+        pageCashbackPct: 5,
+        requireMinCashback: false,
+        minCashbackPct: 6,
+      });
+      expect(v.kind).toBe('fail');
+      if (v.kind === 'fail') {
+        expect(v.cashbackPct).toBe(5);
+        expect(v.reason).toMatch(/5%.*6%/);
+      }
+    });
+
+    it('FAILS when the page reading is 0 and floor is 6', () => {
+      const v = evaluateCashbackGate({
+        pageCashbackPct: 0,
+        requireMinCashback: false,
+        minCashbackPct: 6,
+      });
+      expect(v.kind).toBe('fail');
+    });
+
+    it('substitutes DEFAULT_MISSING_CASHBACK_PCT (5) when page reading is null AND floor is ≤ 5', () => {
+      // Amazon didn't render a "% back" line. Permissive mode falls
+      // back to the implicit 5% baseline through the user's underlying
+      // card. Only safe to pass when the floor allows it.
       expect(
         evaluateCashbackGate({
           pageCashbackPct: null,
           requireMinCashback: false,
-          minCashbackPct: 6,
+          minCashbackPct: DEFAULT_MISSING_CASHBACK_PCT,
         }),
       ).toEqual({
         kind: 'pass',
@@ -104,15 +128,26 @@ describe('evaluateCashbackGate', () => {
       });
       expect(DEFAULT_MISSING_CASHBACK_PCT).toBe(5);
     });
+
+    it('FAILS when page reading is null AND floor is above the substitute default', () => {
+      const v = evaluateCashbackGate({
+        pageCashbackPct: null,
+        requireMinCashback: false,
+        minCashbackPct: 6,
+      });
+      expect(v.kind).toBe('fail');
+      if (v.kind === 'fail') {
+        expect(v.cashbackPct).toBeNull();
+        expect(v.reason).toMatch(/permissive default.*5%.*floor.*6%/i);
+      }
+    });
   });
 
   describe('against a real /spc fixture', () => {
-    it('lets a permissive account proceed when /spc only offers 5% back', () => {
+    it('a permissive account on a 5% deal STILL fails at a 6% floor (INC-2026-05-05 fix)', () => {
       // Fixture: a real /spc page captured from a "5% only" deal — the
-      // page renders a "5% back" line but no 6%/8% option. With the
-      // strict gate (floor=6) this fails because 5 < 6; with a
-      // permissive account it should pass and record 5%, so the buy
-      // goes through and the dashboard reflects the actual rate.
+      // page renders a "5% back" line but no 6%/8% option. Both strict
+      // and permissive modes must fail here because 5 < 6.
       const html = fixture('spc/no-cashback-line-amex.html');
       const doc = new JSDOM(html).window.document;
       const pageCashbackPct = findCashbackPct(doc);
@@ -124,36 +159,26 @@ describe('evaluateCashbackGate', () => {
         minCashbackPct: 6,
       });
       expect(strict.kind).toBe('fail');
-      if (strict.kind === 'fail') {
-        expect(strict.reason).toBe('cashback 5%');
-      }
 
       const permissive = evaluateCashbackGate({
         pageCashbackPct,
         requireMinCashback: false,
         minCashbackPct: 6,
       });
-      expect(permissive).toEqual({
-        kind: 'pass',
-        cashbackPct: 5,
-        fellBackToDefault: false,
-      });
+      expect(permissive.kind).toBe('fail');
     });
 
-    it('substitutes 5% for a permissive account when /spc has no "% back" line at all', () => {
-      // Synthetic null input (Amazon didn't render a cashback line —
-      // e.g. selected payment card disqualified from the visible
-      // promo). The permissive path defaults to 5%.
+    it('a permissive account on a 5% deal passes when its floor is also 5%', () => {
+      const html = fixture('spc/no-cashback-line-amex.html');
+      const doc = new JSDOM(html).window.document;
+      const pageCashbackPct = findCashbackPct(doc);
+
       const v = evaluateCashbackGate({
-        pageCashbackPct: null,
+        pageCashbackPct,
         requireMinCashback: false,
-        minCashbackPct: 6,
+        minCashbackPct: 5,
       });
-      expect(v).toEqual({
-        kind: 'pass',
-        cashbackPct: DEFAULT_MISSING_CASHBACK_PCT,
-        fellBackToDefault: true,
-      });
+      expect(v).toEqual({ kind: 'pass', cashbackPct: 5, fellBackToDefault: false });
     });
   });
 });
