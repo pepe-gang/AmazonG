@@ -54,7 +54,8 @@ export function AccountsView({
           handleLockedClick();
         }}
       >
-        <BuyWithFillersPanel />
+        <EnabledTogglePanel profiles={profiles} />
+        <BuyWithFillersPanel profiles={profiles} />
         <HeadlessTogglePanel profiles={profiles} />
         <AccountsList profiles={profiles} />
       </div>
@@ -126,31 +127,112 @@ function HeadlessTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
   );
 }
 
-function BuyWithFillersPanel() {
+function EnabledTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
+  const { busy } = useSettings();
+  const [applying, setApplying] = useState(false);
+  if (profiles.length === 0) return null;
+  const on = profiles.every((p) => p.enabled);
+  const offCount = profiles.filter((p) => !p.enabled).length;
+  const toggle = async () => {
+    const next = !on;
+    setApplying(true);
+    try {
+      for (const p of profiles) {
+        await window.autog.profilesSetEnabled(p.email, next);
+      }
+    } finally {
+      setApplying(false);
+    }
+  };
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Account participation</div>
+          <div className="prefix-sub">
+            Master switch — toggle to enable or disable every account at once. Disabled accounts
+            stay signed in but the worker skips them on Start. Flipping an individual account
+            below updates this switch automatically.
+            {offCount > 0 && (
+              <>
+                {' '}
+                <span className="muted">
+                  ({offCount} of {profiles.length} currently disabled)
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+        <label
+          className="flex items-center gap-2 cursor-pointer"
+          title={on ? 'All accounts enabled' : 'At least one account is disabled'}
+        >
+          <Switch
+            checked={on}
+            onCheckedChange={() => void toggle()}
+            disabled={busy || applying}
+          />
+          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
+            {on ? 'All on' : `${profiles.length - offCount}/${profiles.length}`}
+          </span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
   const { settings, busy, update } = useSettings();
+  const [applying, setApplying] = useState(false);
   if (!settings) return null;
-  const on = settings.buyWithFillers;
+  const on =
+    profiles.length > 0
+      ? profiles.every((p) => p.buyWithFillers === true)
+      : settings.buyWithFillers;
   const wheyOn = settings.wheyProteinFillerOnly;
+  const anyOff = profiles.some((p) => p.buyWithFillers !== true);
+  const toggle = async () => {
+    const next = !on;
+    setApplying(true);
+    try {
+      for (const p of profiles) {
+        await window.autog.profilesSetBuyWithFillers(p.email, next);
+      }
+      await update({ buyWithFillers: next });
+    } finally {
+      setApplying(false);
+    }
+  };
   return (
     <div className="prefix-panel">
       <div className="prefix-head">
         <div>
           <div className="prefix-title">Buy with Fillers</div>
           <div className="prefix-sub">
-            When on, every account&apos;s buy phase places the target item alongside ~8 random
-            Prime fillers, then cancels the fillers once the order is verified. Applies globally
-            to all enabled accounts. Caps worker concurrency to 1 account at a time. Shows as
-            &quot;Filler&quot; in the Buy Mode column. Takes effect on the next worker Start.
+            When enabled, every account&apos;s buy phase places the target item alongside ~8
+            random Prime fillers, then cancels the fillers once the order is verified. Flip any
+            individual account below off and this master switch turns off automatically. Caps
+            worker concurrency to 1 account at a time. Shows as &quot;Filler&quot; in the Buy
+            Mode column. Takes effect on the next worker Start.
+            {anyOff && profiles.length > 0 && (
+              <>
+                {' '}
+                <span className="muted">
+                  ({profiles.filter((p) => p.buyWithFillers !== true).length} of {profiles.length}{' '}
+                  currently off)
+                </span>
+              </>
+            )}
           </div>
         </div>
         <label
           className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Filler mode enabled — all accounts' : 'Filler mode disabled'}
+          title={on ? 'Filler mode enabled — all accounts' : 'At least one account is set to Off'}
         >
           <Switch
             checked={on}
-            onCheckedChange={(v) => void update({ buyWithFillers: v })}
-            disabled={busy}
+            onCheckedChange={() => void toggle()}
+            disabled={busy || applying}
           />
           <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
             {on ? 'On' : 'Off'}
