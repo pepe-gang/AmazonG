@@ -34,12 +34,16 @@ import type { ProductInfo } from '../shared/types.js';
 import {
   CART_ADD_CLIENT_NAME,
   CART_ADD_URL,
-  CART_RESPONSE_RE_SOURCE,
   HTTP_BROWSERY_HEADERS,
+  SEARCH_CART_ADD_CLIENT_NAME,
   SPC_ENTRY_URL,
   SPC_URL_MATCH,
+  asinsCommittedInResponse,
+  buildBatchCartAddBody,
   extractCartAddTokens,
+  extractSearchResultCandidates,
   looksLikeCartResponse,
+  type SearchResultCandidate,
 } from './amazonHttp.js';
 
 type BuyWithFillersOptions = {
@@ -219,9 +223,6 @@ const FILLER_MAX_PRICE = 100;
 // enough to trigger rate limits. Now user-configurable via
 // Settings.fillerParallelTabs; bounds enforced here so a hand-edited
 // settings.json can't ask for 100.
-const DEFAULT_FILLER_WORKERS = 4;
-const MIN_FILLER_WORKERS = 1;
-const MAX_FILLER_WORKERS = 6;
 
 // Low-risk impulse-item search terms borrowed from AutoG. Shuffled on each
 // run so we don't always hit the same items first (helps avoid rate-limit
@@ -1829,298 +1830,49 @@ function buildFillerSearchUrl(term: string): string {
 }
 
 /**
- * Load the search URL and harvest ASINs of Prime-eligible items priced
- * between FILLER_MIN_PRICE and FILLER_MAX_PRICE (inclusive).
+ * Fetch a search-results page and parse it into cart-add-ready
+ * candidates. Each candidate already carries `offerListingId` + `csrf`
+ * from its search-result `<form>`, so the caller can POST directly to
+ * `/cart/add-to-cart` without a per-ASIN PDP fetch.
  *
- * Two-tier path:
- *  1. HTTP fast path — `context.request.get` (no tab navigation), JSDOM
- *     parse. Probed live on Amazon: SSR HTML carries Prime badge + price
- *     for ~50 cards per page (an older "needs client-rendered Prime badge"
- *     note that used to live here was stale). ~200ms–1.5s per term.
- *  2. Tab fallback — load via `page.goto` + `page.evaluate`. Identical to
- *     the original behavior, runs only if the HTTP path fails (bot
- *     challenge, unexpected layout, etc.).
+ * Verified live 2026-05-05: a single search response yields ~50 cards
+ * with full token sets. The URL filter (`p_85:2470955011, p_36:...`)
+ * already restricts to Prime + price-range; we double-check Prime in
+ * `extractSearchResultCandidates` for resilience to layout drift.
  *
- * `opts.httpOnly` skips the tab fallback. The parallel filler workers
- * pass this because they share one Page (no per-worker tabs after the
- * tab-pool collapse), so a worker calling `page.goto` would race with
- * sibling workers' state. With high HTTP success rates the dropped
- * fallback is acceptable — failed terms just yield 0 ASINs and the
- * caller advances to the next term.
+ * Returns an empty array on any HTTP / parse failure — caller advances
+ * to the next term.
  */
-async function scrapeFillerAsins(
+async function searchFillerCandidatesViaHttp(
   page: Page,
   term: string,
-  opts: { httpOnly?: boolean } = {},
-): Promise<string[]> {
-  // 1. HTTP fast path.
-  const http = await searchFillerAsinsViaHttp(page, term);
-  if (http.kind === 'ok') {
-    logger.info('step.fillerBuy.search.http.ok', {
-      term,
-      found: http.asins.length,
-      tookMs: http.tookMs,
-    });
-    return http.asins;
-  }
-  logger.info('step.fillerBuy.search.http.fallback', {
-    term,
-    reason: http.reason,
-    ...(http.status != null ? { status: http.status } : {}),
-  });
-
-  if (opts.httpOnly) {
-    // Shared-page mode — can't navigate without racing other workers.
-    logger.info('step.fillerBuy.search.http.fallback.skipped', {
-      term,
-      mode: 'httpOnly',
-    });
-    return [];
-  }
-
-  // 2. Tab fallback — original page.goto + page.evaluate path.
-  try {
-    await page.goto(buildFillerSearchUrl(term), {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    });
-  } catch {
-    return [];
-  }
-  return page
-    .evaluate(
-      ({ minPrice, maxPrice }) => {
-        const out: string[] = [];
-        const cards = document.querySelectorAll(
-          '[data-asin][data-component-type="s-search-result"]',
-        );
-        cards.forEach((card) => {
-          const asin = card.getAttribute('data-asin');
-          if (!asin || asin.trim() === '') return;
-
-          const isPrime =
-            card.querySelector('.s-prime') !== null ||
-            card.querySelector('[aria-label*="Prime"]') !== null ||
-            card.innerHTML.includes('a-icon-prime');
-          if (!isPrime) return;
-
-          let price: number | null = null;
-          const wholeEl = card.querySelector('.a-price-whole');
-          const fracEl = card.querySelector('.a-price-fraction');
-          if (wholeEl) {
-            const whole =
-              parseFloat((wholeEl.textContent || '').replace(/[^0-9]/g, '')) || 0;
-            const frac = fracEl
-              ? parseFloat('0.' + (fracEl.textContent || '').replace(/[^0-9]/g, ''))
-              : 0;
-            price = whole + frac;
-          }
-          if (
-            price === null ||
-            price < minPrice ||
-            price > maxPrice
-          )
-            return;
-          out.push(asin);
-        });
-        return out;
-      },
-      { minPrice: FILLER_MIN_PRICE, maxPrice: FILLER_MAX_PRICE },
-    )
-    .catch(() => []);
-}
-
-type SearchHttpResult =
-  | { kind: 'ok'; asins: string[]; tookMs: number }
-  | { kind: 'failed'; reason: string; status?: number };
-
-/**
- * Fetch the search results page via `context.request.get` (shares the
- * BrowserContext's cookies + User-Agent — no tab opens) and parse it
- * with JSDOM. Same Prime + price filter as the in-browser path so
- * caller-visible behavior is identical when this succeeds.
- */
-async function searchFillerAsinsViaHttp(
-  page: Page,
-  term: string,
-): Promise<SearchHttpResult> {
+): Promise<SearchResultCandidate[]> {
   const url = buildFillerSearchUrl(term);
-  const t0 = Date.now();
   let res;
   try {
     res = await page.context().request.get(url, {
       headers: HTTP_BROWSERY_HEADERS,
       timeout: 15_000,
     });
-  } catch (err) {
-    return {
-      kind: 'failed',
-      reason: 'fetch_threw:' + String(err).slice(0, 80),
-    };
+  } catch {
+    return [];
   }
-  if (!res.ok()) {
-    return { kind: 'failed', reason: 'http_error', status: res.status() };
-  }
+  if (!res.ok()) return [];
   let html: string;
   try {
     html = await res.text();
   } catch {
-    return { kind: 'failed', reason: 'body_read_threw' };
+    return [];
   }
-
   const doc = new JSDOM(html).window.document;
-  const cards = doc.querySelectorAll(
-    '[data-asin][data-component-type="s-search-result"]',
-  );
-  const asins: string[] = [];
-  cards.forEach((card) => {
-    const asin = card.getAttribute('data-asin');
-    if (!asin || asin.trim() === '') return;
-    const isPrime =
-      card.querySelector('.s-prime') !== null ||
-      card.querySelector('[aria-label*="Prime"]') !== null ||
-      card.innerHTML.includes('a-icon-prime');
-    if (!isPrime) return;
-    let price: number | null = null;
-    const wholeEl = card.querySelector('.a-price-whole');
-    const fracEl = card.querySelector('.a-price-fraction');
-    if (wholeEl) {
-      const whole =
-        parseFloat((wholeEl.textContent || '').replace(/[^0-9]/g, '')) || 0;
-      const frac = fracEl
-        ? parseFloat('0.' + (fracEl.textContent || '').replace(/[^0-9]/g, ''))
-        : 0;
-      price = whole + frac;
-    }
-    if (price === null || price < FILLER_MIN_PRICE || price > FILLER_MAX_PRICE) {
-      return;
-    }
-    asins.push(asin);
-  });
-  return { kind: 'ok', asins, tookMs: Date.now() - t0 };
-}
-
-
-/**
- * Add one ASIN's product to the cart on `page`.
- *
- * Three-tier path, optimized for filler-mode throughput:
- *
- *  1. Fully-HTTP fast path (no tab). Fetch the PDP via
- *     `context.request.get`, JSDOM-parse the addToCart form, POST via
- *     `context.request.post`. Cookies + User-Agent come from the
- *     BrowserContext, so Amazon sees the same authenticated session.
- *     ~700ms-1.5s — about 5-10× faster than the tab paths because no
- *     PDP renders, no JS executes, no warranty modal can appear.
- *
- *  2. Tab + form-POST. Falls through here if the HTTP path bails (bot
- *     challenge, parse mismatch, response not in cart shape). Loads the
- *     PDP into the tab, harvests the form via in-page fetch, POSTs.
- *     Same wire shape as a real submit — useful when HTTP-direct is
- *     under extra scrutiny.
- *
- *  3. Click fallback. Last resort — load the PDP, click the button,
- *     dismiss any warranty modal, wait for settle. Identical to the
- *     pre-experiment behavior so worst-case matches today exactly.
- *
- * `opts.httpOnly` skips tiers 2 and 3. Parallel filler workers pass
- * this because they share one Page (no per-worker tabs), so navigating
- * inside a worker would race siblings. On HTTP failure the worker just
- * returns false and tries another ASIN — the in-cart counter
- * decrements and another slot opens (see runFillerWorker). Since HTTP
- * lands cleanly the vast majority of the time, the dropped fallbacks
- * cost very little throughput and buy us the memory savings of zero
- * pre-spawned tabs.
- *
- * Returns true on commit (any tier reached), false on all attempted
- * tiers failing.
- */
-async function addOneFillerToCart(
-  page: Page,
-  asin: string,
-  opts: { httpOnly?: boolean } = {},
-): Promise<boolean> {
-  // 1. Fully-HTTP fast path — no tab opens.
-  const http = await addFillerViaHttp(page, asin);
-  if (http.kind === 'committed') {
-    logger.info('step.fillerBuy.add.http.ok', {
-      asin,
-      status: http.status,
-      tookMs: http.tookMs,
-    });
+  const all = extractSearchResultCandidates(doc);
+  return all.filter((c) => {
+    if (!c.isPrime) return false;
+    if (c.price === null) return false;
+    if (c.price < FILLER_MIN_PRICE) return false;
+    if (c.price > FILLER_MAX_PRICE) return false;
     return true;
-  }
-  logger.info('step.fillerBuy.add.http.fallback', {
-    asin,
-    reason: http.reason,
-    ...(http.status != null ? { status: http.status } : {}),
   });
-
-  if (opts.httpOnly) {
-    // Shared-page mode — fall back to "skip this ASIN, try another"
-    // instead of navigating the page (which would race sibling workers).
-    logger.info('step.fillerBuy.add.fallback.skipped', {
-      asin,
-      mode: 'httpOnly',
-    });
-    return false;
-  }
-
-  // Tab-based fallbacks below — load the PDP first, then try POST then click.
-  try {
-    await page.goto(`https://www.amazon.com/dp/${asin}`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    });
-  } catch {
-    return false;
-  }
-
-  // 2. Tab + form-POST.
-  const post = await postFillerAddToCart(page);
-  if (post.kind === 'committed') {
-    logger.info('step.fillerBuy.add.post.ok', {
-      asin,
-      status: post.status,
-      tookMs: post.tookMs,
-    });
-    return true;
-  }
-  logger.info('step.fillerBuy.add.post.fallback', {
-    asin,
-    reason: post.reason,
-    ...(post.status != null ? { status: post.status } : {}),
-  });
-
-  // 3. Click fallback — identical to the pre-experiment path.
-  try {
-    await page
-      .locator('#add-to-cart-button, input[name="submit.add-to-cart"]')
-      .first()
-      .click({ timeout: 10_000 });
-  } catch {
-    return false;
-  }
-
-  // AppleCare/warranty upsell only matters on the click path (the modal
-  // is UI-side, not server-side, so the POST path never triggers it).
-  try {
-    await page
-      .locator(
-        '#attachSiNoCoverage input.a-button-input, .warranty-twister-no-thanks-text',
-      )
-      .first()
-      .click({ timeout: 2_000 });
-  } catch {
-    // No modal — normal for non-tech items.
-  }
-
-  // Let the POST + redirect settle so the next navigation on this tab
-  // doesn't race an in-flight add. 8s cap — Amazon usually returns within
-  // 2s; a longer delay usually means we're on a confirmation page that
-  // won't "settle" in the networkidle sense.
-  await page.waitForLoadState('domcontentloaded', { timeout: 8_000 }).catch(() => {});
-  return true;
 }
 
 export type PostAddResult =
@@ -2315,125 +2067,6 @@ export async function addFillerViaHttp(
   return { kind: 'committed', status: postRes.status(), tookMs };
 }
 
-/**
- * Harvest just the three required tokens (csrf + asin + offerListingId)
- * from the addToCart form on the currently-loaded PDP and POST them to
- * the modern `/cart/add-to-cart/ref=...` endpoint via in-page fetch().
- *
- * Posting from inside the page context lets the browser auto-attach
- * Referer / Origin / sec-ch-ua headers so the wire fingerprint matches
- * what a real form submit would have sent.
- *
- * NOTE: we do NOT POST to the form's declared action URL. The form
- * itself targets `/gp/product/handle-buy-box/...` which is a deprecated
- * endpoint that returns 404 and does NOT add items. Verified live: even
- * the real button click POSTs there and gets 404 — the click adds items
- * via a parallel JS-driven mechanism. The modern endpoint we use here
- * (the same one Amazon's recommendation carousels submit to) accepts
- * just 5 fields and returns 200 + the cart page on success.
- */
-async function postFillerAddToCart(page: Page): Promise<PostAddResult> {
-  return page
-    .evaluate(
-      async ({ cartAddUrl, clientName, cartResponseRe }) => {
-        const form = document.getElementById('addToCart') as HTMLFormElement | null;
-        if (!form) return { kind: 'failed' as const, reason: 'no_form' };
-
-        const csrf = (
-          form.querySelector('input[name="anti-csrftoken-a2z"]') as HTMLInputElement | null
-        )?.value;
-        const offerListingId =
-          (form.querySelector('input[name="items[0.base][offerListingId]"]') as HTMLInputElement | null)
-            ?.value ??
-          (form.querySelector('input[name="offerListingID"]') as HTMLInputElement | null)?.value;
-        const itemAsin =
-          (form.querySelector('input[name="items[0.base][asin]"]') as HTMLInputElement | null)?.value ??
-          (form.querySelector('input[name="ASIN"]') as HTMLInputElement | null)?.value;
-        if (!csrf || !offerListingId || !itemAsin) {
-          return {
-            kind: 'failed' as const,
-            reason:
-              'missing_required_fields:' +
-              [!csrf && 'csrf', !offerListingId && 'offerListingId', !itemAsin && 'asin']
-                .filter(Boolean)
-                .join(','),
-          };
-        }
-
-        const body = new URLSearchParams();
-        body.append('anti-csrftoken-a2z', csrf);
-        body.append('items[0.base][asin]', itemAsin);
-        body.append('items[0.base][offerListingId]', offerListingId);
-        body.append('items[0.base][quantity]', '1');
-        body.append('clientName', clientName);
-
-        const t0 = performance.now();
-        let r: Response;
-        try {
-          r = await fetch(cartAddUrl, {
-            method: 'POST',
-            credentials: 'include',
-            body,
-            redirect: 'follow',
-          });
-        } catch (err) {
-          return {
-            kind: 'failed' as const,
-            reason: 'fetch_threw:' + String(err).slice(0, 80),
-          };
-        }
-        const tookMs = Math.round(performance.now() - t0);
-        if (r.status >= 400) {
-          return {
-            kind: 'failed' as const,
-            reason: 'http_error',
-            status: r.status,
-          };
-        }
-        // Sniff the response. Regex source comes from CART_RESPONSE_RE in
-        // amazonHttp.ts so the in-page check stays in sync with the
-        // Node-side `looksLikeCartResponse(...)` helper used by
-        // addFillerViaHttp + clearCartViaHttp.
-        const text = await r.text().catch(() => '');
-        if (!new RegExp(cartResponseRe, 'i').test(text)) {
-          return {
-            kind: 'failed' as const,
-            reason: 'response_not_cart_shape',
-            status: r.status,
-          };
-        }
-        return { kind: 'committed' as const, status: r.status, tookMs };
-      },
-      {
-        cartAddUrl: CART_ADD_URL,
-        clientName: CART_ADD_CLIENT_NAME,
-        cartResponseRe: CART_RESPONSE_RE_SOURCE,
-      },
-    )
-    .catch((err) => ({
-      kind: 'failed' as const,
-      reason: 'evaluate_threw:' + String(err).slice(0, 80),
-    }));
-}
-
-type FillerState = {
-  added: number;
-  /** ASINs that successfully landed in the cart (worker click returned
-   *  true). Used downstream to look up which Amazon order(s) each ASIN
-   *  ended up in — cart items can fan out to multiple order IDs. */
-  addedAsins: string[];
-  queue: string[];
-  termIdx: number;
-  /** Dedup set: target ASIN + every filler ASIN we've considered so far.
-   *  Caller can pass its own Set in (via FillerOpts.attemptedAsins) so
-   *  retries share state and avoid re-picking previously-tried items. */
-  seen: Set<string>;
-  termsExhausted: boolean;
-  /** Target count of fillers for this run. Used to be the FILLER_COUNT
-   *  constant; now configurable per-call so whey-only mode can pick
-   *  6–8 randomly while the general pool stays at 8. */
-  targetCount: number;
-};
 
 type FillerOpts = {
   /** Search-term pool. Defaults to the general impulse-item list. */
@@ -2447,141 +2080,151 @@ type FillerOpts = {
 };
 
 /**
- * Parallel filler loop. Runs N concurrent async workers — all sharing
- * the main page (and therefore the same BrowserContext + cookie jar)
- * — and coordinating through a shared mutable state object. Workers
- * use HTTP only (`context.request.get` for search + PDP, `.post` for
- * add-to-cart); none of them navigate the page, so they can safely
- * share it.
+ * Search a few filler terms for cart-add candidates and commit them all
+ * in a single batch POST.
  *
- * Pre-tab-collapse history: each worker used to own a freshly-spawned
- * `about:blank` tab so its `page.goto` calls didn't race siblings. The
- * HTTP-first refactor made that allocation pure waste — the tabs sat
- * at `about:blank` because nothing navigated them. Removing them saves
- * ~50-100MB of Chromium memory per worker per buy and removes the
- * confusing "two blank tabs" UI artifact.
+ * Why this is so much simpler than the old parallel-worker flow:
  *
- * Overshoot prevention: workers reserve a slot by incrementing `added`
- * BEFORE the async add. If the add fails we decrement. This means a
- * worker that sees `added >= targetCount` at the top of the loop never
- * enters another add — even if multiple workers are mid-flight.
+ *  - Each Amazon search-result `<form>` already carries
+ *    `anti-csrftoken-a2z` + `items[0.base][offerListingId]` +
+ *    `items[0.base][asin]` (verified live 2026-05-05). One search HTTP
+ *    fetch yields ~50 ready-to-add candidates — no per-ASIN PDP fetch
+ *    is required to harvest tokens.
+ *  - The `/cart/add-to-cart/...` endpoint accepts an arbitrary number
+ *    of `items[N.base][...]` triplets in one POST. Verified live with
+ *    8 items: status 200, all 8 in cart, 1.4s total.
  *
- * The `parallelTabs` parameter retains its name for settings-file
- * compatibility but no longer maps to actual tabs — it controls the
- * number of concurrent async workers (i.e. concurrent in-flight HTTP
- * requests). Clamp range stays the same.
+ * Net change vs the prior 4-worker, 17-HTTP-call loop:
+ *   - 1–3 HTTP search fetches (we usually only need one — most terms
+ *     yield enough fresh candidates after dedup).
+ *   - 1 batch POST.
+ *   - Total: 2–4 HTTP calls instead of ~17.
+ *
+ * Preserved invariants:
+ *   - `targetAsin` is pre-added to `seen` so the picker never picks the
+ *     target as a filler.
+ *   - `attemptedAsins` is shared across retries; ASINs we've considered
+ *     stay considered.
+ *   - Phantom-commit guard: the POST response must echo every requested
+ *     ASIN's `data-asin="..."`. We return only the subset that actually
+ *     landed.
+ *   - Partial counts are acceptable — caller decides whether to proceed
+ *     with fewer fillers (existing behavior in `step.fillerBuy.fillers.partial`).
+ *
+ * The `parallelTabs` parameter is preserved in the signature for
+ * settings-file compatibility but has no effect — there are no parallel
+ * workers in this implementation.
  */
 async function addFillerItems(
   mainPage: Page,
   targetAsin: string | null,
   cid: string | undefined,
-  /** Number of concurrent workers. Was historically the side-tab count;
-   *  now controls async-loop concurrency on a single shared page.
-   *  Defaults to DEFAULT_FILLER_WORKERS (4); clamped to 1..6. */
-  parallelTabs: number = DEFAULT_FILLER_WORKERS,
+  _parallelTabs: number = 0,
   fillerOpts: FillerOpts = {},
 ): Promise<{ added: number; asins: string[] }> {
-  const workers = Math.max(
-    MIN_FILLER_WORKERS,
-    Math.min(MAX_FILLER_WORKERS, Math.round(parallelTabs)),
-  );
+  void _parallelTabs;
+  const targetCount = fillerOpts.targetCount ?? FILLER_COUNT;
   const terms = shuffle(fillerOpts.terms ?? FILLER_SEARCH_TERMS);
-  // Dedup set is the caller-supplied Set when present (so retries
-  // share it across calls), or a fresh one. Pre-seed with the target
-  // ASIN so the picker can't accidentally add the target as a filler.
   const seen = fillerOpts.attemptedAsins ?? new Set<string>();
   if (targetAsin) seen.add(targetAsin);
-  const state: FillerState = {
-    added: 0,
-    addedAsins: [],
-    queue: [],
-    termIdx: 0,
-    seen,
-    termsExhausted: false,
-    targetCount: fillerOpts.targetCount ?? FILLER_COUNT,
-  };
 
-  // N concurrent workers, all on the shared main page. workerId is for
-  // log attribution only — they're all bound to the same Page instance.
-  const workerIds = Array.from({ length: workers }, (_, i) => i);
-  await Promise.all(
-    workerIds.map((id) => runFillerWorker(mainPage, id, state, terms, cid)),
-  );
-
-  return { added: state.added, asins: state.addedAsins };
-}
-
-/**
- * One concurrent async worker. All workers share the same `page` —
- * they coordinate through the shared `state` object and never navigate
- * the page (HTTP-only path). State mutations happen in synchronous
- * blocks between awaits so single-threaded JS keeps them race-free
- * without locks.
- */
-async function runFillerWorker(
-  page: Page,
-  workerId: number,
-  state: FillerState,
-  terms: readonly string[],
-  cid: string | undefined,
-): Promise<void> {
-  while (true) {
-    // Top-of-loop stop conditions — checked synchronously before any await
-    // so a worker that sees the counter at state.targetCount returns
-    // instantly and can't start another add.
-    if (state.added >= state.targetCount) return;
-
-    let asin = state.queue.shift();
-    if (!asin) {
-      if (state.termsExhausted) return;
-      const idx = state.termIdx++;
-      const term = terms[idx];
-      if (!term) {
-        state.termsExhausted = true;
-        return;
-      }
-      const found = await scrapeFillerAsins(page, term, { httpOnly: true });
-      const fresh = found.filter((a) => !state.seen.has(a));
-      for (const a of fresh) state.seen.add(a);
-      if (fresh.length === 0) {
-        logger.info(
-          'step.fillerBuy.fillers.searchEmpty',
-          { workerId, term, rawCount: found.length },
-          cid,
-        );
-        continue;
-      }
-      state.queue.push(...fresh);
-      logger.info(
-        'step.fillerBuy.fillers.searchHit',
-        { workerId, term, fresh: fresh.length },
-        cid,
-      );
+  // 1. Walk through search terms until we have enough fresh candidates.
+  //    Most of the time one term is enough (~50 results per page; even
+  //    after dedup we usually have 30+ fresh candidates).
+  const candidates: SearchResultCandidate[] = [];
+  let csrf: string | null = null;
+  for (const term of terms) {
+    if (candidates.length >= targetCount) break;
+    const found = await searchFillerCandidatesViaHttp(mainPage, term);
+    if (found.length === 0) {
+      logger.info('step.fillerBuy.fillers.searchEmpty', { term }, cid);
       continue;
     }
-
-    // Reserve a slot before the async add so a concurrent worker can't
-    // reserve the same last slot. If the add fails we release the slot.
-    if (state.added >= state.targetCount) return;
-    state.added++;
-
-    const ok = await addOneFillerToCart(page, asin, { httpOnly: true });
-    if (ok) {
-      state.addedAsins.push(asin);
-      logger.info(
-        'step.fillerBuy.fillers.added',
-        { workerId, asin, count: state.added, of: state.targetCount },
-        cid,
-      );
-    } else {
-      state.added--;
-      logger.warn(
-        'step.fillerBuy.fillers.addFailed',
-        { workerId, asin, count: state.added },
-        cid,
-      );
+    let added = 0;
+    for (const c of found) {
+      if (candidates.length >= targetCount) break;
+      if (seen.has(c.asin)) continue;
+      seen.add(c.asin);
+      candidates.push(c);
+      added++;
+      if (csrf === null) csrf = c.csrf;
     }
+    logger.info(
+      'step.fillerBuy.fillers.searchHit',
+      { term, fresh: added, totalCandidates: candidates.length, of: targetCount },
+      cid,
+    );
   }
+
+  if (candidates.length === 0 || csrf === null) {
+    logger.warn(
+      'step.fillerBuy.fillers.noCandidates',
+      { termsTried: terms.length, targetCount },
+      cid,
+    );
+    return { added: 0, asins: [] };
+  }
+
+  // 2. Single batch POST. Phantom-commit guard runs against the
+  //    response body — we count every ASIN that appears as
+  //    `data-asin="..."` in the cart-page HTML Amazon returns.
+  const items = candidates.map((c) => ({ asin: c.asin, offerListingId: c.offerListingId }));
+  const body = buildBatchCartAddBody(csrf, items, { clientName: SEARCH_CART_ADD_CLIENT_NAME });
+
+  const t0 = Date.now();
+  let res;
+  try {
+    res = await mainPage.context().request.post(CART_ADD_URL, {
+      headers: {
+        ...HTTP_BROWSERY_HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Origin: 'https://www.amazon.com',
+        Referer: 'https://www.amazon.com/',
+      },
+      data: body.toString(),
+      timeout: 20_000,
+    });
+  } catch (err) {
+    logger.warn(
+      'step.fillerBuy.fillers.batch.threw',
+      { error: String(err).slice(0, 120), candidates: items.length },
+      cid,
+    );
+    return { added: 0, asins: [] };
+  }
+  const tookMs = Date.now() - t0;
+  if (!res.ok()) {
+    logger.warn(
+      'step.fillerBuy.fillers.batch.httpError',
+      { status: res.status(), candidates: items.length, tookMs },
+      cid,
+    );
+    return { added: 0, asins: [] };
+  }
+  const respText = await res.text().catch(() => '');
+  if (!looksLikeCartResponse(respText)) {
+    logger.warn(
+      'step.fillerBuy.fillers.batch.shapeMismatch',
+      { status: res.status(), candidates: items.length, tookMs },
+      cid,
+    );
+    return { added: 0, asins: [] };
+  }
+  const committed = asinsCommittedInResponse(
+    respText,
+    items.map((i) => i.asin),
+  );
+  logger.info(
+    'step.fillerBuy.fillers.batch.ok',
+    {
+      requested: items.length,
+      committed: committed.length,
+      tookMs,
+      status: res.status(),
+    },
+    cid,
+  );
+  return { added: committed.length, asins: committed };
 }
 
 /**
