@@ -279,32 +279,23 @@ export async function buyWithFillers(
   const cid = opts.correlationId;
   logger.info('step.fillerBuy.start', { productUrl: opts.productUrl }, cid);
 
-  // 1. Cart hygiene. Run unconditionally — clearCart no-ops safely on an
-  //    empty cart and returns `wasEmpty: true`.
-  const cleared = await clearCart(page, { correlationId: cid });
-  if (!cleared.ok) {
-    return {
-      ok: false,
-      stage: 'clear_cart',
-      reason: `cart clear failed: ${cleared.reason}`,
-      detail: `removed=${cleared.removed}`,
-    };
-  }
-  logger.info(
-    'step.fillerBuy.cart.ready',
-    { wasEmpty: cleared.wasEmpty, removed: cleared.removed },
-    cid,
-  );
-
-  // 2. Product page + verification. scrapeProduct loads + hydrates the page
-  //    and leaves it on screen for the Buy Now click; verifyProductDetailed
-  //    is the same parser the normal Buy Now flow uses, so constraints stay
-  //    identical across modes.
+  // Step ordering (changed 2026-05-05 to eliminate the PDP→/cart→PDP
+  // round-trip on clearCart's click-loop fallback):
   //
-  //    Optimization: pollAndScrape's verify phase already scraped this PDP
-  //    just before calling us. If the page hasn't drifted (clearCart's
-  //    click-loop fallback would have nav'd to /cart, breaking this), we
-  //    reuse that scrape and skip a 2-4s page.goto + hydration round-trip.
+  //   1. Reuse caller's prescraped product info, OR scrapeProduct as a
+  //      fallback. Page is on the PDP from pollAndScrape's verify scrape.
+  //   2. setMaxQuantity — reads the qty dropdown from the live PDP DOM.
+  //   3. Capture page.content() into prefetchedHtml — locks in the PDP
+  //      HTML for addFillerViaHttp's token extraction.
+  //   4. clearCart — HTTP fast path: no nav. Click-loop fallback navs to
+  //      /cart, but we no longer care because every PDP-DOM read is
+  //      already done.
+  //   5. addFillerViaHttp(target) using the captured prefetchedHtml.
+  //   6. addFillerItems batch — pure HTTP.
+  //   7. /spc shortcut.
+  //
+  // Net visible navs in the happy path: PDP → /spc.
+  // On clearCart click-loop fallback: PDP → /cart → /spc (no return-to-PDP).
   const expectedAsin = parseAsinFromUrl(opts.productUrl);
   const currentAsin = parseAsinFromUrl(page.url());
   let info: ProductInfo;
@@ -336,11 +327,11 @@ export async function buyWithFillers(
   }
   logger.info('step.fillerBuy.verify.ok', { title: info.title }, cid);
 
-  // 2.5. Select the max quantity from the product page's #quantity
-  //      dropdown BEFORE clicking Buy Now — otherwise Amazon adds
-  //      qty=1 regardless of what BG asked for. Best-effort: products
-  //      without a quantity dropdown or with "+10" open-ended options
-  //      just fall through with qty=1 (logged, not a failure).
+  // 2. Select the max quantity from the product page's #quantity dropdown.
+  //    Runs while the page is guaranteed to be on the PDP (before
+  //    clearCart can navigate). The qty number is threaded into the
+  //    HTTP cart-add POST body — we don't actually need the dropdown's
+  //    side-effect (firing 'change'); we just need the max value.
   const qty = await setMaxQuantity(page);
   if (qty.ok) {
     logger.info(
@@ -355,6 +346,31 @@ export async function buyWithFillers(
       cid,
     );
   }
+
+  // 3. Capture the PDP HTML before clearCart can navigate the page
+  //    away. addFillerViaHttp needs this for token extraction; with
+  //    the bug-fix in 94dc242 it falls through to ctx.request.get on
+  //    a parse miss, so an empty/wrong capture degrades gracefully.
+  const targetHtmlForHttp = await page.content().catch(() => '');
+
+  // 4. Cart hygiene. Run unconditionally — clearCart no-ops safely on an
+  //    empty cart and returns `wasEmpty: true`. HTTP fast path doesn't
+  //    navigate the page; click-loop fallback DOES (lands on /cart),
+  //    but everything that needed the PDP DOM is already done above.
+  const cleared = await clearCart(page, { correlationId: cid });
+  if (!cleared.ok) {
+    return {
+      ok: false,
+      stage: 'clear_cart',
+      reason: `cart clear failed: ${cleared.reason}`,
+      detail: `removed=${cleared.removed}`,
+    };
+  }
+  logger.info(
+    'step.fillerBuy.cart.ready',
+    { wasEmpty: cleared.wasEmpty, removed: cleared.removed },
+    cid,
+  );
 
   // 3. Add target to cart. Two-tier path:
   //
@@ -377,10 +393,11 @@ export async function buyWithFillers(
   //    as belt-and-suspenders verification AND is required for the
   //    Proceed form to carry the full cart state.
   const targetAsin = parseAsinFromUrl(opts.productUrl);
-  // scrapeProduct just loaded the PDP into this tab — pass the live DOM HTML
-  // through so addFillerViaHttp can skip a redundant ctx.request.get round-trip
-  // (saves ~300-1500ms per filler buy depending on RTT). Falls back to network
-  // fetch if page.content() throws or returns empty.
+  // targetHtmlForHttp was captured BEFORE clearCart (step 3 above) so it
+  // holds the PDP HTML even if clearCart's click-loop fallback navigated
+  // the page away. addFillerViaHttp's prefetchedHtml fallback (94dc242)
+  // re-fetches via ctx.request.get on a parse miss, so an empty capture
+  // degrades gracefully without a visible nav.
   //
   // CRITICAL: thread the quantity from setMaxQuantity (above) so the
   // HTTP cart-add commits the right number of units. Without this the
@@ -391,7 +408,6 @@ export async function buyWithFillers(
   // qty=1 instead of max"; verified against the placedQuantity column
   // in BG dashboard.
   const targetQuantity = qty.ok ? qty.selected : 1;
-  const targetHtmlForHttp = await page.content().catch(() => '');
   const httpTarget = await addFillerViaHttp(
     page,
     targetAsin ?? parseAsinFromUrl(page.url()) ?? '',
