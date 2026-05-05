@@ -119,9 +119,25 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
   // Only browser-page requests pass through this handler. The
   // ctx.request HTTP-only paths (clearCart, search, cart-add, verify,
   // ship-track) use APIRequestContext, which is bypassed.
+  //
+  // Also block fire-and-forget telemetry / ad-system XHRs that fire on
+  // every nav. Verified empirically (2026-05-05 via Playwright MCP):
+  //   - fls-na.amazon.com: page-event beacons (img + xhr, response body
+  //     unread by page JS)
+  //   - unagi.amazon.com:  CSM/nexus client telemetry (beacon + xhr)
+  //   - aax-us-iad / aax.amazon-adsystem.com: display-ad auction
+  //   - dtm.amazon.com:    cross-domain measurement
+  //   - cs.amazon.com:     customer-service widget bootstrap
+  // None of these serve JS to the page (no script/link initiator),
+  // none are referenced by buy-box DOM nodes, and aborting them
+  // (fetch/XHR/sendBeacon/Image) raises zero JS errors on the live
+  // PDP. ~16 requests blocked per PDP load on top of ~96 images.
+  const BLOCKED_HOSTS =
+    /^(?:fls-na|aax-us-iad|unagi|dtm|cs)\.amazon\.com$|^aax\.amazon-adsystem\.com$/i;
   let blockedImageCount = 0;
   let blockedFontCount = 0;
   let blockedMediaCount = 0;
+  let blockedHostCount = 0;
   await context.route('**/*', (route) => {
     const req = route.request();
     const type = req.resourceType();
@@ -136,6 +152,19 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     if (type === 'image' && !/\.svg(?:\?|#|$)/i.test(req.url())) {
       blockedImageCount++;
       return route.abort();
+    }
+    // Host-based block for telemetry + ad-system requests that come
+    // through as xhr/fetch/beacon (so the type-based filters above
+    // don't catch them). Wrapped in try/catch since malformed URLs
+    // would throw on `new URL` and stall the request.
+    try {
+      const host = new URL(req.url()).hostname;
+      if (BLOCKED_HOSTS.test(host)) {
+        blockedHostCount++;
+        return route.abort();
+      }
+    } catch {
+      // fall through to continue on unparseable URL
     }
     return route.continue();
   });
@@ -227,6 +256,7 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
           blockedImages: blockedImageCount,
           blockedFonts: blockedFontCount,
           blockedMedia: blockedMediaCount,
+          blockedHosts: blockedHostCount,
         });
       }
     },
