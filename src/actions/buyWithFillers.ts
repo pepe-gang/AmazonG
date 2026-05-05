@@ -97,6 +97,19 @@ type BuyWithFillersOptions = {
    * Pass undefined for a fresh-start picker.
    */
   attemptedAsins?: Set<string>;
+  /**
+   * Pre-scraped product info from the caller's verify phase. When set
+   * AND the page is still on the matching PDP, we reuse it instead of
+   * running scrapeProduct a second time. Saves ~2-4s of redundant
+   * page.goto + buy-box hydration per filler buy.
+   *
+   * Falls through to a fresh scrapeProduct when:
+   *   - the field is omitted (caller didn't scrape, or this is a retry)
+   *   - the page navigated away (clearCart click-loop fallback hit /cart)
+   *   - the URL's ASIN no longer matches `productUrl`'s ASIN (e.g.
+   *     Amazon redirected to a variant)
+   */
+  prescrapedInfo?: ProductInfo;
   correlationId?: string;
   /**
    * Called immediately before the Place Order click ('placing') and
@@ -287,7 +300,28 @@ export async function buyWithFillers(
   //    and leaves it on screen for the Buy Now click; verifyProductDetailed
   //    is the same parser the normal Buy Now flow uses, so constraints stay
   //    identical across modes.
-  const info = await scrapeProduct(page, opts.productUrl);
+  //
+  //    Optimization: pollAndScrape's verify phase already scraped this PDP
+  //    just before calling us. If the page hasn't drifted (clearCart's
+  //    click-loop fallback would have nav'd to /cart, breaking this), we
+  //    reuse that scrape and skip a 2-4s page.goto + hydration round-trip.
+  const expectedAsin = parseAsinFromUrl(opts.productUrl);
+  const currentAsin = parseAsinFromUrl(page.url());
+  let info: ProductInfo;
+  if (
+    opts.prescrapedInfo &&
+    expectedAsin !== null &&
+    currentAsin === expectedAsin
+  ) {
+    info = opts.prescrapedInfo;
+    logger.info(
+      'step.fillerBuy.scrape.reused',
+      { asin: expectedAsin, title: info.title },
+      cid,
+    );
+  } else {
+    info = await scrapeProduct(page, opts.productUrl);
+  }
   const constraints = { ...DEFAULT_CONSTRAINTS, maxPrice: opts.maxPrice };
   const report = verifyProductDetailed(info, constraints);
   if (!report.ok) {

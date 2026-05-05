@@ -27,6 +27,7 @@ import type {
   BuyResult,
   JobAttempt,
   JobAttemptStatus,
+  ProductInfo,
 } from '../shared/types.js';
 
 export type JobAttemptStore = {
@@ -479,6 +480,11 @@ async function runFillerBuyWithRetries(
   /** Live "Whey Protein Filler only" toggle, re-read each claim. Single-
    *  mode buys never reach here. */
   wheyProteinFillerOnly: boolean,
+  /** Pre-scraped info from the worker's verify phase. Passed to the
+   *  FIRST attempt so buyWithFillers can skip its internal scrapeProduct
+   *  (saves 2-4s). Subsequent retries refetch in case Amazon changed
+   *  state (price drift, OOS) between attempts. */
+  prescrapedInfo: ProductInfo | undefined,
   onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
   let lastRaw: BuyWithFillersResult = {
@@ -516,6 +522,10 @@ async function runFillerBuyWithRetries(
       dryRun: deps.buyDryRun,
       wheyProteinFillerOnly,
       attemptedAsins,
+      // Only the first attempt can reuse the verify-phase scrape — by
+      // attempt 2 the page state has drifted (we've been to /spc and
+      // back, /cart, etc.) and a fresh scrape is needed anyway.
+      prescrapedInfo: attempt === 1 ? prescrapedInfo : undefined,
       correlationId: `${cid}/attempt-${attempt}`,
       onStage,
     });
@@ -2116,7 +2126,7 @@ async function runForProfile(
     const onStage = (stage: 'placing' | null): Promise<void> =>
       deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, info, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;
