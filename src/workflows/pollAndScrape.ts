@@ -68,8 +68,7 @@ type Deps = {
    * about.
    */
   loadParallelism: () => Promise<{
-    maxConcurrentSingleBuys: number;
-    maxConcurrentFillerBuys: number;
+    maxConcurrentBuys: number;
     /** When true (and the buy is in filler mode), the filler picker
      *  uses a whey-protein-only term pool instead of the general
      *  impulse mix. Read every claim so a Settings toggle takes
@@ -104,18 +103,16 @@ export type WorkerHandle = {
   openProfileTab(email: string, url: string): Promise<boolean>;
 };
 
-/** Bounds for the per-mode parallel-buy settings exposed in the
- *  Settings page. The user-set value is clamped to this range so a
- *  hand-edited settings.json can't ask for 100 parallel Chromium
- *  windows. Lower bound 1 keeps the worker functional. */
+/** Bounds for the parallel-buy setting exposed in the Settings page.
+ *  The user-set value is clamped to this range so a hand-edited
+ *  settings.json can't ask for 100 parallel Chromium windows. Lower
+ *  bound 1 keeps the worker functional. */
 const MIN_CONCURRENT_BUYS = 1;
-const MAX_CONCURRENT_SINGLE_BUYS = 5;
-const MAX_CONCURRENT_FILLER_BUYS = 3;
+const MAX_CONCURRENT_BUYS = 5;
 /** Fallback defaults if a Settings field is missing (e.g. a user
  *  upgrading from a version where these didn't exist). Loadsettings
  *  itself merges defaults, so this is belt-and-suspenders. */
-const DEFAULT_CONCURRENT_SINGLE_BUYS = 3;
-const DEFAULT_CONCURRENT_FILLER_BUYS = 3;
+const DEFAULT_CONCURRENT_BUYS = 3;
 
 /**
  * How many times we re-run the whole filler buy (clear cart → Buy Now
@@ -556,25 +553,18 @@ async function runFillerBuyWithRetries(
 
 /**
  * Effective fan-out concurrency — how many Amazon accounts run the
- * same job in parallel.
+ * same job in parallel. The user-set value comes from the Settings
+ * page (Parallel buys panel); falls back to DEFAULT_CONCURRENT_BUYS
+ * if a settings field is missing, and is clamped to safe bounds.
  *
- * Filler mode is the lower default because each account's filler buy
- * already loads ~10 extra cart items and Amazon's anti-automation is
- * touchier on rapid-fire filler checkouts. Customers can tune both
- * values from the Settings page (Parallel buys panel); falls back to
- * the historical 3 / 1 defaults if a settings field is missing, and
- * is clamped to safe per-mode bounds either way.
+ * Single-mode and filler-mode share this knob since v0.13.19 — the
+ * batch cart-add refactor brought filler-mode's per-account resource
+ * profile in line with single-mode (no more parallel tabs inside one
+ * window, just one HTTP POST).
  */
-function fanoutConcurrency(
-  anyFiller: boolean,
-  parallelism: { maxConcurrentSingleBuys: number; maxConcurrentFillerBuys: number },
-): number {
-  if (anyFiller) {
-    const v = parallelism.maxConcurrentFillerBuys ?? DEFAULT_CONCURRENT_FILLER_BUYS;
-    return Math.max(MIN_CONCURRENT_BUYS, Math.min(MAX_CONCURRENT_FILLER_BUYS, v));
-  }
-  const v = parallelism.maxConcurrentSingleBuys ?? DEFAULT_CONCURRENT_SINGLE_BUYS;
-  return Math.max(MIN_CONCURRENT_BUYS, Math.min(MAX_CONCURRENT_SINGLE_BUYS, v));
+function fanoutConcurrency(parallelism: { maxConcurrentBuys: number }): number {
+  const v = parallelism.maxConcurrentBuys ?? DEFAULT_CONCURRENT_BUYS;
+  return Math.max(MIN_CONCURRENT_BUYS, Math.min(MAX_CONCURRENT_BUYS, v));
 }
 
 /**
@@ -645,8 +635,8 @@ export function startWorker(deps: Deps): WorkerHandle {
   // When the user bulk-clicks "Verify" or "Tracking now" on N rows,
   // BG queues N lifecycle jobs at once. The default serial loop
   // drains them at ~one-every-5s; running them in parallel up to
-  // `maxConcurrentSingleBuys` (the existing "Single mode parallel
-  // windows" setting) cuts the total wall-clock by Nx for typical
+  // `maxConcurrentBuys` (the existing "Parallel buys" setting) cuts
+  // the total wall-clock by Nx for typical
   // bulk operations. Both phases share one cap because they both
   // open a Playwright page in the same per-profile context — letting
   // them sum to 2× the cap could blow past the user's intended
@@ -683,10 +673,9 @@ export function startWorker(deps: Deps): WorkerHandle {
         const cap = Math.max(
           1,
           (await deps.loadParallelism().catch(() => ({
-            maxConcurrentSingleBuys: DEFAULT_CONCURRENT_SINGLE_BUYS,
-            maxConcurrentFillerBuys: DEFAULT_CONCURRENT_FILLER_BUYS,
+            maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
             wheyProteinFillerOnly: false,
-          }))).maxConcurrentSingleBuys,
+          }))).maxConcurrentBuys,
         );
 
         // At-cap → wait for one lifecycle job to finish before
@@ -929,19 +918,17 @@ async function handleJob(
   // cheap (one JSON file read) and only fires once per job claim
   // (~5s cadence under heavy load), so the cost is negligible.
   const parallelism = await deps.loadParallelism().catch(() => ({
-    maxConcurrentSingleBuys: DEFAULT_CONCURRENT_SINGLE_BUYS,
-    maxConcurrentFillerBuys: DEFAULT_CONCURRENT_FILLER_BUYS,
+    maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
     wheyProteinFillerOnly: false,
   }));
-  const concurrency = fanoutConcurrency(anyFiller, parallelism);
+  const concurrency = fanoutConcurrency(parallelism);
   logger.info(
     'job.fanout.start',
     {
       jobId: job.id,
       profiles: eligible.map((p) => p.email),
       concurrency: Math.min(concurrency, eligible.length),
-      maxConcurrentSingleBuys: parallelism.maxConcurrentSingleBuys,
-      maxConcurrentFillerBuys: parallelism.maxConcurrentFillerBuys,
+      maxConcurrentBuys: parallelism.maxConcurrentBuys,
       buyWithFillers: deps.buyWithFillers,
       anyFiller,
       rebuy: !!job.placedEmail,

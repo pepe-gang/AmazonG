@@ -735,8 +735,7 @@ async function startWorkerNow(): Promise<void> {
     loadParallelism: async () => {
       const s = await loadSettings();
       return {
-        maxConcurrentSingleBuys: s.maxConcurrentSingleBuys,
-        maxConcurrentFillerBuys: s.maxConcurrentFillerBuys,
+        maxConcurrentBuys: s.maxConcurrentBuys,
         wheyProteinFillerOnly: s.wheyProteinFillerOnly,
       };
     },

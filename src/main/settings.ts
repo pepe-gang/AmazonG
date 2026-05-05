@@ -34,27 +34,50 @@ const DEFAULTS: Settings = {
   autoEnqueueMinMarginPct: -3.5,
   autoEnqueueMaxPerTick: 75,
   autoEnqueueLastRunAt: null,
-  // How many Amazon accounts run a single deal in parallel. Single-mode
-  // buys are light enough that 3 accounts at once is the historical
-  // default. Filler-mode used to default to 1 because the click-driven
-  // ATC pipeline was heavy (a tab + PDP render + JS execution per
-  // filler item × 8 fillers); now that adds run via direct HTTP POST
-  // (no tab, no render), the per-buy CPU/GPU footprint is comparable
-  // to single-mode and 3 concurrent filler buys runs cleanly.
-  // Customers with older / fanless laptops can dial these down to 1.
-  maxConcurrentSingleBuys: 3,
-  maxConcurrentFillerBuys: 3,
+  // How many Amazon accounts run a single deal in parallel. Each
+  // account opens its own Chrome window — 3 is the safe default for
+  // typical Apple Silicon Macs. Customers on older / fanless laptops
+  // can dial down to 1.
+  maxConcurrentBuys: 3,
 };
 
 function filePath(): string {
   return join(app.getPath('userData'), 'settings.json');
 }
 
+/** Pre-v0.13.19 settings.json shape — single + filler split into two
+ *  fields. Used only by `loadSettings` for migration. */
+type LegacyParallelKnobs = {
+  maxConcurrentSingleBuys?: number;
+  maxConcurrentFillerBuys?: number;
+};
+
 export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await readFile(filePath(), 'utf8');
-    const parsed = JSON.parse(raw) as Partial<Settings>;
-    return { ...DEFAULTS, ...parsed };
+    const parsed = JSON.parse(raw) as Partial<Settings> & LegacyParallelKnobs;
+
+    // v0.13.19 migration: the split single/filler concurrency knobs were
+    // unified into one `maxConcurrentBuys` because the batch cart-add
+    // refactor made filler-mode's per-account resource profile match
+    // single-mode. Take min(single, filler) so users who throttled
+    // filler-mode keep that lower cap globally instead of getting
+    // bumped up.
+    const migrated: Partial<Settings> = { ...parsed };
+    if (migrated.maxConcurrentBuys === undefined) {
+      const single = parsed.maxConcurrentSingleBuys;
+      const filler = parsed.maxConcurrentFillerBuys;
+      if (typeof single === 'number' || typeof filler === 'number') {
+        const candidates = [single, filler].filter(
+          (n): n is number => typeof n === 'number',
+        );
+        if (candidates.length > 0) {
+          migrated.maxConcurrentBuys = Math.min(...candidates);
+        }
+      }
+    }
+
+    return { ...DEFAULTS, ...migrated };
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ...DEFAULTS };
     throw err;
