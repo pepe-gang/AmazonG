@@ -98,6 +98,48 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     }
   });
 
+  // Block heavy resources Amazon ships on every PDP / /spc / cart nav
+  // that AmazonG never reads:
+  //   - image (PNG/JPEG/WebP/GIF): ~50-200 product+rec thumbnails per page
+  //   - font: Amazon Ember web fonts (~200KB across weights)
+  //   - media: video/audio (never autoplayed in checkout)
+  //
+  // Cuts ~3-5s off PDP and /spc hydration. SVGs are passed through —
+  // they carry semantic icons (Prime badge sprites use background-image
+  // PNG, but cashback radio labels and a few buy-box affordances use
+  // <img src=".svg"> for the small mark next to the text).
+  //
+  // The visibility logic in scrapeProduct.runtimeVisibilityChecks reads
+  // CSS box dimensions (getBoundingClientRect / getComputedStyle), not
+  // image-derived layout, so blocking the sprite PNG doesn't collapse
+  // the badge to 0×0 — the <i id="prime-badge"> element still has its
+  // CSS-defined width/height. verifyTargetCashback / findCashbackPct
+  // read DOM textContent for "% back"; no image dependency.
+  //
+  // Only browser-page requests pass through this handler. The
+  // ctx.request HTTP-only paths (clearCart, search, cart-add, verify,
+  // ship-track) use APIRequestContext, which is bypassed.
+  let blockedImageCount = 0;
+  let blockedFontCount = 0;
+  let blockedMediaCount = 0;
+  await context.route('**/*', (route) => {
+    const req = route.request();
+    const type = req.resourceType();
+    if (type === 'font') {
+      blockedFontCount++;
+      return route.abort();
+    }
+    if (type === 'media') {
+      blockedMediaCount++;
+      return route.abort();
+    }
+    if (type === 'image' && !/\.svg(?:\?|#|$)/i.test(req.url())) {
+      blockedImageCount++;
+      return route.abort();
+    }
+    return route.continue();
+  });
+
   // Playwright's launchPersistentContext always boots with a single
   // about:blank tab. Headless mode never shows it, but in headed
   // mode every work tab the worker opens sits next to a stranded
@@ -179,7 +221,13 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
           note: 'context.close() did not complete within budget; window may linger',
         });
       } else {
-        logger.info('session.close.ok', { profile, durationMs: Date.now() - t0 });
+        logger.info('session.close.ok', {
+          profile,
+          durationMs: Date.now() - t0,
+          blockedImages: blockedImageCount,
+          blockedFonts: blockedFontCount,
+          blockedMedia: blockedMediaCount,
+        });
       }
     },
   };
