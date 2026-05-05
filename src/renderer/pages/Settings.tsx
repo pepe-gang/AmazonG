@@ -76,8 +76,6 @@ const SINGLE_MIN = 1;
 const SINGLE_MAX = 5;
 const FILLER_MIN = 1;
 const FILLER_MAX = 3;
-const FILLER_TABS_MIN = 1;
-const FILLER_TABS_MAX = 6;
 
 function ParallelBuysPanel() {
   const { settings, busy, update } = useSettings();
@@ -89,7 +87,6 @@ function ParallelBuysPanel() {
   // persists the field for real.
   const single = settings.maxConcurrentSingleBuys ?? 3;
   const filler = settings.maxConcurrentFillerBuys ?? 3;
-  const fillerTabs = settings.fillerParallelTabs ?? 4;
   const setSingle = (v: number) => {
     const clamped = Math.max(SINGLE_MIN, Math.min(SINGLE_MAX, Math.round(v)));
     void update({ maxConcurrentSingleBuys: clamped });
@@ -97,13 +94,6 @@ function ParallelBuysPanel() {
   const setFiller = (v: number) => {
     const clamped = Math.max(FILLER_MIN, Math.min(FILLER_MAX, Math.round(v)));
     void update({ maxConcurrentFillerBuys: clamped });
-  };
-  const setFillerTabs = (v: number) => {
-    const clamped = Math.max(
-      FILLER_TABS_MIN,
-      Math.min(FILLER_TABS_MAX, Math.round(v)),
-    );
-    void update({ fillerParallelTabs: clamped });
   };
   return (
     <div className="prefix-panel">
@@ -212,56 +202,6 @@ function ParallelBuysPanel() {
           <div className="text-[11px] text-muted-foreground/80 mt-2">
             Range {FILLER_MIN}–{FILLER_MAX}. Keep at 1 unless you've
             verified your machine handles parallel filler checkouts.
-          </div>
-        </div>
-
-        {/* Filler tabs row — INSIDE one filler-mode buy */}
-        <div className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-foreground/90">
-                Filler add-to-cart speed
-              </div>
-              <div className="text-xs text-muted-foreground mt-0.5">
-                When Buy with Fillers runs, AmazonG adds ~8 filler
-                items to the cart. This many parallel tabs do the
-                add-to-cart step at the same time inside one Chrome
-                window. Higher = faster cart fill, but a high value
-                can trigger Amazon's rate limit on the cart endpoint.
-                Default is <b>4</b>.
-              </div>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => setFillerTabs(fillerTabs - 1)}
-                disabled={busy || fillerTabs <= FILLER_TABS_MIN}
-                aria-label="Decrease filler add-to-cart tabs"
-                className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                −
-              </button>
-              <span className="tabular-nums w-7 text-center text-base font-medium">
-                {fillerTabs}
-              </span>
-              <button
-                type="button"
-                onClick={() => setFillerTabs(fillerTabs + 1)}
-                disabled={busy || fillerTabs >= FILLER_TABS_MAX}
-                aria-label="Increase filler add-to-cart tabs"
-                className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                +
-              </button>
-              <span className="text-xs text-muted-foreground ml-1">
-                {fillerTabs === 1 ? 'tab' : 'tabs'}
-              </span>
-            </div>
-          </div>
-          <div className="text-[11px] text-muted-foreground/80 mt-2">
-            Range {FILLER_TABS_MIN}–{FILLER_TABS_MAX}. Set to 1 for
-            slow-but-safe sequential adds. Only applies when Buy with
-            Fillers is on.
           </div>
         </div>
 

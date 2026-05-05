@@ -62,15 +62,14 @@ type Deps = {
   allowedAddressPrefixes: string[];
   /**
    * Re-read each per-claim from disk so the user can tune Parallel
-   * buys + Filler tab speed in Settings without stopping the worker.
-   * Returns the three parallel-buy knobs as a struct; we don't pass
-   * the whole Settings object so the worker stays decoupled from
-   * fields it doesn't care about.
+   * buys in Settings without stopping the worker. Returns the
+   * parallel-buy knobs as a struct; we don't pass the whole Settings
+   * object so the worker stays decoupled from fields it doesn't care
+   * about.
    */
   loadParallelism: () => Promise<{
     maxConcurrentSingleBuys: number;
     maxConcurrentFillerBuys: number;
-    fillerParallelTabs: number;
     /** When true (and the buy is in filler mode), the filler picker
      *  uses a whey-protein-only term pool instead of the general
      *  impulse mix. Read every claim so a Settings toggle takes
@@ -480,11 +479,8 @@ async function runFillerBuyWithRetries(
   minCashbackPct: number,
   /** Per-profile cashback gate enforcement. See runForProfile. */
   requireMinCashback: boolean,
-  /** Live parallel-tab count for filler add-to-cart fan-out, re-read
-   *  from Settings on each claim. */
-  fillerParallelTabs: number,
-  /** Live "Whey Protein Filler only" toggle, re-read each claim same
-   *  as fillerParallelTabs. Single-mode buys never reach here. */
+  /** Live "Whey Protein Filler only" toggle, re-read each claim. Single-
+   *  mode buys never reach here. */
   wheyProteinFillerOnly: boolean,
   onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
@@ -521,7 +517,6 @@ async function runFillerBuyWithRetries(
       minCashbackPct,
       requireMinCashback,
       dryRun: deps.buyDryRun,
-      fillerParallelTabs,
       wheyProteinFillerOnly,
       attemptedAsins,
       correlationId: `${cid}/attempt-${attempt}`,
@@ -690,7 +685,6 @@ export function startWorker(deps: Deps): WorkerHandle {
           (await deps.loadParallelism().catch(() => ({
             maxConcurrentSingleBuys: DEFAULT_CONCURRENT_SINGLE_BUYS,
             maxConcurrentFillerBuys: DEFAULT_CONCURRENT_FILLER_BUYS,
-            fillerParallelTabs: 4,
             wheyProteinFillerOnly: false,
           }))).maxConcurrentSingleBuys,
         );
@@ -937,7 +931,6 @@ async function handleJob(
   const parallelism = await deps.loadParallelism().catch(() => ({
     maxConcurrentSingleBuys: DEFAULT_CONCURRENT_SINGLE_BUYS,
     maxConcurrentFillerBuys: DEFAULT_CONCURRENT_FILLER_BUYS,
-    fillerParallelTabs: 4,
     wheyProteinFillerOnly: false,
   }));
   const concurrency = fanoutConcurrency(anyFiller, parallelism);
@@ -949,7 +942,6 @@ async function handleJob(
       concurrency: Math.min(concurrency, eligible.length),
       maxConcurrentSingleBuys: parallelism.maxConcurrentSingleBuys,
       maxConcurrentFillerBuys: parallelism.maxConcurrentFillerBuys,
-      fillerParallelTabs: parallelism.fillerParallelTabs,
       buyWithFillers: deps.buyWithFillers,
       anyFiller,
       rebuy: !!job.placedEmail,
@@ -1024,7 +1016,6 @@ async function handleJob(
       fillerByEmail.get(profile.email) === true,
       effectiveMinByEmail.get(profile.email) ?? deps.minCashbackPct,
       requireMinByEmail.get(profile.email.toLowerCase()) ?? true,
-      parallelism.fillerParallelTabs,
       parallelism.wheyProteinFillerOnly,
       abortController.signal,
       abortSiblings,
@@ -1931,14 +1922,9 @@ async function runForProfile(
    *  entirely and default a missing /spc reading to 5%. See
    *  shared/cashbackGate.ts. */
   requireMinCashback: boolean,
-  /** Live parallel-tab count for filler-mode buys (Settings →
-   *  "Filler add-to-cart speed"). Re-read from disk per claim by
-   *  the caller, so changing it in Settings applies on the next
-   *  deal without restarting the worker. Single-mode buys ignore. */
-  fillerParallelTabs: number,
   /** When true (and the buy is in filler mode), the picker uses a
    *  whey-protein-only term pool with a 10–12 random count. Re-read
-   *  per claim same as fillerParallelTabs. Single-mode buys ignore. */
+   *  per claim by the caller. Single-mode buys ignore. */
   wheyProteinFillerOnly: boolean,
   /** Shared kill-switch fired when ONE profile in the fan-out detects
    *  a PRODUCT-level failure (out_of_stock / price_exceeds). When this
@@ -2143,7 +2129,7 @@ async function runForProfile(
     const onStage = (stage: 'placing' | null): Promise<void> =>
       deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, fillerParallelTabs, wheyProteinFillerOnly, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;

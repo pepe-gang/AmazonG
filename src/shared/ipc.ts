@@ -276,13 +276,6 @@ export type Settings = {
    * 1-3 inclusive.
    */
   maxConcurrentFillerBuys: number;
-  /**
-   * Parallel tabs inside a single Buy-with-Fillers buy. Each tab adds
-   * filler items to the cart concurrently — all share cookies + cart
-   * server-side so the writes land on one order. Default 4 (historical).
-   * 1 = sequential (slowest but safest). 1-6 inclusive.
-   */
-  fillerParallelTabs: number;
 };
 
 /**

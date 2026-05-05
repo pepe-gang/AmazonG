@@ -80,13 +80,6 @@ type BuyWithFillersOptions = {
    */
   dryRun: boolean;
   /**
-   * Parallel tabs inside this single buy for cart-add fan-out.
-   * Default 4 (historical). 1 = sequential. Clamped 1..6 inside
-   * `addFillerItems` to keep a hand-edited settings.json from
-   * spawning 100 tabs.
-   */
-  fillerParallelTabs?: number;
-  /**
    * When true, the filler picker uses a whey-protein search-term pool
    * instead of the general impulse mix and randomises the count to
    * 6–8 (vs the fixed 8 for the general pool). Prime + $20–$100
@@ -217,12 +210,6 @@ const CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
 const FILLER_COUNT = 8;
 const FILLER_MIN_PRICE = 20;
 const FILLER_MAX_PRICE = 100;
-// Parallel tabs inside the account's BrowserContext. Tabs share cookies +
-// cart server-side, so all adds land in the same order. The historical
-// default 4 gets a clean ~4× speedup without hammering Amazon hard
-// enough to trigger rate limits. Now user-configurable via
-// Settings.fillerParallelTabs; bounds enforced here so a hand-edited
-// settings.json can't ask for 100.
 
 // Low-risk impulse-item search terms borrowed from AutoG. Shuffled on each
 // run so we don't always hit the same items first (helps avoid rate-limit
@@ -480,17 +467,11 @@ export async function buyWithFillers(
     },
     cid,
   );
-  const fillersResult = await addFillerItems(
-    page,
-    targetAsin,
-    cid,
-    opts.fillerParallelTabs,
-    {
-      terms: fillerTerms,
-      targetCount: fillerTargetCount,
-      attemptedAsins: opts.attemptedAsins,
-    },
-  );
+  const fillersResult = await addFillerItems(page, targetAsin, cid, {
+    terms: fillerTerms,
+    targetCount: fillerTargetCount,
+    attemptedAsins: opts.attemptedAsins,
+  });
   const fillersAdded = fillersResult.added;
   const fillerAsins = fillersResult.asins;
   if (fillersAdded < fillerTargetCount) {
@@ -2110,19 +2091,13 @@ type FillerOpts = {
  *     landed.
  *   - Partial counts are acceptable — caller decides whether to proceed
  *     with fewer fillers (existing behavior in `step.fillerBuy.fillers.partial`).
- *
- * The `parallelTabs` parameter is preserved in the signature for
- * settings-file compatibility but has no effect — there are no parallel
- * workers in this implementation.
  */
 async function addFillerItems(
   mainPage: Page,
   targetAsin: string | null,
   cid: string | undefined,
-  _parallelTabs: number = 0,
   fillerOpts: FillerOpts = {},
 ): Promise<{ added: number; asins: string[] }> {
-  void _parallelTabs;
   const targetCount = fillerOpts.targetCount ?? FILLER_COUNT;
   const terms = shuffle(fillerOpts.terms ?? FILLER_SEARCH_TERMS);
   const seen = fillerOpts.attemptedAsins ?? new Set<string>();

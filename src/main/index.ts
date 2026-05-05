@@ -737,7 +737,6 @@ async function startWorkerNow(): Promise<void> {
       return {
         maxConcurrentSingleBuys: s.maxConcurrentSingleBuys,
         maxConcurrentFillerBuys: s.maxConcurrentFillerBuys,
-        fillerParallelTabs: s.fillerParallelTabs,
         wheyProteinFillerOnly: s.wheyProteinFillerOnly,
       };
     },

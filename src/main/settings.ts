@@ -44,13 +44,6 @@ const DEFAULTS: Settings = {
   // Customers with older / fanless laptops can dial these down to 1.
   maxConcurrentSingleBuys: 3,
   maxConcurrentFillerBuys: 3,
-  // Parallel tabs inside ONE filler-mode buy. Each tab fires its own
-  // Add-to-Cart POSTs against Amazon's cart API; they share cookies
-  // + cart server-side so all adds land on the same order. 4 has
-  // historically given a clean ~4× speedup without hitting rate
-  // limits. 1 = sequential (slow but safest). 6 max (going higher
-  // can trigger Amazon's per-IP throttling on the cart endpoint).
-  fillerParallelTabs: 4,
 };
 
 function filePath(): string {
