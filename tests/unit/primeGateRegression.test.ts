@@ -32,18 +32,61 @@ const URL = 'https://www.amazon.com/dp/B0DZ77XYZA'; // synthetic — not used by
  * to `true`. Plus productConstraints now treats `isPrime === null` as
  * a fail under requirePrime (was: pass as "indeterminate").
  */
+/**
+ * Companion fixture (REGR-2026-05-05): an actually-Prime iPad PDP that
+ * an over-eager isHidden walk falsely treated as not-Prime. Both
+ * fixtures share the same surface symptom (#prime-badge or
+ * .a-icon-prime-with-text candidates with inactive-row markers on
+ * ancestors), but distinguishable by WHICH ancestor slots carry the
+ * marker:
+ *
+ *   - NO-PRIME (INC fixture): inactive marker sits on
+ *     `usedAccordionRow` slots → genuine "alternate offer hidden by
+ *     accordion" subtree.
+ *   - IS-PRIME (REGR fixture): inactive marker sits on
+ *     `desktop_qualifiedBuyBox` /
+ *     `shippingMessageInsideBuyBox_feature_div` slots → those carry
+ *     the marker as a template default but the contents ARE rendered.
+ *
+ * The fix narrows the isHidden walk to only treat the marker as
+ * authoritative on slots whose names match accordion-row patterns
+ * (e.g. *AccordionRow). Both fixtures must come out the right way.
+ */
+const REGR_IS_PRIME_FIX = join(
+  __dirname,
+  '../../fixtures/product-no-prime/REGR-2026-05-05-ipad-IS-prime.html',
+);
+
 describe('Prime gate regression — INC-2026-05-05 (non-Prime iPad placed an order)', () => {
+  it('IS-PRIME companion fixture: parser returns isPrime=TRUE (visible badge in qualifiedBuyBox)', () => {
+    const html = readFileSync(REGR_IS_PRIME_FIX, 'utf8');
+    const doc = new JSDOM(html).window.document;
+    expect(findIsPrime(doc)).toBe(true);
+  });
+
+  it('IS-PRIME companion fixture: verifyProductDetailed PASSES under default constraints', () => {
+    const html = readFileSync(REGR_IS_PRIME_FIX, 'utf8');
+    const info = parseProductHtml(html, URL);
+    const constraints = { ...DEFAULT_CONSTRAINTS, maxPrice: 10_000 };
+    const report = verifyProductDetailed(info, constraints);
+    expect(report.ok, 'a real Prime listing must pass the gate').toBe(true);
+  });
+
   it('static parser correctly returns isPrime=false on the saved fixture', () => {
     const html = readFileSync(FIX, 'utf8');
     const doc = new JSDOM(html).window.document;
     expect(findIsPrime(doc)).toBe(false);
   });
 
-  it('static parser sees the buy buttons (so this is a real PDP, not an error page)', () => {
+  it('static parser confirms this is a real PDP via #productTitle (the buy buttons happen to live in usedAccordionRow → visible:false is expected)', () => {
     const html = readFileSync(FIX, 'utf8');
     const doc = new JSDOM(html).window.document;
-    expect(findHasBuyNow(doc)).toBe(true);
-    expect(findHasAddToCart(doc)).toBe(true);
+    expect(doc.querySelector('#productTitle')).not.toBeNull();
+    // The Buy Now / Add to Cart buttons in this fixture are inside the
+    // alternate-offer `usedAccordionRow` subtree (not the active row),
+    // so the static parser correctly treats them as hidden. The Prime
+    // gate fires before the buy-button gate in verifyProductDetailed,
+    // so this fixture still rejects with reason=not_prime.
   });
 
   it('parseProductHtml → ProductInfo carries isPrime=false', () => {

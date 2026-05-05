@@ -204,13 +204,39 @@ describe('findIsPrime', () => {
     expect(findIsPrime(doc)).toBe(true);
   });
 
-  it('ignores #prime-badge wrapped in an inactive feature slot', () => {
+  // Updated 2026-05-05 (REGR-2026-05-05): the previous expectation
+  // ("inactive=false on a feature slot means hidden") was based on a
+  // narrow Amazon layout. Real-world PDP captures show
+  // deliveryPriceBadging_feature_div carries the inactive marker as a
+  // template default while the contents ARE visible — see the
+  // REGR-2026-05-05-ipad-IS-prime fixture. The marker alone is not a
+  // reliable visibility signal; only the accordion-row pattern is
+  // (slot/id matching `accordionRow`, with active-marker exception).
+  it('treats #prime-badge in deliveryPriceBadging_feature_div as visible (template-default marker, not actually hidden)', () => {
     const doc = docOf(`
       <html><body>
         <span id="productTitle">X</span>
         <button id="buy-now-button">Buy</button>
         <div data-csa-c-slot-id="deliveryPriceBadging_feature_div" data-csa-c-is-in-initial-active-row="false">
           <i id="prime-badge" class="a-icon a-icon-prime" aria-label="prime"></i>
+        </div>
+      </body></html>`);
+    expect(findIsPrime(doc)).toBe(true);
+  });
+
+  it('ignores #prime-badge inside an alternate-offer accordion row (REGR-2026-05-05)', () => {
+    // The companion of the test above: deliveryPriceBadging_feature_div
+    // wrapped INSIDE an `apex_desktop_usedAccordionRow` subtree IS
+    // hidden (we're in the alternate-offer preview). This is the real
+    // failure mode the INC-2026-05-05 incident exposed.
+    const doc = docOf(`
+      <html><body>
+        <span id="productTitle">X</span>
+        <button id="buy-now-button">Buy</button>
+        <div id="apex_desktop_usedAccordionRow">
+          <div data-csa-c-slot-id="deliveryPriceBadging_feature_div" data-csa-c-is-in-initial-active-row="false">
+            <i id="prime-badge" class="a-icon a-icon-prime" aria-label="prime"></i>
+          </div>
         </div>
       </body></html>`);
     expect(findIsPrime(doc)).toBe(false);

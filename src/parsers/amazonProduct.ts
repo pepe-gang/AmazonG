@@ -163,18 +163,33 @@ export function findShipsToAddress(doc: Document): boolean | null {
 }
 
 /**
- * Detect whether this listing displays the visible Amazon Prime badge
- * (the orange-checkmark "prime" badge shown in the buy-box / delivery area).
+ * Detect whether this listing displays the visible Amazon Prime badge.
  *
- * Amazon uses different markup depending on the product template:
- *   1. `#prime-badge` — the canonical buy-box Prime icon on most pages.
- *   2. `.a-icon-prime-with-text` — wrapper with an "X-Day" delivery label.
+ * Amazon uses two interchangeable buy-box markup patterns:
+ *   1. `#prime-badge` — bare icon, used by some active-row layouts (verified
+ *      live: B0DZ751XN6's active newAccordionRow_0 contains `<i id="prime-badge">`).
+ *   2. `.a-icon-prime-with-text` — icon + delivery-time wrapper ("✓prime Two-Day"),
+ *      used by other active-row layouts (verified live: REGR-2026-05-05-ipad-IS-prime
+ *      fixture's qualifiedBuyBox).
  *
- * A bare `.a-icon-prime` elsewhere (e.g. `<span class="badge-slot aok-hidden">`)
- * is ignored — those produce false positives.
+ * Both selectors are valid Prime signals. The reliability comes from
+ * `isHidden`'s walk: any candidate inside an alternate-offer accordion-row
+ * subtree (slot/id matching `accordionRow` substring, with the
+ * accordion-row ancestor's `data-csa-c-is-in-initial-active-row` not "true")
+ * is skipped.
  *
- * Any candidate that lives inside an `aok-hidden` ancestor or an inactive
- * accordion row/feature slot is skipped.
+ * Bare `.a-icon-prime` icons (without `#prime-badge` id and without the
+ * `-with-text` wrapper) are ignored — they appear in unrelated contexts
+ * (badge slots, navigation, etc.) and produce false positives.
+ *
+ * INC-2026-05-05: a non-Prime iPad listing carried `#prime-badge` icons
+ * INSIDE `usedAccordionRow` subtrees (alternate-offer previews). The
+ * pre-fix isHidden walk relied on `data-csa-c-is-in-initial-active-row`
+ * markers that Amazon sets as template defaults on container slots —
+ * unreliable. The new walk uses the accordion-row name pattern + the
+ * marker as an active-row exception, which separates this case from the
+ * companion REGR-2026-05-05-ipad-IS-prime fixture (where the visible
+ * Prime badge sits in qualifiedBuyBox with no accordion-row ancestor).
  */
 export function findIsPrime(doc: Document): boolean | null {
   const candidates = doc.querySelectorAll('#prime-badge, .a-icon-prime-with-text');
@@ -190,35 +205,80 @@ export function findIsPrime(doc: Document): boolean | null {
   return null;
 }
 
-// Slots that are outer accordion *containers*, not rows. They carry
-// `data-csa-c-is-in-initial-active-row="false"` as a template attribute on
-// the wrapper — which does NOT mean the children are hidden.
-const ACCORDION_CONTAINER_SLOTS = new Set([
-  'accordionRows',
-  'desktop_accordion',
-  'desktop_buybox',
-  'offer_display_content',
-  'apex_desktop',
-  'apex_dp_center_column',
-]);
+// Detection rule for "this candidate is inside Amazon's alternate-offer
+// accordion subtree" (Used/New/Refurbished alternate rows that aren't
+// the user-selected active offer).
+//
+// Signal: any ancestor whose `data-csa-c-slot-id` or `id` contains the
+// substring "accordionRow" — except the framework container
+// `accordionRows` (plural), which is just the wrapper around all rows
+// and doesn't say anything about visibility on its own.
+//
+// Active-row exception: if the accordion-row ancestor carries
+// `data-csa-c-is-in-initial-active-row="true"`, it IS the currently-
+// selected row and its contents ARE visible — keep walking up but
+// don't mark hidden. This is what makes the synthetic test
+// "newAccordionRow_0 active inside accordionRows framework" pass.
+// Any other state (marker="false" OR marker absent) → hidden.
+//
+// History:
+//   1. Pre-2026-05-05: trusted the inactive marker with a small
+//      whitelist of "container" slots. False positives — visible Prime
+//      badges nested inside desktop_qualifiedBuyBox (which carries the
+//      marker as a template default) were treated as hidden.
+//   2. 2026-05-05 attempt 1: inverted to a slot-name pattern + marker.
+//      Missed the case where the accordion identity is on the `id`
+//      rather than the slot (apex_desktop_usedAccordionRow).
+//   3. 2026-05-05 attempt 2: substring match on slot OR id, dropped
+//      the marker. Broke the synthetic test where an active inner row
+//      lives inside an outer accordion framework.
+//   4. 2026-05-05 attempt 3 (this version): substring match on slot OR
+//      id, with the active-marker exception so an explicitly-active
+//      row stays visible.
+//
+// Verified against:
+//   - IS-PRIME REGR fixture: no ancestor matches → not hidden → returns true.
+//   - NO-PRIME INC fixture: usedAccordionRow ancestors with no marker
+//     OR marker=false → hidden → returns false.
+//   - Synthetic newAccordionRow_0 active inside accordionRows: the
+//     individual row is marker="true" (active) → not hidden via the
+//     exception; outer accordionRows is the framework container →
+//     ignored → walk completes → returns true.
+const ACCORDION_ROW_RE = /accordionRow/i;
+
+function isAccordionRowFrameworkContainer(name: string): boolean {
+  return name.toLowerCase() === 'accordionrows';
+}
 
 function isHidden(el: Element): boolean {
   let node: Element | null = el;
+  // Tracks whether we passed through an inactive (or marker-less)
+  // accordion-row ancestor during the walk. Settled at the end: only
+  // mark hidden if we never saw an explicit active-row marker.
+  let sawInactiveAccordionRow = false;
   while (node) {
     const cls = node.classList;
     if (cls && (cls.contains('aok-hidden') || cls.contains('a-hidden'))) return true;
-    const slot = node.getAttribute?.('data-csa-c-slot-id');
-    if (
-      slot &&
-      !ACCORDION_CONTAINER_SLOTS.has(slot) &&
-      node.getAttribute?.('data-csa-c-is-in-initial-active-row') === 'false'
-    ) {
-      // A concrete accordion row or feature slot marked inactive → hidden.
-      return true;
+    const slot = node.getAttribute?.('data-csa-c-slot-id') ?? '';
+    const id = (node as Element).id ?? '';
+    const slotMatchesRow = ACCORDION_ROW_RE.test(slot) && !isAccordionRowFrameworkContainer(slot);
+    const idMatchesRow = ACCORDION_ROW_RE.test(id) && !isAccordionRowFrameworkContainer(id);
+    if (slotMatchesRow || idMatchesRow) {
+      const marker = node.getAttribute?.('data-csa-c-is-in-initial-active-row');
+      if (marker === 'true') {
+        // Explicit active row anywhere in the chain proves the
+        // candidate's row IS the user-selected current offer. Visible.
+        return false;
+      }
+      // marker === 'false' OR no marker present → potential hidden.
+      // Continue walking — an inner ancestor's active=true would have
+      // already returned, so anything we record here is unconfirmed
+      // hidden until the walk completes.
+      sawInactiveAccordionRow = true;
     }
     node = node.parentElement;
   }
-  return false;
+  return sawInactiveAccordionRow;
 }
 
 /**
