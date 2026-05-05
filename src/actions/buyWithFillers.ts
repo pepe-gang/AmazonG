@@ -811,10 +811,32 @@ export async function buyWithFillers(
     // Below: targetAsin is narrowed to string (non-null) by the early return above.
     let cb = await verifyTargetCashback(page, targetAsin, info.title, opts.minCashbackPct);
     if (!cb.ok && !opts.requireMinCashback) {
-      // Permissive account: skip the cashback gate entirely. Record the
-      // observed pct (or 5% default when /spc didn't show a line) and
-      // proceed to Place Order. No BG1/BG2 toggle, no failure.
+      // Permissive account: skip the BG1/BG2 retry, but the floor is
+      // non-negotiable. INC-2026-05-05: a permissive account placed an
+      // iPad buy at 5% under a 6% floor because this branch
+      // unconditionally substituted DEFAULT_MISSING_CASHBACK_PCT (5).
+      // 1% on a $1.2k order is real money, so even permissive mode now
+      // hard-fails when the substitute would land below floor.
       const substituted = cb.pct ?? DEFAULT_MISSING_CASHBACK_PCT;
+      if (substituted < opts.minCashbackPct) {
+        logger.warn(
+          'step.fillerBuy.spc.cashback.permissive.belowFloor',
+          {
+            targetAsin,
+            pageReadingPct: cb.pct,
+            substitutedPct: substituted,
+            minRequired: opts.minCashbackPct,
+            reason: cb.reason,
+          },
+          cid,
+        );
+        return {
+          ok: false,
+          stage: 'cashback_gate',
+          reason: `target cashback ${substituted}% < ${opts.minCashbackPct}% floor (permissive substituted)`,
+          ...(cb.detail ? { detail: cb.detail } : {}),
+        };
+      }
       logger.info(
         'step.fillerBuy.spc.cashback.permissive',
         {

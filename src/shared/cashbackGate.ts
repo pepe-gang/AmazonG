@@ -69,11 +69,35 @@ export type CashbackGateVerdict =
 export function evaluateCashbackGate(input: CashbackGateInput): CashbackGateVerdict {
   const { pageCashbackPct, requireMinCashback, minCashbackPct } = input;
   if (!requireMinCashback) {
+    // Permissive accounts substitute DEFAULT_MISSING_CASHBACK_PCT (5)
+    // when /spc didn't render a "% back" line. That substitution is
+    // ONLY safe when the floor is ≤ the substitute — otherwise we'd
+    // pass a buy at 5% under a 6% floor, costing 1% in real money.
+    // INC-2026-05-05: the iPad order placed at 5% under a 6% floor
+    // because permissive mode unconditionally passed.
     if (pageCashbackPct === null) {
+      if (DEFAULT_MISSING_CASHBACK_PCT < minCashbackPct) {
+        return {
+          kind: 'fail',
+          cashbackPct: null,
+          reason: `cashback missing (permissive default ${DEFAULT_MISSING_CASHBACK_PCT}% < floor ${minCashbackPct}%)`,
+        };
+      }
       return {
         kind: 'pass',
         cashbackPct: DEFAULT_MISSING_CASHBACK_PCT,
         fellBackToDefault: true,
+      };
+    }
+    // Page reading present — even permissive mode must not pass below
+    // the floor. The "skip the gate" framing in the original docstring
+    // referred to the BG1/BG2 retry path; the floor itself is non-
+    // negotiable.
+    if (pageCashbackPct < minCashbackPct) {
+      return {
+        kind: 'fail',
+        cashbackPct: pageCashbackPct,
+        reason: `cashback ${pageCashbackPct}% (below ${minCashbackPct}% floor)`,
       };
     }
     return { kind: 'pass', cashbackPct: pageCashbackPct, fellBackToDefault: false };
