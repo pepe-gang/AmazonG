@@ -20,18 +20,56 @@ export async function scrapeProduct(page: Page, url: string): Promise<ProductInf
   await loadProductPage(page, url);
   const html = await page.content();
   const info = parseProductHtml(html, url);
-  // Override isPrime + hasBuyNow with runtime visibility checks (bounding
-  // rect + computed style) — authoritative on whether the elements are
-  // actually rendered for the user, regardless of the inconsistent
-  // feature-div active=false attribute that the static parser sees.
+  // Reconcile the static parser with the runtime visibility check.
+  //
+  // The static parser knows about Amazon's `data-csa-c-is-in-initial-active-row="false"`
+  // "inactive accordion row" marker, which means a subtree is rendered
+  // in markup but logically hidden. The runtime check doesn't know
+  // about this marker — it only looks at aok-hidden ancestors, bounding
+  // rects, and computed styles. Some inactive-accordion subtrees DO
+  // render with non-zero bounding rects (Amazon's CSS doesn't always
+  // collapse them), which means the runtime check sees them as
+  // "visible" while the static parser correctly treats them as hidden.
+  //
+  // INC-2026-05-05: a non-Prime iPad PDP had three #prime-badge nodes,
+  // all flagged by the static parser as hidden (parent celwidget had
+  // the inactive-row marker). The runtime check called one visible
+  // because its bounding rect was non-zero. The override blindly
+  // flipped isPrime from `false` (static) to `true` (runtime). Verify
+  // passed. Order placed for a non-Prime item.
+  //
+  // Conservative reconciliation rule:
+  //   - false (from EITHER source) wins. We never upgrade `false` → `true`.
+  //   - Runtime can promote `null` (static was indeterminate) up to
+  //     `true` or `false`.
+  //   - Runtime can downgrade `true` → `false` (e.g. static parser
+  //     thought a candidate was visible but the live DOM disagrees).
+  //
+  // This trades occasional false-negatives (real Prime listing where
+  // the static parser excluded the badge erroneously) for correctness
+  // on the non-Prime case. False-negatives surface as "not_prime"
+  // verify failures the user can rerun; false-positives place real
+  // money at non-Prime delivery.
   const runtime = await runtimeVisibilityChecks(page).catch(() => null);
   if (runtime) {
-    if (runtime.isPrime !== null) info.isPrime = runtime.isPrime;
-    if (runtime.hasBuyNow !== null) info.hasBuyNow = runtime.hasBuyNow;
-    if (runtime.hasAddToCart !== null) info.hasAddToCart = runtime.hasAddToCart;
-    if (runtime.isSignedIn !== null) info.isSignedIn = runtime.isSignedIn;
+    info.isPrime = reconcile(info.isPrime, runtime.isPrime);
+    info.hasBuyNow = reconcile(info.hasBuyNow, runtime.hasBuyNow);
+    info.hasAddToCart = reconcile(info.hasAddToCart, runtime.hasAddToCart);
+    info.isSignedIn = reconcile(info.isSignedIn, runtime.isSignedIn);
   }
   return info;
+}
+
+/**
+ * Conservative-AND for boolean visibility flags. False wins. Runtime can
+ * promote null to true/false but cannot upgrade false → true. See the
+ * INC-2026-05-05 commentary in scrapeProduct above for the full
+ * rationale.
+ */
+function reconcile(staticValue: boolean | null, runtimeValue: boolean | null): boolean | null {
+  if (staticValue === false || runtimeValue === false) return false;
+  if (staticValue === null) return runtimeValue;
+  return staticValue;
 }
 
 type RuntimeChecks = {

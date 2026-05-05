@@ -145,12 +145,18 @@ describe('checkProductConstraints', () => {
     if (!r.ok) expect(r.reason).toBe('not_prime');
   });
 
-  it('allows null isPrime when requirePrime (treats unknown as pass)', () => {
+  // INC-2026-05-05: indeterminate Prime status now fails the gate when
+  // requirePrime is set. Previously null was treated as "assumed ok",
+  // which let an order place on a non-Prime iPad whose Prime status
+  // the runtime could not confirm. Strict-by-default is what the user
+  // expects from the Prime gate — money risk if we're wrong.
+  it('FAILS null isPrime when requirePrime (was: passed as indeterminate)', () => {
     const r = checkProductConstraints(info({ isPrime: null }), {
       ...DEFAULT,
       requirePrime: true,
     });
-    expect(r).toEqual({ ok: true });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('not_prime');
   });
 
   it('allows non-Prime when requirePrime is false', () => {
