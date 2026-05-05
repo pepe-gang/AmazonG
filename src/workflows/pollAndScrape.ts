@@ -5,6 +5,7 @@ import type { DriverSession } from '../browser/driver.js';
 import { openSession } from '../browser/driver.js';
 import { scrapeProduct } from '../actions/scrapeProduct.js';
 import { buyNow } from '../actions/buyNow.js';
+import { clearCartHttpOnly, type ClearCartResult } from '../actions/clearCart.js';
 import {
   buyWithFillers,
   type BuyWithFillersResult,
@@ -485,6 +486,11 @@ async function runFillerBuyWithRetries(
    *  (saves 2-4s). Subsequent retries refetch in case Amazon changed
    *  state (price drift, OOS) between attempts. */
   prescrapedInfo: ProductInfo | undefined,
+  /** Pre-flight clearCart promise from pollAndScrape. Forwarded to
+   *  attempt 1 so the parallel HTTP-clear can be consumed. Attempts
+   *  2/3 re-run the full clearCart since a previous attempt may have
+   *  left the cart in an unknown state. */
+  preflightCleared: Promise<ClearCartResult> | undefined,
   onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
   let lastRaw: BuyWithFillersResult = {
@@ -526,6 +532,8 @@ async function runFillerBuyWithRetries(
       // attempt 2 the page state has drifted (we've been to /spc and
       // back, /cart, etc.) and a fresh scrape is needed anyway.
       prescrapedInfo: attempt === 1 ? prescrapedInfo : undefined,
+      // Same reasoning for the pre-flight clearCart promise.
+      preflightCleared: attempt === 1 ? preflightCleared : undefined,
       correlationId: `${cid}/attempt-${attempt}`,
       onStage,
     });
@@ -2000,6 +2008,20 @@ async function runForProfile(
     // lose just our own tab.
     page = await session.newPage();
 
+    // Pre-flight clearCart fire-and-forget. The HTTP fast path
+    // (ctx.request.get/post) shares the BrowserContext but doesn't
+    // navigate the visible tab, so it runs concurrently with
+    // scrapeProduct's page.goto. Saves ~1.5s/buy on the typical case
+    // where clearCart's HTTP path succeeds. We capture the promise
+    // here and pass it through to buyWithFillers / buyNow so they
+    // skip their internal clearCart when the preflight succeeded.
+    //
+    // If the preflight fails (rare — bot challenge, csrf rotation,
+    // Amazon shape drift), the buy actions fall back to the sequential
+    // clearCart (HTTP path retried + click-loop fallback). Worst case
+    // wall-clock = today's behavior; best case = parallelized.
+    const preflightCleared = clearCartHttpOnly(page, { correlationId: cid });
+
     const info = await scrapeProduct(page, job.productUrl);
     logger.info(
       'job.scrape.ok',
@@ -2126,7 +2148,7 @@ async function runForProfile(
     const onStage = (stage: 'placing' | null): Promise<void> =>
       deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, info, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, info, preflightCleared, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;
@@ -2139,6 +2161,7 @@ async function runForProfile(
         allowedAddressPrefixes: deps.allowedAddressPrefixes,
         correlationId: cid,
         debugDir: deps.debugDir,
+        preflightCleared,
         onStage,
       });
     }
