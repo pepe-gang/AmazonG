@@ -2,7 +2,7 @@ import type { Page } from 'playwright';
 import { JSDOM } from 'jsdom';
 import { logger } from '../shared/logger.js';
 import { cancelFillerOrder } from './cancelFillerOrder.js';
-import { clearCart } from './clearCart.js';
+import { clearCart, type ClearCartResult } from './clearCart.js';
 import { scrapeProduct } from './scrapeProduct.js';
 import {
   ensureAddress,
@@ -110,6 +110,21 @@ type BuyWithFillersOptions = {
    *     Amazon redirected to a variant)
    */
   prescrapedInfo?: ProductInfo;
+  /**
+   * Pre-flight clearCart result. When the caller (pollAndScrape) fires
+   * `clearCartHttpOnly` concurrently with `scrapeProduct` to save ~1.5s
+   * of sequential time, the resulting promise is passed here so the
+   * buy action can skip its internal clearCart call.
+   *
+   * Three states:
+   *   - undefined  — caller didn't pre-flight; run the full clearCart.
+   *   - { ok: true } resolved → cart already empty, skip internal call.
+   *   - { ok: false } resolved → HTTP path failed. Run the full
+   *     clearCart sequentially (HTTP retry + click-loop fallback).
+   *     The page is on the PDP from `scrapeProduct`; the click-loop's
+   *     page.goto('/cart') is the only nav happening so there's no race.
+   */
+  preflightCleared?: Promise<ClearCartResult>;
   correlationId?: string;
   /**
    * Called immediately before the Place Order click ('placing') and
@@ -353,11 +368,39 @@ export async function buyWithFillers(
   //    a parse miss, so an empty/wrong capture degrades gracefully.
   const targetHtmlForHttp = await page.content().catch(() => '');
 
-  // 4. Cart hygiene. Run unconditionally — clearCart no-ops safely on an
-  //    empty cart and returns `wasEmpty: true`. HTTP fast path doesn't
-  //    navigate the page; click-loop fallback DOES (lands on /cart),
-  //    but everything that needed the PDP DOM is already done above.
-  const cleared = await clearCart(page, { correlationId: cid });
+  // 4. Cart hygiene. Two paths:
+  //
+  //   A. Preflight succeeded: pollAndScrape fired clearCartHttpOnly in
+  //      parallel with scrapeProduct and the HTTP path won. Cart is
+  //      already empty. Skip the internal clearCart call entirely.
+  //
+  //   B. Preflight failed (or wasn't fired): run the full clearCart
+  //      (HTTP retry + click-loop fallback). The click-loop's page.goto
+  //      to /cart is fine here because every PDP-DOM read is already
+  //      done above (setMaxQuantity ran, page.content() captured).
+  //
+  //   No-preflight callers (tests, scripts) get path B.
+  let cleared: ClearCartResult;
+  if (opts.preflightCleared) {
+    const pre = await opts.preflightCleared;
+    if (pre.ok) {
+      logger.info(
+        'step.fillerBuy.cart.preflight.skipped',
+        { wasEmpty: pre.wasEmpty, removed: pre.removed },
+        cid,
+      );
+      cleared = pre;
+    } else {
+      logger.info(
+        'step.fillerBuy.cart.preflight.fallback',
+        { reason: pre.reason },
+        cid,
+      );
+      cleared = await clearCart(page, { correlationId: cid });
+    }
+  } else {
+    cleared = await clearCart(page, { correlationId: cid });
+  }
   if (!cleared.ok) {
     return {
       ok: false,

@@ -13,7 +13,7 @@ import {
 import { effectivePriceTolerance } from '../parsers/productConstraints.js';
 import type { BuyResult } from '../shared/types.js';
 import { evaluateCashbackGate } from '../shared/cashbackGate.js';
-import { clearCart } from './clearCart.js';
+import { clearCart, type ClearCartResult } from './clearCart.js';
 import { addFillerViaHttp } from './buyWithFillers.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import { SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHttp.js';
@@ -38,6 +38,14 @@ type BuyOptions = {
    * accepted). Optional — tests and other callers can omit it.
    */
   onStage?: (stage: 'placing' | null) => void | Promise<void>;
+  /**
+   * Pre-flight clearCart result. See buyWithFillers.preflightCleared
+   * for the full rationale — this is the same plumbing for single-buy
+   * mode. When set and resolved ok, we skip the internal clearCart
+   * call. When resolved failed (or undefined), we fall through to the
+   * existing clearCart sequence.
+   */
+  preflightCleared?: Promise<ClearCartResult>;
 };
 
 /**
@@ -169,7 +177,22 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       let usedHttpPath = false;
       const targetAsin = parseAsinFromUrl(page.url()) ?? '';
       if (targetAsin) {
-        const cleared = await clearCart(page, { correlationId: cid });
+        // Cart hygiene — preflight from pollAndScrape if available,
+        // otherwise run the full clearCart sequence. See
+        // buyWithFillers.preflightCleared docstring for rationale.
+        let cleared: ClearCartResult;
+        if (opts.preflightCleared) {
+          const pre = await opts.preflightCleared;
+          if (pre.ok) {
+            step('step.buy.cart.preflight.skipped', { wasEmpty: pre.wasEmpty, removed: pre.removed });
+            cleared = pre;
+          } else {
+            step('step.buy.cart.preflight.fallback', { reason: pre.reason });
+            cleared = await clearCart(page, { correlationId: cid });
+          }
+        } else {
+          cleared = await clearCart(page, { correlationId: cid });
+        }
         if (cleared.ok) {
           step('step.buy.cart.ready', { wasEmpty: cleared.wasEmpty, removed: cleared.removed });
         } else {

@@ -130,6 +130,63 @@ type HttpClearResult =
   | { kind: 'failed'; reason: string; status?: number };
 
 /**
+ * HTTP-only preflight version of `clearCart`. Same shape as the public
+ * `ClearCartResult` but exposes the HTTP fast path WITHOUT the click-
+ * loop fallback. Designed to be fired in parallel with `scrapeProduct`
+ * — both share the BrowserContext but the HTTP path doesn't navigate
+ * the visible tab, so they can run concurrently without racing.
+ *
+ * Caller (pollAndScrape) workflow:
+ *
+ *   const preflight = clearCartHttpOnly(page, cid);   // fire, don't await
+ *   const info = await scrapeProduct(page, productUrl);  // tab nav
+ *   const cleared = await preflight;
+ *   if (!cleared.ok) {
+ *     // HTTP failed — run full clearCart (with click-loop fallback)
+ *     // sequentially. Page is already on PDP (scrape completed); the
+ *     // click-loop's page.goto('/cart') is the only nav happening so
+ *     // there's no race.
+ *     const fallback = await clearCart(page, { correlationId: cid });
+ *     ...
+ *   }
+ *
+ * Returns the same `ClearCartResult` shape so the caller doesn't need
+ * to translate. Never throws.
+ */
+export async function clearCartHttpOnly(
+  page: Page,
+  opts: { correlationId?: string } = {},
+): Promise<ClearCartResult> {
+  const cid = opts.correlationId;
+  logger.info('step.clearCart.preflight.start', { url: CART_URL }, cid);
+  const http = await clearCartViaHttp(page);
+  if (http.kind === 'ok') {
+    logger.info(
+      'step.clearCart.preflight.ok',
+      {
+        removed: http.removed,
+        wasEmpty: http.wasEmpty,
+        cartFetchMs: http.cartFetchMs,
+        deletesMs: http.deletesMs,
+        totalMs: http.totalMs,
+      },
+      cid,
+    );
+    return { ok: true, wasEmpty: http.wasEmpty, removed: http.removed };
+  }
+  logger.info(
+    'step.clearCart.preflight.fail',
+    { reason: http.reason, ...(http.status != null ? { status: http.status } : {}) },
+    cid,
+  );
+  // Translate HTTP failure into the public ClearCartResult fail shape.
+  // Use 'click_no_effect' so callers see this as a soft-fail (matches
+  // what the click-loop returns when it can't make progress) and route
+  // to the sequential fallback.
+  return { ok: false, reason: 'click_no_effect', removed: 0 };
+}
+
+/**
  * HTTP-only clear. Returns `kind:'ok'` on success (including the empty-
  * cart case) or `kind:'failed'` with a reason that the caller can
  * forward to the click-loop fallback. Does NOT throw.
