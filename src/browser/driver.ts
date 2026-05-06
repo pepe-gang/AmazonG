@@ -165,7 +165,12 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     // In-page widgets that fire on PDP and never feed buy-box DOM.
     '*://www.amazon.com/rufus/cl/*',                // Rufus AI chat (~850ms)
     '*://www.amazon.com/dram/renderLazyLoaded*',    // recommendations (~630ms)
-    '*://www.amazon.com/acp/cr-media-carousel/*',   // review images
+    // Generalized from /acp/cr-media-carousel/* to all /acp/* (Pass 7 §3).
+    // Covers cr-media-carousel + Apple-brand-showcase + any future
+    // ACP (Amazon Customization Platform) widget. All empirically
+    // decorative — they fire from product-detail layout cards, never
+    // feed buy-box DOM. ~140ms each on iPad PDP.
+    '*://www.amazon.com/acp/*',
     // Cart-widget paths fire on PDP only (verified MCP probe — not on
     // /spc). Different subpath from our HTTP-only POST
     // /cart/add-to-cart/ref=... (which uses APIRequestContext and
@@ -183,6 +188,18 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     // the rest of the blocklist is verified safe. If it doesn't, all
     // 13 originally-shipped path-blocks are recovered.
     '*://www.amazon.com/cross_border_interstitial_sp/render*',
+    // Pass 7 §3 — additional XHRs found via live anonymous PDP probe
+    // (.research/probe_buy_to_spc.mjs). Empirically decorative; none
+    // feed buy-box DOM, none serve JS, all measured to fire on every
+    // PDP or /spc nav.
+    '*://data.amazon.com/*',                                              // 1-Click turbo-checkout eligibility probe (~412ms). AmazonG never uses 1-Click; pass-6 verified host is auth-gated, blocking it doesn't break us.
+    '*://www.amazon.com/vap/ew/*',                                        // PDP video-player builder (~177ms / 54KB on video-bearing PDPs). We already block .m3u8 chunks; the player component is decorative.
+    '*://www.amazon.com/gp/product/ajax/twisterDimensionSlotsDefault*',   // Variant dimension twister (~601ms). We read variant data from static HTML's #variation_* blocks; this AJAX is for click-to-switch UI we don't use.
+    '*://www.amazon.com/gp/product/ajax/paymentOptionsAjaxExperience*',   // Price block + payment options re-render (~451ms). Our parser uses the static-HTML price.
+    '*://www.amazon.com/gp/product/ajax/billOfMaterial*',                 // "What's in the box" panel (~165ms). Decorative.
+    '*://api.stores.us-east-1.prod.paets.advertising.amazon.dev/*',       // Sponsored-product ad-event tracking (~209ms × 3 per PDP). Same shape as existing telemetry-host blocks.
+    '*://www.amazon.com/location_selector/*',                             // Amazon Locker recommendation (~140ms post-/spc). We never use lockers.
+    '*://www.amazon.com/cart/add-to-cart/patc-config*',                   // Pickup-At-The-Counter config (~140ms on /spc). Distinct from patc-template (PDP) above.
   ];
   let blockedTotal = 0;
   const attachCdpBlocking = async (page: Page): Promise<void> => {
