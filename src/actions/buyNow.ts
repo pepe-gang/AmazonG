@@ -1985,14 +1985,32 @@ export async function setMaxQuantity(
 }
 
 export async function findPlaceOrderLocator(page: Page) {
-  for (const sel of CHECKOUT_PLACE_SELECTORS) {
-    const loc = page.locator(sel).first();
-    if ((await loc.count()) > 0) return loc;
+  // Walk every CSS selector in one browser-side evaluate instead of
+  // 9 sequential `await loc.count()` calls (each is a CDP round-trip
+  // costing ~5-15ms; cumulatively ~50-150ms before this consolidation).
+  // Browser-side `document.querySelector` resolves identically to
+  // Playwright's locator-count check for these selectors.
+  const matchedIdx = await page
+    .evaluate(
+      (selectors) => {
+        for (let i = 0; i < selectors.length; i++) {
+          if (document.querySelector(selectors[i])) return i;
+        }
+        return -1;
+      },
+      CHECKOUT_PLACE_SELECTORS as unknown as string[],
+    )
+    .catch(() => -1);
+  if (matchedIdx >= 0) {
+    const sel = CHECKOUT_PLACE_SELECTORS[matchedIdx];
+    if (sel) return page.locator(sel).first();
   }
   // Text fallback — mirrors waitForCheckout's detector. Picks any
   // visible interactive element whose label matches "Place your order".
   // Uses Playwright's role+name locator so auto-waiting + actionability
-  // checks still apply at click time.
+  // checks still apply at click time. These two probes can't be folded
+  // into the evaluate above — they use Playwright's role/text engines,
+  // not raw document.querySelector.
   const roleLoc = page.getByRole('button', { name: PLACE_ORDER_LABEL_RE }).first();
   if ((await roleLoc.count()) > 0) return roleLoc;
   const inputLoc = page
