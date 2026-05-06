@@ -148,19 +148,32 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     // Media extensions
     '*.mp4*', '*.webm*', '*.mp3*', '*.wav*', '*.ogg*', '*.m3u8*',
     // Telemetry / ad-system hosts (full URL globs; CDP `*` matches any
-    // chars including slashes)
+    // chars including slashes). Empirically verified (pass 3 + live
+    // PDP load 2026-05-05) — none serve JS to the page or feed
+    // buy-box DOM.
     '*://fls-na.amazon.com/*',
     '*://unagi.amazon.com/*',
+    '*://unagi-na.amazon.com/*',                    // NA-region variant (~299ms)
     '*://aax-us-iad.amazon.com/*',
+    '*://aax-us-east-retail-direct.amazon.com/*',   // ad auction
     '*://dtm.amazon.com/*',
     '*://cs.amazon.com/*',
     '*://aax.amazon-adsystem.com/*',
+    '*://s.amazon-adsystem.com/*',                  // display ads (~427ms)
+    '*://ara.paa-reporting-advertising.amazon/*',   // ad reporting (~207ms)
+    '*://pagead2.googlesyndication.com/*',          // Google ads
+    '*://d2lbyuknrhysf9.cloudfront.net/*',          // ad-asset CloudFront
     // In-page widgets that fire on every PDP and never feed buy-box DOM.
     // Empirically verified (pass 3 + 6) to be safe to block:
     //   - Rufus AI chat: 3 chained XHRs (~850ms)
     //   - dram lazy-load: "Customers also viewed" rail (~630ms)
     //   - cr-media-carousel: review-page image gallery
     //   - cross_border_interstitial: international shipping prompt
+    //   - cart/ewc: mini-cart preview overlay (~608ms)
+    //   - cart/add-to-cart/patc-template + get-cart-items: PDP cart-
+    //     widget XHRs (~327ms combined). DIFFERENT subpath from our
+    //     HTTP-only POST `/cart/add-to-cart/ref=...`; that path uses
+    //     APIRequestContext which bypasses CDP entirely.
     // /rd/uedata (Amazon CSM telemetry) is intentionally NOT blocked —
     // its absence may invite anti-bot heuristics over a long-lived
     // session. We keep the telemetry channel open and accept its
@@ -169,6 +182,9 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     '*://www.amazon.com/dram/renderLazyLoaded*',
     '*://www.amazon.com/acp/cr-media-carousel/*',
     '*://www.amazon.com/cross_border_interstitial_sp/render*',
+    '*://www.amazon.com/cart/ewc/*',
+    '*://www.amazon.com/cart/add-to-cart/patc-template*',
+    '*://www.amazon.com/cart/add-to-cart/get-cart-items*',
   ];
   let blockedTotal = 0;
   const attachCdpBlocking = async (page: Page): Promise<void> => {
