@@ -1,6 +1,11 @@
 import type { Page } from 'playwright';
 import { JSDOM } from 'jsdom';
-import { logger } from '../shared/logger.js';
+import { logger as loggerImport } from '../shared/logger.js';
+// Top-level alias so existing call sites in helper functions that don't
+// shadow the import (most of the file) keep working — and so `buyWithFillers`
+// + tracked helpers can shadow this single binding with a context-bound
+// version (see makeBoundLogger).
+const logger = loggerImport;
 import { cancelFillerOrder } from './cancelFillerOrder.js';
 import { clearCart, type ClearCartResult } from './clearCart.js';
 import { scrapeProduct } from './scrapeProduct.js';
@@ -126,6 +131,16 @@ type BuyWithFillersOptions = {
    */
   preflightCleared?: Promise<ClearCartResult>;
   correlationId?: string;
+  /**
+   * Routing context the disk-log sink uses to land step.fillerBuy.*
+   * events on the right per-attempt jsonl file. Without these fields
+   * the sink at `main/index.ts:798-815` drops every event silently —
+   * see BuyOptions.jobId in buyNow.ts for the long-form rationale.
+   * Optional only because tests + standalone scripts can omit them;
+   * in production both are always set.
+   */
+  jobId?: string;
+  profile?: string;
   /**
    * Called immediately before the Place Order click ('placing') and
    * after Amazon's confirmation page parses (null). Used by the
@@ -278,6 +293,33 @@ const WHEY_FILLER_MIN_COUNT = 6;
 const WHEY_FILLER_MAX_COUNT = 8;
 
 /**
+ * Wrap the shared logger so every call auto-merges a context bundle
+ * (`jobId`, `profile`) into the data argument. The disk-log sink at
+ * `main/index.ts:798-815` routes events to per-attempt jsonl files
+ * by these fields; without them the sink drops events silently.
+ *
+ * Used by `buyWithFillers` and its helpers to shadow the imported
+ * `logger` symbol — keeping the existing 50+ `logger.info(msg, data,
+ * cid)` call sites unchanged.
+ */
+type BaseLogger = typeof loggerImport;
+function makeBoundLogger(
+  base: BaseLogger,
+  ctx: Record<string, unknown>,
+): BaseLogger {
+  const merge = (d?: Record<string, unknown>): Record<string, unknown> => ({
+    ...ctx,
+    ...(d ?? {}),
+  });
+  return {
+    info: (m, d, cid) => base.info(m, merge(d), cid),
+    warn: (m, d, cid) => base.warn(m, merge(d), cid),
+    error: (m, d, cid) => base.error(m, merge(d), cid),
+    debug: (m, d, cid) => base.debug(m, merge(d), cid),
+  };
+}
+
+/**
  * Orchestrator for the "Buy with Fillers" checkout flow.
  *
  * We use Buy Now (rather than Add to Cart) as the add-to-cart step: Add
@@ -292,6 +334,16 @@ export async function buyWithFillers(
   opts: BuyWithFillersOptions,
 ): Promise<BuyWithFillersResult> {
   const cid = opts.correlationId;
+  // Routing context for the disk-log sink (main/index.ts:798-815). Without
+  // these fields the sink drops every step.fillerBuy.* event silently.
+  // Shadow the imported logger with a context-bound version so all 50+
+  // existing call sites in this function get the merge for free — no
+  // per-site rewrites needed.
+  const logCtx: Record<string, unknown> = {};
+  if (opts.jobId) logCtx.jobId = opts.jobId;
+  if (opts.profile) logCtx.profile = opts.profile;
+  // eslint-disable-next-line @typescript-eslint/no-shadow
+  const logger = makeBoundLogger(loggerImport, logCtx);
   logger.info('step.fillerBuy.start', { productUrl: opts.productUrl }, cid);
 
   // Step ordering (changed 2026-05-05 to eliminate the PDP→/cart→PDP
@@ -564,7 +616,7 @@ export async function buyWithFillers(
     terms: fillerTerms,
     targetCount: fillerTargetCount,
     attemptedAsins: opts.attemptedAsins,
-  });
+  }, logCtx);
   const fillersAdded = fillersResult.added;
   const fillerAsins = fillersResult.asins;
   if (fillersAdded < fillerTargetCount) {
@@ -661,7 +713,7 @@ export async function buyWithFillers(
         detail: `url=${page.url()}`,
       };
     }
-    const transition = await waitForSpcOrHandleByg(page, cid);
+    const transition = await waitForSpcOrHandleByg(page, cid, logCtx);
     if (!transition.ok) {
       return {
         ok: false,
@@ -2285,7 +2337,14 @@ async function addFillerItems(
   targetAsin: string | null,
   cid: string | undefined,
   fillerOpts: FillerOpts = {},
+  // Appended last so existing call-sites that pass fillerOpts as the
+  // trailing object literal still parse cleanly.
+  logCtx: Record<string, unknown> = {},
 ): Promise<{ added: number; asins: string[] }> {
+  // Shadow `logger` so the 7 call sites in this function get the disk-log
+  // routing fields (jobId+profile) merged in. See makeBoundLogger above.
+  // eslint-disable-next-line @typescript-eslint/no-shadow
+  const logger = makeBoundLogger(loggerImport, logCtx);
   const targetCount = fillerOpts.targetCount ?? FILLER_COUNT;
   const terms = shuffle(fillerOpts.terms ?? FILLER_SEARCH_TERMS);
   const seen = fillerOpts.attemptedAsins ?? new Set<string>();
@@ -2404,7 +2463,12 @@ async function addFillerItems(
 async function waitForSpcOrHandleByg(
   page: Page,
   cid: string | undefined,
+  logCtx: Record<string, unknown> = {},
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // Shadow `logger` so the 2 call sites in this function get the disk-log
+  // routing fields (jobId+profile) merged in. See makeBoundLogger above.
+  // eslint-disable-next-line @typescript-eslint/no-shadow
+  const logger = makeBoundLogger(loggerImport, logCtx);
   const TOTAL_DEADLINE_MS = 30_000;
   const MAX_BYG_CLICKS = 2;
   const start = Date.now();

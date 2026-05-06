@@ -28,6 +28,16 @@ type BuyOptions = {
   maxPrice: number | null;
   allowedAddressPrefixes: string[];
   correlationId?: string;
+  /**
+   * Routing context the disk-log sink uses to land step.buy.* events on
+   * the right per-attempt jsonl file. Without these fields the sink at
+   * `main/index.ts:798-815` drops every event silently — the production
+   * 52s gap between scrape.ok and profile.placed used to have ZERO
+   * step-level detail because of this. Optional only because tests +
+   * standalone scripts can omit them; in production both are always set.
+   */
+  jobId?: string;
+  profile?: string;
   /** Directory for debug screenshots captured on silent checkout failures. */
   debugDir?: string;
   /**
@@ -107,8 +117,17 @@ const PLACE_ORDER_LABEL_RE = /^place\s+(your\s+)?order(\s+and\s+pay)?$/i;
  */
 export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
   const cid = opts.correlationId;
-  const step: StepEmitter = (message, data) => logger.info(message, data, cid);
-  const warn: StepEmitter = (message, data) => logger.warn(message, data, cid);
+  // Merge routing fields into every emitted event so the disk-log sink
+  // (main/index.ts:798-815) lands them on the right per-attempt jsonl.
+  // Without this the sink drops every step.buy.* event silently — see
+  // BuyOptions.jobId docstring above.
+  const ctx: Record<string, unknown> = {};
+  if (opts.jobId) ctx.jobId = opts.jobId;
+  if (opts.profile) ctx.profile = opts.profile;
+  const step: StepEmitter = (message, data) =>
+    logger.info(message, { ...ctx, ...(data ?? {}) }, cid);
+  const warn: StepEmitter = (message, data) =>
+    logger.warn(message, { ...ctx, ...(data ?? {}) }, cid);
 
   try {
     step('step.buy.start', { dryRun: opts.dryRun, productUrl: page.url() });

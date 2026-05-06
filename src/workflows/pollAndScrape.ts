@@ -471,6 +471,10 @@ async function runFillerBuyWithRetries(
   deps: Deps,
   job: AutoGJob,
   cid: string,
+  /** Amazon profile email — threaded into BuyWithFillersOptions.profile
+   *  so the disk-log sink routes step.fillerBuy.* events to the right
+   *  per-attempt jsonl. */
+  profile: string,
   /** Per-profile override of the min-cashback floor. See runForProfile. */
   minCashbackPct: number,
   /** Per-profile cashback gate enforcement. See runForProfile. */
@@ -532,6 +536,11 @@ async function runFillerBuyWithRetries(
       // Same reasoning for the pre-flight clearCart promise.
       preflightCleared: attempt === 1 ? preflightCleared : undefined,
       correlationId: `${cid}/attempt-${attempt}`,
+      // Routing fields — see BuyWithFillersOptions.jobId docstring.
+      // Without these every step.fillerBuy.* event silently drops at the
+      // disk-log sink (main/index.ts:798-815).
+      jobId: job.id,
+      profile,
       onStage,
     });
     if (lastRaw.ok) {
@@ -1814,7 +1823,7 @@ export async function runForProfile(
         .update(attemptId, { stage }, { forceFlush: true })
         .then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, info, preflightCleared, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, info, preflightCleared, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;
@@ -1826,6 +1835,10 @@ export async function runForProfile(
         maxPrice: job.maxPrice,
         allowedAddressPrefixes: deps.allowedAddressPrefixes,
         correlationId: cid,
+        // Routing fields — see BuyOptions.jobId docstring. Without these
+        // every step.buy.* event silently drops at the disk-log sink.
+        jobId: job.id,
+        profile,
         debugDir: deps.debugDir,
         preflightCleared,
         onStage,
