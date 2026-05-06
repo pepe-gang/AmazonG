@@ -32,6 +32,7 @@ import { parsePrice } from '../parsers/amazonProduct.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import type { ProductInfo } from '../shared/types.js';
 import {
+  AMAZON_US_MERCHANT_ID,
   CART_ADD_CLIENT_NAME,
   CART_ADD_URL,
   HTTP_BROWSERY_HEADERS,
@@ -1918,10 +1919,21 @@ function shuffle<T>(arr: readonly T[]): T[] {
 }
 
 function buildFillerSearchUrl(term: string): string {
-  // p_85:2470955011 = Prime-eligible; p_36:low-high = price in cents
+  // Search filters (Amazon's `rh=` syntax, comma-joined):
+  //   p_85:2470955011  — Prime-eligible
+  //   p_6:ATVPDKIKX0DER — sold by Amazon.com (Amazon's US merchant id);
+  //                        restricts to "Ships from and sold by Amazon"
+  //                        OR "Ships from Amazon" (FBA where Amazon is
+  //                        the seller). 3rd-party-sold listings filtered
+  //                        out, which keeps cancellation flow clean —
+  //                        Amazon-direct cancels are predictable; 3p
+  //                        cancels can stall behind merchant approval.
+  //   p_36:low-high     — price in cents
   const minCents = Math.round(FILLER_MIN_PRICE * 100);
   const maxCents = Math.round(FILLER_MAX_PRICE * 100);
-  const rh = encodeURIComponent(`p_85:2470955011,p_36:${minCents}-${maxCents}`);
+  const rh = encodeURIComponent(
+    `p_85:2470955011,p_6:ATVPDKIKX0DER,p_36:${minCents}-${maxCents}`,
+  );
   return `https://www.amazon.com/s?k=${encodeURIComponent(term)}&rh=${rh}&s=review-rank`;
 }
 
@@ -1964,6 +1976,16 @@ async function searchFillerCandidatesViaHttp(
   const all = extractSearchResultCandidates(doc);
   return all.filter((c) => {
     if (!c.isPrime) return false;
+    // "Sold by Amazon.com" gate. `p_6:ATVPDKIKX0DER` URL filter is
+    // a bin-level pre-filter that includes any listing where Amazon
+    // is one of multiple sellers — buy-box can still route to a 3p
+    // seller. The card's hidden `merchantId` input identifies the
+    // buy-box winner; only that being equal to Amazon US's merchant
+    // id guarantees "Sold by Amazon and shipped from Amazon", which
+    // the user requires for clean cancellation flow. (3p Prime via
+    // Seller Fulfilled Prime would slip through a Prime-only filter
+    // — the merchantId check excludes those too.)
+    if (c.merchantId !== AMAZON_US_MERCHANT_ID) return false;
     if (c.price === null) return false;
     if (c.price < FILLER_MIN_PRICE) return false;
     if (c.price > FILLER_MAX_PRICE) return false;
