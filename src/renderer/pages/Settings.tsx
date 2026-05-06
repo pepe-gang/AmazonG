@@ -58,6 +58,7 @@ export function SettingsView({
         <AutoStartWorkerPanel />
         <ParallelBuysPanel />
         <SnapshotSettingsPanel />
+        <ExperimentalPanel />
         <BetterBGConnectionPanel identity={identity} workerRunning={workerRunning} />
       </div>
       {lockedToast && (
@@ -276,6 +277,48 @@ function AutoStartWorkerPanel() {
           />
           <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
             {on ? 'On' : 'Off'}
+          </span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function ExperimentalPanel() {
+  const { settings, busy, update } = useSettings();
+  if (!settings) return null;
+  const experimental = settings.experimental ?? {};
+  const surgicalOn = experimental.surgicalCashbackRecovery === true;
+  // Shallow-merge against the existing experimental object so future
+  // sibling flags aren't clobbered by toggling this one.
+  const setSurgical = (v: boolean) =>
+    void update({ experimental: { ...experimental, surgicalCashbackRecovery: v } });
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">
+            Experimental: surgical cashback recovery
+          </div>
+          <div className="prefix-sub">
+            When a filler buy fails the cashback gate because the target's
+            shipping group has no <code>% back</code> items, AmazonG will
+            remove group items one at a time (HTTP cart deletes) and only
+            add replacement fillers if removal alone didn't reach the
+            minimum. Replaces the legacy 3-attempt retry. Off by default.
+          </div>
+        </div>
+        <label
+          className="flex items-center gap-2 cursor-pointer"
+          title={surgicalOn ? 'Surgical recovery enabled' : 'Legacy 3-attempt retry'}
+        >
+          <Switch
+            checked={surgicalOn}
+            onCheckedChange={setSurgical}
+            disabled={busy}
+          />
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {surgicalOn ? 'On' : 'Off'}
           </span>
         </label>
       </div>
