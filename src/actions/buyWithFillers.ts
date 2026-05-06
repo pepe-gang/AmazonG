@@ -2298,37 +2298,36 @@ type FillerOpts = {
 };
 
 /**
- * Search a few filler terms for cart-add candidates and commit each one
- * via its own POST.
+ * Search a few filler terms for cart-add candidates and commit them all
+ * in a single batch POST.
  *
- * Why parallel per-item POSTs instead of a single batch (changed
- * 2026-05-06 after user telemetry showing 2/8 batches recurring during
- * rebuys):
+ * Why this is so much simpler than the old parallel-worker flow:
  *
- *  - The batch endpoint silently drops a subset of items under load.
- *    User saw consistent 2-of-8 commits with no HTTP error — Amazon
- *    returned 200, response shape OK, but only 2 ASINs appeared as
- *    `data-asin="..."` in the body. Hitting the floor → buy bailed.
- *  - Per-item POSTs eliminate the silent-drop pathology: a request
- *    that contains only ONE item can either commit it or refuse — no
- *    way for Amazon to "drop some". An individual failure (stale OLI,
- *    item OOS, throttle) only loses that one request.
- *  - Concurrency 8 against the same session is well-tolerated by
- *    Amazon's cart endpoint (cart adds are commutative). Net wall-
- *    clock is ~the same as the batch (parallel HTTP POSTs).
+ *  - Each Amazon search-result `<form>` already carries
+ *    `anti-csrftoken-a2z` + `items[0.base][offerListingId]` +
+ *    `items[0.base][asin]` (verified live 2026-05-05). One search HTTP
+ *    fetch yields ~50 ready-to-add candidates — no per-ASIN PDP fetch
+ *    is required to harvest tokens.
+ *  - The `/cart/add-to-cart/...` endpoint accepts an arbitrary number
+ *    of `items[N.base][...]` triplets in one POST. Verified live with
+ *    8 items: status 200, all 8 in cart, 1.4s total.
  *
- * Net flow:
- *   1–3 HTTP search fetches (we usually only need one).
- *   N parallel POSTs (one per filler).
- *   Phantom-commit guard runs per-POST against its own response.
+ * Net change vs the prior 4-worker, 17-HTTP-call loop:
+ *   - 1–3 HTTP search fetches (we usually only need one — most terms
+ *     yield enough fresh candidates after dedup).
+ *   - 1 batch POST.
+ *   - Total: 2–4 HTTP calls instead of ~17.
  *
  * Preserved invariants:
  *   - `targetAsin` is pre-added to `seen` so the picker never picks the
  *     target as a filler.
  *   - `attemptedAsins` is shared across retries; ASINs we've considered
  *     stay considered.
- *   - Partial counts are acceptable — caller decides via
- *     MIN_FILLERS_FOR_COVER whether to proceed.
+ *   - Phantom-commit guard: the POST response must echo every requested
+ *     ASIN's `data-asin="..."`. We return only the subset that actually
+ *     landed.
+ *   - Partial counts are acceptable — caller decides whether to proceed
+ *     with fewer fillers (existing behavior in `step.fillerBuy.fillers.partial`).
  */
 async function addFillerItems(
   mainPage: Page,
@@ -2378,78 +2377,65 @@ async function addFillerItems(
     return { added: 0, asins: [] };
   }
 
-  // 2. Per-item parallel POSTs. Each is independent — Amazon can't
-  //    silently drop "some" because each request has only one item.
-  //    Individual failure modes (stale OLI, item OOS, throttle, server
-  //    blip) only affect the single request that hit them.
-  const items = candidates.map((c) => ({
-    asin: c.asin,
-    offerListingId: c.offerListingId,
-  }));
-  const ctxRequest = mainPage.context().request;
-  const headers = {
-    ...HTTP_BROWSERY_HEADERS,
-    'Content-Type': 'application/x-www-form-urlencoded',
-    Origin: 'https://www.amazon.com',
-    Referer: 'https://www.amazon.com/',
-  } as const;
+  // 2. Single batch POST. Phantom-commit guard runs against the
+  //    response body — we count every ASIN that appears as
+  //    `data-asin="..."` in the cart-page HTML Amazon returns.
+  const items = candidates.map((c) => ({ asin: c.asin, offerListingId: c.offerListingId }));
+  const body = buildBatchCartAddBody(csrf, items, { clientName: SEARCH_CART_ADD_CLIENT_NAME });
 
   const t0 = Date.now();
-  const settled = await Promise.allSettled(
-    items.map(async (item) => {
-      const body = buildBatchCartAddBody(csrf!, [item], {
-        clientName: SEARCH_CART_ADD_CLIENT_NAME,
-      });
-      const res = await ctxRequest.post(CART_ADD_URL, {
-        headers,
-        data: body.toString(),
-        timeout: 20_000,
-      });
-      if (!res.ok()) {
-        return { asin: item.asin, ok: false, reason: 'http_error', status: res.status() };
-      }
-      const text = await res.text().catch(() => '');
-      if (!looksLikeCartResponse(text)) {
-        return { asin: item.asin, ok: false, reason: 'shape_mismatch' };
-      }
-      const inResp = asinsCommittedInResponse(text, [item.asin]);
-      if (inResp.length === 0) {
-        return { asin: item.asin, ok: false, reason: 'phantom_commit' };
-      }
-      return { asin: item.asin, ok: true };
-    }),
-  );
-  const tookMs = Date.now() - t0;
-
-  const committed: string[] = [];
-  const failures: { asin: string; reason: string; status?: number }[] = [];
-  for (const r of settled) {
-    if (r.status === 'rejected') {
-      failures.push({ asin: 'unknown', reason: 'threw:' + String(r.reason).slice(0, 80) });
-      continue;
-    }
-    if (r.value.ok) committed.push(r.value.asin);
-    else failures.push({ asin: r.value.asin, reason: r.value.reason, status: r.value.status });
-  }
-
-  if (failures.length > 0) {
-    logger.warn(
-      'step.fillerBuy.fillers.parallel.partial',
-      {
-        requested: items.length,
-        committed: committed.length,
-        failures: failures.slice(0, 10),
-        tookMs,
+  let res;
+  try {
+    res = await mainPage.context().request.post(CART_ADD_URL, {
+      headers: {
+        ...HTTP_BROWSERY_HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Origin: 'https://www.amazon.com',
+        Referer: 'https://www.amazon.com/',
       },
+      data: body.toString(),
+      timeout: 20_000,
+    });
+  } catch (err) {
+    logger.warn(
+      'step.fillerBuy.fillers.batch.threw',
+      { error: String(err).slice(0, 120), candidates: items.length },
       cid,
     );
-  } else {
-    logger.info(
-      'step.fillerBuy.fillers.parallel.ok',
-      { requested: items.length, committed: committed.length, tookMs },
-      cid,
-    );
+    return { added: 0, asins: [] };
   }
+  const tookMs = Date.now() - t0;
+  if (!res.ok()) {
+    logger.warn(
+      'step.fillerBuy.fillers.batch.httpError',
+      { status: res.status(), candidates: items.length, tookMs },
+      cid,
+    );
+    return { added: 0, asins: [] };
+  }
+  const respText = await res.text().catch(() => '');
+  if (!looksLikeCartResponse(respText)) {
+    logger.warn(
+      'step.fillerBuy.fillers.batch.shapeMismatch',
+      { status: res.status(), candidates: items.length, tookMs },
+      cid,
+    );
+    return { added: 0, asins: [] };
+  }
+  const committed = asinsCommittedInResponse(
+    respText,
+    items.map((i) => i.asin),
+  );
+  logger.info(
+    'step.fillerBuy.fillers.batch.ok',
+    {
+      requested: items.length,
+      committed: committed.length,
+      tookMs,
+      status: res.status(),
+    },
+    cid,
+  );
   return { added: committed.length, asins: committed };
 }
 
