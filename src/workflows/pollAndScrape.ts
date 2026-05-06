@@ -18,6 +18,7 @@ import { cancelNonTargetItems } from '../actions/cancelNonTargetItems.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
 import { fetchTracking } from '../actions/fetchTracking.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
+import { runBuyTuple } from './runners.js';
 import { shouldUseFillers } from '../shared/fillerMode.js';
 import { logger } from '../shared/logger.js';
 import { captureFailureSnapshot, discardTracing, shouldCapture, startTracing } from '../browser/snapshot.js';
@@ -43,7 +44,7 @@ export type JobAttemptStore = {
   get(attemptId: string): Promise<JobAttempt | null>;
 };
 
-type Deps = {
+export type Deps = {
   bg: BGClient;
   userDataRoot: string;
   /** Where buyNow drops debug screenshots when checkout silently fails. */
@@ -615,7 +616,7 @@ function fillerToBuyResult(f: BuyWithFillersResult): BuyResult {
   };
 }
 
-type ProfileResult = {
+export type ProfileResult = {
   email: string;
   status: 'completed' | 'failed' | 'action_required';
   orderId: string | null;
@@ -1019,19 +1020,21 @@ async function handleJob(
   // tells us how much wall-clock the streaming scheduler could save.
   const fanoutStartMs = Date.now();
   const results = await pMap(eligible, concurrency, (profile) =>
-    runForProfile(
+    runBuyTuple({
       deps,
       sessions,
       job,
       profile,
-      cid,
-      fillerByEmail.get(profile.email) === true,
-      effectiveMinByEmail.get(profile.email) ?? deps.minCashbackPct,
-      requireMinByEmail.get(profile.email.toLowerCase()) ?? true,
-      parallelism.wheyProteinFillerOnly,
-      abortController.signal,
+      parentCid: cid,
+      useFiller: fillerByEmail.get(profile.email) === true,
+      effectiveMinCashbackPct:
+        effectiveMinByEmail.get(profile.email) ?? deps.minCashbackPct,
+      requireMinCashback:
+        requireMinByEmail.get(profile.email.toLowerCase()) ?? true,
+      wheyProteinFillerOnly: parallelism.wheyProteinFillerOnly,
+      abortSignal: abortController.signal,
       abortSiblings,
-    ),
+    }),
   );
   const fanoutDurationMs = Date.now() - fanoutStartMs;
   logger.info(
@@ -1938,7 +1941,7 @@ async function reportSafe(
   }
 }
 
-async function runForProfile(
+export async function runForProfile(
   deps: Deps,
   sessions: Map<string, DriverSession>,
   job: AutoGJob,
