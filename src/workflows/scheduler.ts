@@ -178,6 +178,18 @@ export class StreamingScheduler {
     const sleep = this.sd.sleep ?? defaultSleep;
     let lastNoProfilesWarn = 0;
     const NO_PROFILES_WARN_INTERVAL_MS = 60_000;
+    // Fast poll for the no-job and error paths. New rebuys / scheduled
+    // jobs become claimable in BG at countdown expiry — at 5s polling
+    // a job ready right after our last poll waits up to 5s for the
+    // next call. With multiple workers idle and one busy on a long
+    // buy, the BG queue can fill while we sleep. 1s polling catches
+    // ready-now jobs within a second without meaningfully more BG load.
+    const NO_JOB_SLEEP_MS = 1_000;
+    // Eligibility / error backoff stays at 5s — these are "wait for a
+    // user action / wait for BG to recover" cases, not "wait for the
+    // next job to be ready". No reason to hammer BG when no profile
+    // is signed in.
+    const BACKOFF_SLEEP_MS = 5_000;
     while (this.running) {
       const cap = this.sd.cap();
       // Don't pre-buffer too many tuples; we want the BG-claimed jobs
@@ -207,7 +219,7 @@ export class StreamingScheduler {
             );
             lastNoProfilesWarn = Date.now();
           }
-          await sleep(5_000, () => this.running);
+          await sleep(BACKOFF_SLEEP_MS, () => this.running);
           continue;
         }
       }
@@ -221,11 +233,11 @@ export class StreamingScheduler {
           { error: err instanceof Error ? err.message : String(err) },
           this.sd.parentCid,
         );
-        await sleep(5_000, () => this.running);
+        await sleep(BACKOFF_SLEEP_MS, () => this.running);
         continue;
       }
       if (!job) {
-        await sleep(5_000, () => this.running);
+        await sleep(NO_JOB_SLEEP_MS, () => this.running);
         continue;
       }
 
