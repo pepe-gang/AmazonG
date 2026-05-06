@@ -163,6 +163,15 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     step('step.buy.path', { path });
 
     if (path === 'buy-now') {
+      // Buy-now-click bypasses the cart entirely, so any inflight
+      // preflightCleared from pollAndScrape is unused. Drain its
+      // promise so a rejection (rare — bot challenge, csrf rotation)
+      // doesn't surface as an unhandled rejection. pollAndScrape now
+      // gates preflight on useFillers, so this is normally a no-op
+      // belt-and-suspenders for any future caller that passes one.
+      if (opts.preflightCleared) {
+        void opts.preflightCleared.catch(() => undefined);
+      }
       step('step.buy.click', { button: 'buy-now' });
       try {
         await page.locator('#buy-now-button').first().click({ timeout: 10_000 });

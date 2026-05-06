@@ -2020,7 +2020,17 @@ async function runForProfile(
     // Amazon shape drift), the buy actions fall back to the sequential
     // clearCart (HTTP path retried + click-loop fallback). Worst case
     // wall-clock = today's behavior; best case = parallelized.
-    const preflightCleared = clearCartHttpOnly(page, { correlationId: cid });
+    // Only filler-mode reliably uses the cart (every buy posts to
+    // /cart/add-to-cart/ref=...). Single-mode chooses between
+    // buy-now-click (the common case for Prime listings — bypasses the
+    // cart entirely) and an atc fallback (rare). Firing the preflight
+    // for single-mode wastes HTTP capacity + cookie-pool slots ~80%
+    // of the time and orphans the promise on the buy-now-click branch.
+    // For atc fallbacks, buyNow runs its own sequential clearCart
+    // (slightly slower wall-clock but acceptable for the rare path).
+    const preflightCleared = useFillers
+      ? clearCartHttpOnly(page, { correlationId: cid })
+      : undefined;
 
     const info = await scrapeProduct(page, job.productUrl);
     logger.info(
