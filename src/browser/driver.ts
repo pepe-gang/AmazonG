@@ -155,20 +155,6 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     '*://dtm.amazon.com/*',
     '*://cs.amazon.com/*',
     '*://aax.amazon-adsystem.com/*',
-    // In-page widgets that fire on every PDP and never feed buy-box DOM.
-    // Empirically verified (pass 3 + 6) to be safe to block:
-    //   - Rufus AI chat: 3 chained XHRs (~850ms)
-    //   - dram lazy-load: "Customers also viewed" rail (~630ms)
-    //   - cr-media-carousel: review-page image gallery
-    //   - cross_border_interstitial: international shipping prompt
-    // /rd/uedata (Amazon CSM telemetry) is intentionally NOT blocked —
-    // its absence may invite anti-bot heuristics over a long-lived
-    // session. We keep the telemetry channel open and accept its
-    // bandwidth/IPC cost.
-    '*://www.amazon.com/rufus/cl/*',
-    '*://www.amazon.com/dram/renderLazyLoaded*',
-    '*://www.amazon.com/acp/cr-media-carousel/*',
-    '*://www.amazon.com/cross_border_interstitial_sp/render*',
   ];
   let blockedTotal = 0;
   const attachCdpBlocking = async (page: Page): Promise<void> => {
