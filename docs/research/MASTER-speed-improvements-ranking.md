@@ -73,7 +73,10 @@ buy in a queue or only on multi-profile fan-out are noted separately.
 - ~~CDP `Network.setBlockedURLs` replaces `context.route()`~~ — shipped `a214bd1`
 - ~~Path-block Rufus + dram + cr-media-carousel + cross-border~~ — shipped `9fc6947`
 - ~~Extend blocklist (6 hosts + 3 cart widgets)~~ — shipped `acea10d`
-- ~~Streaming PDP HTTP fetch + early cancel at `</form>`~~ — shipped `1859e57`
+- ~~Streaming PDP HTTP fetch + early cancel at `</form>`~~ — shipped `1859e57`, **REVERTED in `83fe7c4`** (caused filler Place Order 500 — see dead list)
+
+**🪦 Streaming PDP fetch dead-list addition (lessons from `83fe7c4` revert):**
+Native `fetch` (Node 18+) does NOT propagate response `Set-Cookie` back to Playwright's `BrowserContext`. For ANY future Node-side fetch that reads from amazon.com on behalf of the logged-in profile, only `ctx.request.{get,post}` is safe — APIRequestContext shares its cookie jar with BrowserContext bidirectionally. If we ever re-attempt streaming, must (a) parse `response.headers.getSetCookie()` and (b) call `ctx.addCookies(...)` to write Set-Cookie back. Pass-5's "990ms saved" estimate didn't account for this side-effect.
 
 **Path-block candidates DEFERRED for separate analysis (riskier):**
 - `/gp/product/ajax/twisterDimensionSlotsDefault*` (~743ms) — variant data risk
@@ -157,7 +160,7 @@ buy in a queue or only on multi-profile fan-out are noted separately.
 | `a214bd1` | **Migrate route() → CDP `Network.setBlockedURLs`** (was Top-10 #1 / A0) | 500–2000ms/PDP nav (eliminates per-request IPC) | MCP empirical: 118/300 requests match patterns on live iPad PDP; buy-box DOM unchanged (productTitle, 3 visible Prime badges, Buy Now visible+enabled, ATC visible). Same blocking intent as `0adcfda`+`1f73827`. |
 | `9fc6947` | **Path-block Rufus AI + dram + cr-media-carousel + cross-border** (was Top-10 #2 / A2) | ~960ms / PDP nav (4 newly-blocked XHRs) | MCP empirical on iPad PDP: 4 new blocks (rufus/cl/render 154ms, cross_border_interstitial 250ms, rufus/cl/streaming 360ms, cr-media-carousel 196ms). Buy-box DOM unchanged. /rd/uedata intentionally NOT blocked to preserve CSM telemetry channel. |
 | `acea10d` | **Extend blocklist: 6 hosts + 3 cart widgets** (was Top-10 #5 / A3 + new finds) | ~2185ms across 6 newly-blocked requests on iPad PDP; realistic ~1.5–2s/PDP | MCP empirical: `s.amazon-adsystem` 427ms, `unagi-na` 299ms, `ara.paa-reporting-advertising` 207ms, `/cart/ewc/` 608ms, `/cart/add-to-cart/patc-template` 166ms, `/cart/add-to-cart/get-cart-items` 161ms. Plus 3 not-on-this-PDP hosts (pagead2, aax-us-east-retail-direct, d2lbyuknrhysf9). Cart paths use different subpaths than our HTTP-only POST. |
-| `1859e57` | **Streaming PDP HTTP fetch + early cancel at `</form>`** (was Top-10 #1) | ~990ms per HTTP fallback fire; expected per-buy 100–500ms (depends on fallback rate) | All 6 buyable PDP fixtures: truncated body parses identically to full body via `extractCartAddTokens`. iPad PDP fixture: full 2.3MB → truncated <600KB. New pdpStreaming.test.ts (12 tests). Implementation: native `fetch` with cookies copied from BrowserContext, cancel reader once `</form>` past `id="addToCart"` is buffered, return null + fall back to `ctx.request.get` on any failure. |
+| ~~`1859e57`~~ | ~~Streaming PDP HTTP fetch~~ | n/a — **REVERTED in `83fe7c4`** | Caused filler-mode Place Order 500 regression. Native `fetch` doesn't propagate response Set-Cookie back to `BrowserContext`; ~10× streaming fetches per filler buy left session-state cookies stale, /spc rendered OK but Place Order POST failed Amazon's session-state validation. Single-mode unaffected because its single `addFillerViaHttp` call provides `prefetchedHtml` so the streaming fetch never fires. |
 
 ---
 
