@@ -163,14 +163,21 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     '*://pagead2.googlesyndication.com/*',          // Google ads
     '*://d2lbyuknrhysf9.cloudfront.net/*',          // ad-asset CloudFront
     // In-page widgets that fire on PDP (verified empirically) and never
-    // feed buy-box DOM. Skipped here (suspect for filler-mode /spc
-    // regression — investigate separately):
-    //   - cross_border_interstitial_sp/render (FIRES ON /spc per probe)
-    //   - cart/ewc/* (mini-cart preview)
-    //   - cart/add-to-cart/patc-template* + get-cart-items* (cart widgets)
+    // feed buy-box DOM. cross_border_interstitial_sp/render skipped —
+    // it's the only widget that empirically FIRES ON /spc in the MCP
+    // probe; suspected as the cause of the filler-mode /spc regression
+    // that bisect ruled out 9 other safe patterns from. Investigate
+    // separately if we want to recover that ~250ms.
     '*://www.amazon.com/rufus/cl/*',                // Rufus AI chat (~850ms)
     '*://www.amazon.com/dram/renderLazyLoaded*',    // recommendations (~630ms)
     '*://www.amazon.com/acp/cr-media-carousel/*',   // review images
+    // Cart-widget paths fire on PDP only (verified MCP probe — not on
+    // /spc). Different subpath from our HTTP-only POST
+    // /cart/add-to-cart/ref=... (which uses APIRequestContext and
+    // bypasses CDP regardless).
+    '*://www.amazon.com/cart/ewc/*',                       // mini-cart preview (~608ms)
+    '*://www.amazon.com/cart/add-to-cart/patc-template*',  // added-to-cart animation (~166ms)
+    '*://www.amazon.com/cart/add-to-cart/get-cart-items*', // cart-fetch widget (~161ms)
   ];
   let blockedTotal = 0;
   const attachCdpBlocking = async (page: Page): Promise<void> => {
