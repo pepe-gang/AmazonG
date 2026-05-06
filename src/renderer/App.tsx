@@ -262,11 +262,20 @@ function MainShell({ status }: { status: RendererStatus }) {
         // itself. Reset to idle so the button returns to its normal state.
         setManualCheck('idle');
         setUpdateDismissed(false); // re-show the banner if user previously dismissed
+      } else if (r.error) {
+        // Surface the actual reason (auth missing, BG manifest empty,
+        // network error, etc.) instead of the previous silent "Up to
+        // date" message that masked failures.
+        toast.error(`Update check failed: ${r.error}`);
+        setManualCheck('failed');
+        setTimeout(() => setManualCheck('idle'), 3_000);
       } else {
         setManualCheck('up_to_date');
         setTimeout(() => setManualCheck('idle'), 3_000);
       }
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Update check threw: ${msg.slice(0, 200)}`);
       setManualCheck('failed');
       setTimeout(() => setManualCheck('idle'), 3_000);
     }

@@ -309,6 +309,11 @@ export type AutoGBridge = {
     latest: string | null;
     current: string;
     downloadUrl: string | null;
+    /** When the check couldn't complete (no apiKey, network error, BG
+     *  returned malformed manifest, etc.), this carries a human-readable
+     *  reason so the UI can surface "why" instead of a silent
+     *  "no update". Null when the check ran cleanly. */
+    error: string | null;
   }>;
   profilesList(): Promise<AmazonProfile[]>;
   profilesAdd(email: string, displayName?: string): Promise<AmazonProfile[]>;

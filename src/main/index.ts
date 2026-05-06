@@ -1024,20 +1024,45 @@ function registerIpcHandlers(): void {
       process.platform === 'darwin' ? 'darwin' :
       process.platform === 'win32' ? 'win32' :
       process.platform === 'linux' ? 'linux' : null;
-    if (!apiKey) return { updateAvailable: false, latest: null, current, downloadUrl: null };
+    if (!apiKey) {
+      const error = 'not connected to BG — paste a Secret Key in Settings';
+      logger.warn('version.check.skip.no_apikey', {});
+      return { updateAvailable: false, latest: null, current, downloadUrl: null, error };
+    }
     try {
       const settings = await loadSettings();
       const bg = createBGClient(settings.bgBaseUrl, apiKey);
       const info = await bg.checkVersion();
       if (!info.latestVersion) {
-        return { updateAvailable: false, latest: null, current, downloadUrl: null };
+        const error = `BG returned no version (manifest empty or malformed at ${settings.bgBaseUrl}/api/autog/version)`;
+        logger.warn('version.check.empty_manifest', { bgBaseUrl: settings.bgBaseUrl });
+        return { updateAvailable: false, latest: null, current, downloadUrl: null, error };
       }
       const updateAvailable = compareSemver(info.latestVersion, current) > 0;
       const urls = info.downloadUrls ?? {};
       const downloadUrl = (platformKey && urls[platformKey]) || urls.darwin || null;
-      return { updateAvailable, latest: info.latestVersion, current, downloadUrl };
-    } catch {
-      return { updateAvailable: false, latest: null, current, downloadUrl: null };
+      logger.info('version.check.ok', {
+        current,
+        latest: info.latestVersion,
+        updateAvailable,
+      });
+      return {
+        updateAvailable,
+        latest: info.latestVersion,
+        current,
+        downloadUrl,
+        error: null,
+      };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      logger.warn('version.check.error', { error });
+      return {
+        updateAvailable: false,
+        latest: null,
+        current,
+        downloadUrl: null,
+        error: `version check failed: ${error.slice(0, 200)}`,
+      };
     }
   });
 
