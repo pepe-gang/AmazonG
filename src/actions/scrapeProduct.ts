@@ -193,11 +193,16 @@ export async function fetchProductHtml(session: DriverSession, url: string): Pro
  */
 async function loadProductPage(page: Page, url: string): Promise<void> {
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // 'commit' returns at TCP commit (~50ms) instead of DOMContentLoaded
+    // (~500ms). Saves ~450ms per buy. The waitForFunction below is the
+    // real "ready" gate — it polls every 16ms for the buy-box selector,
+    // which only matches after the buy-box has hydrated. Removed the
+    // redundant `waitForLoadState('domcontentloaded')` that used to sit
+    // between goto and waitForFunction.
+    await page.goto(url, { waitUntil: 'commit', timeout: 30_000 });
   } catch (err) {
     throw new NavigationError(url, 'goto failed', err);
   }
-  await page.waitForLoadState('domcontentloaded').catch(() => undefined);
 
   // Amazon's buy-box widgets render client-side after domcontentloaded.
   // Wait for one of the known terminal states (buy button, OOS widget,

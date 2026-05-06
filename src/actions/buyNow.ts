@@ -212,7 +212,10 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
             quantity: placedQuantity,
           });
           try {
-            await page.goto(SPC_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+            // 'commit' = ~50ms vs ~300ms for DCL. Next op (page.url() check)
+            // works at commit; downstream waitForCheckout polls for the
+            // Place Order button.
+            await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
           } catch (err) {
             warn('step.buy.spc.shortcut.gotoErr', { error: String(err).slice(0, 120) });
           }
@@ -592,7 +595,9 @@ async function addToCartThenCheckout(
   await page.waitForLoadState('domcontentloaded', { timeout: 8_000 }).catch(() => undefined);
 
   try {
-    await page.goto(ATC_CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // 'commit' = ~50ms vs ~300ms for DCL. Next op is a Playwright
+    // locator click which polls for visibility internally.
+    await page.goto(ATC_CART_URL, { waitUntil: 'commit', timeout: 30_000 });
   } catch (err) {
     return { ok: false, reason: 'failed to load cart page', detail: String(err) };
   }

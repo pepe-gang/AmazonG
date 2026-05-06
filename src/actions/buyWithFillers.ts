@@ -612,7 +612,10 @@ export async function buyWithFillers(
   //    waitForSpcOrHandleByg. Worst case: same wall-clock as before.
   let usedShortcut = false;
   try {
-    await page.goto(SPC_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // 'commit' = ~50ms vs ~300ms for DCL. Next op (page.url() check)
+    // works at commit; downstream waitForCheckout polls for the Place
+    // Order button.
+    await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
   } catch (err) {
     return {
       ok: false,
@@ -641,7 +644,7 @@ export async function buyWithFillers(
       cid,
     );
     try {
-      await page.goto(CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.goto(CART_URL, { waitUntil: 'commit', timeout: 30_000 });
     } catch (err) {
       return {
         ok: false,
@@ -1343,7 +1346,7 @@ async function fetchOrderIdsForAsins(
   try {
     await page.goto(
       'https://www.amazon.com/gp/css/order-history?ref_=nav_AccountFlyout_orders',
-      { waitUntil: 'domcontentloaded', timeout: 30_000 },
+      { waitUntil: 'commit', timeout: 30_000 },
     );
   } catch {
     return [];
