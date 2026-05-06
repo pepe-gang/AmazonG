@@ -1056,12 +1056,25 @@ export async function buyWithFillers(
         // and/or replacing fillers. Replaces the existing 3-attempt
         // outer retry — caller (pollAndScrape) skips that loop when
         // this flag is on.
-        const isB1 =
-          'diag' in cb && cb.diag !== undefined && cb.diag.scopeMatches.length === 0;
-        if (opts.surgicalCashbackRecovery === true && isB1) {
+        // Two surgical-recoverable modes:
+        //  - B1: target's group has no "% back" radio at all → remove
+        //    bundle-mates (Phase A) and/or replace fillers (Phase B).
+        //  - B3: target's group HAS a "% back" radio but a non-cashback
+        //    radio is checked → click the cashback radio (Phase R).
+        // Anything else (including B2 — 6% in body but not in scope and
+        // legacy retry already gave up) falls through to the legacy
+        // cashback_gate fail path.
+        const hasDiag = 'diag' in cb && cb.diag !== undefined;
+        const isB1 = hasDiag && cb.diag!.scopeMatches.length === 0;
+        const isB3 =
+          hasDiag &&
+          cb.diag!.scopeMatches.length > 0 &&
+          !/% back/i.test(cb.diag!.selectedLabel ?? '');
+        const surgicalMode: SurgicalMode | null = isB1 ? 'b1' : (isB3 ? 'b3' : null);
+        if (opts.surgicalCashbackRecovery === true && surgicalMode !== null) {
           logger.info(
             'step.fillerBuy.surgical.start',
-            { targetAsin, observedPct: cb.pct, reason: cb.reason },
+            { targetAsin, observedPct: cb.pct, reason: cb.reason, mode: surgicalMode },
             cid,
           );
           const surgical = await runSurgicalCashbackRecovery(
@@ -1072,6 +1085,7 @@ export async function buyWithFillers(
             fillerAsins,
             opts.attemptedAsins ?? new Set<string>(),
             cb,
+            surgicalMode,
             cid,
           );
           if (surgical.ok) {
@@ -2086,8 +2100,10 @@ const MAX_SURGICAL_REMOVE_ITERS = 5;
 const SURGICAL_REPLACEMENT_COUNT = 3;
 
 type SurgicalRecoveryResult =
-  | { ok: true; pct: number; diag: CashbackDiag; method: 'remove' | 'replace'; finalState: SurgicalFinalState }
+  | { ok: true; pct: number; diag: CashbackDiag; method: 'remove' | 'replace' | 'radio'; finalState: SurgicalFinalState }
   | { ok: false; reason: string; finalState: SurgicalFinalState };
+
+type SurgicalMode = 'b1' | 'b3';
 
 type SurgicalFinalState = {
   removalIterations: number;
@@ -2104,6 +2120,7 @@ async function runSurgicalCashbackRecovery(
   initialFillerAsins: string[],
   attemptedAsins: Set<string>,
   initialFailHit: TargetCashbackResult,
+  mode: SurgicalMode,
   cid: string | undefined,
 ): Promise<SurgicalRecoveryResult> {
   const tStart = Date.now();
@@ -2130,7 +2147,142 @@ async function runSurgicalCashbackRecovery(
     initialBodyMatches: initialDiag?.bodyMatches ?? null,
     initialGroupFound: initialDiag?.groupFound ?? null,
     initialReason: initialFailHit.ok ? null : initialFailHit.reason,
+    mode,
+    initialSelectedLabel: initialDiag?.selectedLabel ?? null,
   });
+
+  // Phase R — focused radio click. Fires when the failure is B3
+  // (target's group HAS a "% back" radio but a non-cashback radio is
+  // checked). Skip Phase A removal and Phase B replacement entirely —
+  // the cashback exists, we just need to land the right radio. Done
+  // directly via page.evaluate so an Amazon-side default snap-back
+  // can't swallow the click.
+  if (mode === 'b3') {
+    const clickResult = await page
+      .evaluate((asin: string) => {
+        // Walk to the target's innermost Arriving+radio ancestor — same
+        // walk readTargetCashbackFromDom uses. Then pick the cashback-
+        // bearing radio in that scope and click it directly.
+        let anchor: Element | null = document.querySelector(`a[href*="${asin}"]`);
+        if (!anchor) {
+          const spans = document.querySelectorAll<HTMLElement>(
+            '[data-testid^="Item_asin_"]',
+          );
+          for (const s of spans) {
+            if ((s.textContent ?? '').trim() === asin) {
+              anchor = s;
+              break;
+            }
+          }
+        }
+        if (!anchor) return { ok: false, reason: 'anchor_not_found' };
+        let group: Element | null = null;
+        let el: Element | null = anchor.parentElement;
+        let depth = 0;
+        while (el && el !== document.body && depth < 20) {
+          const txt = ((el as HTMLElement).innerText ?? '').replace(/\s+/g, ' ');
+          if (txt.length > 200_000) break;
+          if (txt.length > 200) {
+            const hasArriving = /\bArriving\b/i.test(txt);
+            const hasRadio = el.querySelector('input[type="radio"]') !== null;
+            if (hasArriving && hasRadio) {
+              group = el;
+              break;
+            }
+          }
+          el = el.parentElement;
+          depth++;
+        }
+        const scope = group ?? anchor.parentElement ?? anchor;
+        const radios = Array.from(
+          scope.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+        );
+        type Hit = { radio: HTMLInputElement; pct: number; label: string };
+        const hits: Hit[] = [];
+        for (const r of radios) {
+          const card =
+            r.closest('label, .a-radio, [role="radio"]') ??
+            (r.parentElement as Element | null);
+          const label = card
+            ? ((card as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').trim()
+            : '';
+          const m = label.match(/(\d{1,2})\s*%\s*back/i);
+          if (m) hits.push({ radio: r, pct: Number(m[1]), label: label.slice(0, 120) });
+        }
+        if (hits.length === 0) return { ok: false, reason: 'no_cashback_radio_in_scope' };
+        const best = hits.reduce((a, b) => (b.pct > a.pct ? b : a));
+        if (best.radio.checked) {
+          return { ok: true, alreadyChecked: true, label: best.label, pct: best.pct };
+        }
+        best.radio.click();
+        return { ok: true, alreadyChecked: false, label: best.label, pct: best.pct };
+      }, targetAsin)
+      .catch((err) => ({ ok: false as const, reason: `evaluate_failed: ${String(err).slice(0, 80)}` }));
+
+    // Wait for Amazon's eligibleshipoption XHR to settle so we don't
+    // reverify against a stale page.
+    await page
+      .waitForResponse(/eligibleshipoption/i, { timeout: 8_000 })
+      .catch(() => undefined);
+    await waitForDeliverySettle(page);
+
+    const cb = await verifyTargetCashback(
+      page,
+      targetAsin,
+      info.title,
+      opts.minCashbackPct,
+    );
+    const cbDiag = !cb.ok && cb.diag !== undefined ? cb.diag : (cb.ok ? cb.diag : null);
+    void appendResearchEvent('cashback-experiments', {
+      schemaVersion: 1,
+      kind: 'experiment.surgical.radio',
+      targetAsin,
+      clickResult,
+      pctAfter: cb.ok ? cb.pct : (cb.pct ?? null),
+      scopeMatchesAfter: cbDiag?.scopeMatches ?? null,
+      selectedLabelAfter: cbDiag?.selectedLabel ?? null,
+      outcome: cb.ok ? 'success' : 'still_failed',
+    });
+    if (cb.ok) {
+      logger.info(
+        'step.fillerBuy.surgical.phaseR.ok',
+        { targetAsin, pctAchieved: cb.pct, clickResult },
+        cid,
+      );
+      return {
+        ok: true,
+        pct: cb.pct,
+        diag: cb.diag,
+        method: 'radio',
+        finalState: {
+          removalIterations: 0,
+          removedAsinsAcrossIters: [],
+          replacementAsinsAdded: [],
+          totalElapsedMs: Date.now() - tStart,
+        },
+      };
+    }
+    logger.warn(
+      'step.fillerBuy.surgical.phaseR.failed',
+      {
+        targetAsin,
+        clickResult,
+        scopeMatchesAfter: cbDiag?.scopeMatches ?? null,
+        selectedLabelAfter: cbDiag?.selectedLabel ?? null,
+      },
+      cid,
+    );
+    return {
+      ok: false,
+      reason: `surgical: phase R failed — radio click did not land cashback (selected="${cbDiag?.selectedLabel ?? 'n/a'}")`,
+      finalState: {
+        removalIterations: 0,
+        removedAsinsAcrossIters: [],
+        replacementAsinsAdded: [],
+        totalElapsedMs: Date.now() - tStart,
+      },
+    };
+  }
 
   // Phase A — linear remove.
   for (iter = 1; iter <= MAX_SURGICAL_REMOVE_ITERS; iter++) {
@@ -2195,11 +2347,17 @@ async function runSurgicalCashbackRecovery(
       }, targetAsin)
       .catch(() => [] as string[]);
 
-    const toRemove = groupAsins.filter(
-      (a) => a.toUpperCase() !== targetAsin.toUpperCase(),
+    // Linear remove: pick ONE bundle-mate per iteration, reverify, then
+    // decide whether to keep removing. Skip ASINs we've already removed
+    // in earlier iterations so a stale groupAsins read doesn't loop.
+    const candidates = groupAsins.filter(
+      (a) =>
+        a.toUpperCase() !== targetAsin.toUpperCase() &&
+        !removedAcrossIters.includes(a.toUpperCase()),
     );
-    if (toRemove.length === 0) {
-      // Target is alone in its group — Phase A can't help. Move to Phase B.
+    if (candidates.length === 0) {
+      // Target is alone in its group (or every bundle-mate already
+      // removed) — Phase A can't help. Move to Phase B.
       logger.info(
         'step.fillerBuy.surgical.phaseA.noBundleMates',
         { iter, targetAsin },
@@ -2217,7 +2375,8 @@ async function runSurgicalCashbackRecovery(
       break;
     }
 
-    const removeRes = await removeCartItemsByAsin(page, toRemove);
+    const oneAsin = candidates[0]!;
+    const removeRes = await removeCartItemsByAsin(page, [oneAsin]);
     if (!removeRes.ok) {
       logger.warn(
         'step.fillerBuy.surgical.phaseA.removeFail',
@@ -2238,9 +2397,18 @@ async function runSurgicalCashbackRecovery(
     // Mark removed ASINs as attempted so Phase B doesn't pick them again.
     for (const a of removeRes.removedAsins) attemptedAsins.add(a);
 
-    // Recreate /spc — purchaseId rotates with cart contents.
+    // Recreate /spc — purchaseId rotates with cart contents. Use
+    // domcontentloaded (not 'commit') so the URL check below isn't
+    // racing Amazon's redirect chain. /spc-entry can bounce
+    // through one or two interstitials before settling.
     try {
-      await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
+      await page.goto(SPC_ENTRY_URL, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30_000,
+      });
+      await page
+        .waitForURL(SPC_URL_MATCH, { timeout: 10_000 })
+        .catch(() => undefined);
     } catch (err) {
       logger.warn(
         'step.fillerBuy.surgical.phaseA.spcGotoFail',
@@ -2355,8 +2523,17 @@ async function runSurgicalCashbackRecovery(
   }
   for (const a of replacementResult.asins) attemptedAsins.add(a);
 
+  // Same race as Phase A's /spc recreate — use domcontentloaded + a
+  // bounded waitForURL so the URL check below isn't racing the
+  // /spc-entry redirect chain.
   try {
-    await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
+    await page.goto(SPC_ENTRY_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+    await page
+      .waitForURL(SPC_URL_MATCH, { timeout: 10_000 })
+      .catch(() => undefined);
   } catch {
     return {
       ok: false,
