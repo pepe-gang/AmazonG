@@ -498,7 +498,7 @@ export class StreamingScheduler {
     // of a write lock (read = write). Mirrors today's drain-before-
     // buy behavior. Switching verify/tracking to acquireRead is
     // gated on proposal §14 open question #1.
-    let release: () => void;
+    let release: (() => void) | null = null;
     try {
       release = await this.lock.acquireWrite(tuple.account);
     } catch (err) {
@@ -584,7 +584,7 @@ export class StreamingScheduler {
         ),
       );
     } finally {
-      release!();
+      release?.();
     }
   }
 
@@ -649,36 +649,32 @@ export class StreamingScheduler {
     // Bundle complete. For buy phase, fire the aggregate BG report
     // (matches today's end-of-pMap reportStatus call). For verify/
     // tracking phases, the per-tuple runner already reported internally.
+    // reportBuyBundle handles its own error logging — fire-and-forget.
     if (tuple.phase === 'buy') {
-      void this.reportBuyBundle(bundle, tuple.job).catch((err) => {
-        logger.warn(
-          'scheduler.report.error',
-          { jobId: bundle.jobId, error: err instanceof Error ? err.message : String(err) },
-          this.sd.parentCid,
-        );
-      });
+      void this.reportBuyBundle(bundle, tuple.job);
     }
     this.bundles.delete(tuple.jobId);
   }
 
+  /** Fires the aggregate BG report at end of bundle. Always completes
+   *  (never throws / never rejects) — caller fires-and-forgets via
+   *  `void`, so any unhandled rejection here would become a warning
+   *  in the renderer console + a Sentry-equivalent event. Catches
+   *  both the buildBuyJobReport synchronous path and the bg call. */
   private async reportBuyBundle(
     bundle: JobBundle,
     job: AutoGJob,
   ): Promise<void> {
-    // Single source of truth for the report shape — same helper the
-    // legacy pMap path uses post-fan-out. Handles:
-    //   - awaiting_verification status for live successes (so BG
-    //     schedules verify-phase jobs)
-    //   - dry-run → 'failed' status mapping (so BG doesn't schedule
-    //     verify on dry-runs)
-    //   - winner pick + parent-level placed* fields
-    //   - per-purchase viaFiller flag from bundle.fillerByEmail
-    //   - stage / fillerOrderIds / amazonPurchaseId per-purchase audit
-    const report = buildBuyJobReport({
-      results: bundle.results,
-      fillerByEmail: bundle.fillerByEmail,
-    });
-    await this.sd.deps.bg.reportStatus(job.id, report).catch((err) => {
+    try {
+      // Single source of truth for the report shape — same helper the
+      // legacy pMap path uses post-fan-out. Handles status rollup,
+      // dry-run mapping, winner pick, viaFiller, stage, fillerOrderIds.
+      const report = buildBuyJobReport({
+        results: bundle.results,
+        fillerByEmail: bundle.fillerByEmail,
+      });
+      await this.sd.deps.bg.reportStatus(job.id, report);
+    } catch (err) {
       logger.error(
         'scheduler.report.error',
         {
@@ -687,7 +683,7 @@ export class StreamingScheduler {
         },
         this.sd.parentCid,
       );
-    });
+    }
   }
 
   private failedResult(tuple: Tuple, error: string): ProfileResult {

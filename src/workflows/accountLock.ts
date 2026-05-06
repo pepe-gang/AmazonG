@@ -72,12 +72,14 @@ export class AccountLock {
   }
 
   /**
-   * Shared lock — held by `verify` / `fetch_tracking` tuples (Phase 2
-   * aggressive policy). Waits only for an in-flight writer; concurrent
-   * readers on the same key are allowed.
+   * Shared lock — Phase 2 aggressive policy. Waits only for an in-flight
+   * writer; concurrent readers on the same key are allowed.
    *
-   * Phase 1 should NOT use this directly — use `acquireRead_conservative`
-   * which serializes against writers.
+   * **Currently unused by production code.** The Phase 1 scheduler
+   * always calls `acquireWrite` (and `acquireRead_conservative` is a
+   * thin alias to `acquireWrite`). Kept here so Phase 2 can flip the
+   * policy with a single call-site swap once the empirical test in
+   * proposal §14 open question #1 confirms it's safe.
    */
   async acquireRead(k: AccountKey): Promise<ReleaseFn> {
     while (this.writers.has(k)) {

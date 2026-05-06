@@ -2027,20 +2027,16 @@ async function searchFillerCandidatesViaHttp(
   }
   const doc = new JSDOM(html).window.document;
   const all = extractSearchResultCandidates(doc);
+  // URL-level filter `p_6:ATVPDKIKX0DER` biases the results bin toward
+  // Amazon-fulfilled offers; we don't gate on buy-box winner === Amazon
+  // here because the per-card merchantId hard gate (commit 2f13ee2)
+  // empirically dropped ~73% of candidates per term, often leaving the
+  // accumulator below FILLER_COUNT and forcing rebuys to checkout with
+  // tiny / empty carts. FBA / Seller Fulfilled Prime items still
+  // cancel cleanly via Amazon's pre-ship cancel sweep in the vast
+  // majority of cases.
   return all.filter((c) => {
     if (!c.isPrime) return false;
-    // Sold-by-Amazon hard gate (commit 2f13ee2, 2026-05-05) was
-    // dropping ~73% of Prime candidates per term. With 8 fillers
-    // needed and many terms returning 0 post-filter, the for-loop
-    // ran out of terms before accumulating enough — committed
-    // counts of 2-4 became common, hitting MIN_FILLERS_FOR_COVER.
-    // Reverted 2026-05-06: keep the URL pre-filter
-    // (`p_6:ATVPDKIKX0DER`) which biases toward Amazon-fulfilled
-    // listings, but no longer require buy-box winner == Amazon US.
-    // FBA / Seller Fulfilled Prime items still cancel cleanly via
-    // Amazon's pre-ship cancel sweep in 99% of cases; the rare
-    // 3p-stall is preferable to repeated rebuy failures with empty
-    // carts.
     if (c.price === null) return false;
     if (c.price < FILLER_MIN_PRICE) return false;
     if (c.price > FILLER_MAX_PRICE) return false;
