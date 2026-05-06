@@ -14,7 +14,7 @@ import { effectivePriceTolerance } from '../parsers/productConstraints.js';
 import type { BuyResult } from '../shared/types.js';
 import { evaluateCashbackGate } from '../shared/cashbackGate.js';
 import { clearCart, type ClearCartResult } from './clearCart.js';
-import { addFillerViaHttp } from './buyWithFillers.js';
+import { addFillerViaHttp, waitForDeliverySettle } from './buyWithFillers.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import { SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHttp.js';
 
@@ -321,10 +321,10 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     const delivery = await pickBestCashbackDelivery(page, opts.minCashbackPct);
     if (delivery.changes.length > 0) {
       step('step.checkout.delivery.picked', { changes: delivery.changes });
-      // Let the page settle after the radio click — Amazon re-renders the
-      // total + cashback banner and sometimes re-evaluates "place order"
-      // button state after delivery updates.
-      await page.waitForTimeout(1_500);
+      // Wait for the eligibleshipoption XHR + 200ms post-settle (covers
+      // the 6%→5% strip race). Replaces a blind 1500ms wait — typical
+      // XHR ~1s, saving ~300ms.
+      await waitForDeliverySettle(page);
     } else {
       step('step.checkout.delivery.nochange', {
         note: 'default delivery already optimal (or no options found)',

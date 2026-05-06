@@ -824,9 +824,10 @@ export async function buyWithFillers(
       { changes: delivery.changes },
       cid,
     );
-    // Let the page settle — Amazon re-renders totals + cashback banner
-    // after a delivery radio click.
-    await page.waitForTimeout(1_500);
+    // Wait for the eligibleshipoption XHR to complete + 200ms post-
+    // settle. Replaces a blind 1500ms wait — typical XHR returns in
+    // ~1s, saving ~300ms; cap at 2.5s for slow networks.
+    await waitForDeliverySettle(page);
   } else {
     logger.info(
       'step.fillerBuy.spc.delivery.nochange',
@@ -968,7 +969,7 @@ export async function buyWithFillers(
           { changes: redelivery.changes },
           cid,
         );
-        await page.waitForTimeout(1_500);
+        await waitForDeliverySettle(page);
       }
 
       // Re-verify target cashback on the newly-rendered /spc. We ignore
@@ -1907,6 +1908,34 @@ async function verifyTargetLineItemPrice(
     };
   }
   return { ok: true, priceText: hit.text, price: n };
+}
+
+/**
+ * After clicking a delivery-option radio on /spc, wait for Amazon's
+ * `eligibleshipoption` XHR to complete + a 200ms post-settle before
+ * reading the updated cashback. The XHR refreshes totals + cashback
+ * banner; the 200ms post-settle covers the rare "6%→5% strip" case
+ * where Amazon briefly shows 6% then re-renders to 5% milliseconds
+ * later (INC-2026-05-05 — the iPad-no-Amazon-day fixture).
+ *
+ * Cap at 2.5s. Typical XHRs return in 800-1200ms; the cap prevents a
+ * stuck network from blocking the caller indefinitely. On timeout we
+ * still post-settle and return — downstream cashback gate reads
+ * whatever rendered, same fallback as the blind 1500ms wait this
+ * helper replaced.
+ *
+ * URL pattern verified stable across saved /spc fixtures (per
+ * docs/research/amazon-pipeline.md). Pipeline param distinguishes
+ * Chewbacca SPC from legacy SPC; both write to the same path.
+ */
+export async function waitForDeliverySettle(page: Page): Promise<void> {
+  await page
+    .waitForResponse(
+      (resp) => /eligibleshipoption/i.test(resp.url()) && resp.ok(),
+      { timeout: 2_500 },
+    )
+    .catch(() => undefined);
+  await page.waitForTimeout(200);
 }
 
 function shuffle<T>(arr: readonly T[]): T[] {
