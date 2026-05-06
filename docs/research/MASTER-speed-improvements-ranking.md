@@ -122,6 +122,12 @@ Native `fetch` (Node 18+) does NOT propagate response `Set-Cookie` back to Playw
 **Per buy total: ~2.6–4.7s (most apply on every buy).**
 **Filler-mode adds A1's bigger filler delta (+300ms) and A7 (200ms expected).**
 
+### 🟢 Tier 1 deferred — saved as research note for future session
+
+| # | Candidate | File:line | Saving | Risk | Notes |
+|---|---|---|---|---|---|
+| **W** | **Rewrite `waitForCheckout` from polling to event-driven via `page.waitForFunction`** | `buyNow.ts:639` (50-100 line refactor) | 500–1500ms / buy on happy path; up to 3s on address-picker flow | Med | Today: polls every 500ms (dead time between state changes and detection). RAF-paced `waitForFunction` resolves at ~16ms granularity. Also replaces 3000ms blind wait at `buyNow.ts:1035` with `waitForResponse` predicate on the address-submit XHR. Full proposal: `docs/research/proposal-waitForCheckout-event-driven.md`. Empirical prerequisites listed in proposal — ~30 min of MCP capture before implementation. |
+
 ### 🟡 Tier 2 — Higher reward but more risk / bigger refactor — UPDATED
 
 | # | Candidate | File:line | Saving | Risk | Notes |
