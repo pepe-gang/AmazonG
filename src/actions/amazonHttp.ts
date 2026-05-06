@@ -233,6 +233,90 @@ export function buildBatchCartAddBody(
 }
 
 /**
+ * Streaming PDP fetch — bails early once the `<form id="addToCart">`
+ * is fully captured. Saves ~990ms per fetch on a real ~2MB PDP body
+ * because the form lives in the first ~25% of the body and the trailing
+ * 1.5MB (recommendations / Rufus / footer / lazy-load) carries nothing
+ * AmazonG reads (verified pass-5 empirical, 2026-05-05).
+ *
+ * Bypasses Playwright's APIRequestContext (no streaming API exposed)
+ * and uses Node 18+ native `fetch`. Cookies are copied from the
+ * BrowserContext at fetch time; User-Agent matches driver.ts so the
+ * request looks identical to ctx.request paths on the wire.
+ *
+ * Returns null on any error (network failure, non-2xx, body-read
+ * exception, or no `</form>` found within the safety cap). Caller
+ * falls back to ctx.request.get for those cases.
+ *
+ * Use only on PDP `/dp/<asin>` URLs where the parser will run
+ * extractCartAddTokens on the result. Don't use for /spc — pass-5
+ * showed the server batches the body so streaming saves nothing
+ * there. Don't use for /your-account/order-details either — those
+ * are smaller bodies where the cancel-mid-flight overhead exceeds
+ * the saving.
+ */
+const PDP_STREAM_SAFETY_CAP_BYTES = 600 * 1024;
+const PDP_STREAM_TIMEOUT_MS = 15_000;
+// Match the UA pinned in driver.ts so the wire shape is identical
+// to ctx.request.get paths. Update both places in lockstep.
+const PDP_STREAM_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+export async function pdpHttpFetchStreaming(
+  ctx: import('playwright').BrowserContext,
+  pdpUrl: string,
+): Promise<string | null> {
+  const cookies = await ctx.cookies(pdpUrl).catch(() => []);
+  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+
+  let response: Response;
+  try {
+    response = await fetch(pdpUrl, {
+      headers: {
+        ...HTTP_BROWSERY_HEADERS,
+        'User-Agent': PDP_STREAM_USER_AGENT,
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+      },
+      signal: AbortSignal.timeout(PDP_STREAM_TIMEOUT_MS),
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok || !response.body) return null;
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  let html = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      html += decoder.decode(value, { stream: true });
+
+      // Bail once <form id="addToCart"> is fully captured (open + close).
+      // extractCartAddTokens reads only fields inside that form — once
+      // we've seen its </form>, every token the parser needs is in our
+      // buffer. The buy-box typically renders by byte ~506K of a 2MB
+      // body (pass-5 measurement), so this cancel fires well before the
+      // safety cap.
+      const formStart = html.indexOf('id="addToCart"');
+      if (formStart >= 0 && html.indexOf('</form>', formStart) >= 0) {
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+      if (html.length >= PDP_STREAM_SAFETY_CAP_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return html + decoder.decode();
+}
+
+/**
  * Phantom-commit guard for batch responses. The single-item add already
  * checks `data-asin="<ASIN>"` in the response HTML; the batch version
  * runs the same check per-ASIN and returns the subset that landed.
