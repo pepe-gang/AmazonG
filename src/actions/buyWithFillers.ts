@@ -32,7 +32,6 @@ import { parsePrice } from '../parsers/amazonProduct.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import type { ProductInfo } from '../shared/types.js';
 import {
-  AMAZON_US_MERCHANT_ID,
   CART_ADD_CLIENT_NAME,
   CART_ADD_URL,
   HTTP_BROWSERY_HEADERS,
@@ -2054,9 +2053,7 @@ function buildFillerSearchUrl(term: string): string {
 async function searchFillerCandidatesViaHttp(
   page: Page,
   term: string,
-  opts: { strict?: boolean } = {},
 ): Promise<SearchResultCandidate[]> {
-  const strict = opts.strict !== false; // default: strict
   const url = buildFillerSearchUrl(term);
   let res;
   try {
@@ -2078,15 +2075,21 @@ async function searchFillerCandidatesViaHttp(
   const all = extractSearchResultCandidates(doc);
   return all.filter((c) => {
     if (!c.isPrime) return false;
+    // Sold-by-Amazon hard gate (commit 2f13ee2, 2026-05-05) was
+    // dropping ~73% of Prime candidates per term. With 8 fillers
+    // needed and many terms returning 0 post-filter, the for-loop
+    // ran out of terms before accumulating enough — committed
+    // counts of 2-4 became common, hitting MIN_FILLERS_FOR_COVER.
+    // Reverted 2026-05-06: keep the URL pre-filter
+    // (`p_6:ATVPDKIKX0DER`) which biases toward Amazon-fulfilled
+    // listings, but no longer require buy-box winner == Amazon US.
+    // FBA / Seller Fulfilled Prime items still cancel cleanly via
+    // Amazon's pre-ship cancel sweep in 99% of cases; the rare
+    // 3p-stall is preferable to repeated rebuy failures with empty
+    // carts.
     if (c.price === null) return false;
     if (c.price < FILLER_MIN_PRICE) return false;
     if (c.price > FILLER_MAX_PRICE) return false;
-    // Strict mode: require buy-box winner === Amazon US. This is the
-    // tight "Sold by Amazon and Ships from Amazon" guarantee that
-    // keeps post-buy cancellation deterministic. Empirically drops
-    // ~73% of candidates per term (commit 2f13ee2 telemetry), so the
-    // caller in addFillerItems falls back to permissive on a deficit.
-    if (strict && c.merchantId !== AMAZON_US_MERCHANT_ID) return false;
     return true;
   });
 }
@@ -2338,158 +2341,102 @@ async function addFillerItems(
   const seen = fillerOpts.attemptedAsins ?? new Set<string>();
   if (targetAsin) seen.add(targetAsin);
 
-  // Walk search terms collecting up-to-`needed` fresh candidates.
-  // Side-effect: every accepted candidate is added to `seen` so the
-  // permissive fallback won't re-pick it.
-  const collectCandidates = async (
-    needed: number,
-    strict: boolean,
-  ): Promise<{ candidates: SearchResultCandidate[]; csrf: string | null }> => {
-    const out: SearchResultCandidate[] = [];
-    let csrf: string | null = null;
-    for (const term of terms) {
-      if (out.length >= needed) break;
-      const found = await searchFillerCandidatesViaHttp(mainPage, term, { strict });
-      if (found.length === 0) {
-        logger.info(
-          'step.fillerBuy.fillers.searchEmpty',
-          { term, strict },
-          cid,
-        );
-        continue;
-      }
-      let added = 0;
-      for (const c of found) {
-        if (out.length >= needed) break;
-        if (seen.has(c.asin)) continue;
-        seen.add(c.asin);
-        out.push(c);
-        added++;
-        if (csrf === null) csrf = c.csrf;
-      }
-      logger.info(
-        'step.fillerBuy.fillers.searchHit',
-        { term, strict, fresh: added, totalCandidates: out.length, of: needed },
-        cid,
-      );
+  // 1. Walk through search terms until we have enough fresh candidates.
+  //    Most of the time one term is enough (~50 results per page; even
+  //    after dedup we usually have 30+ fresh candidates).
+  const candidates: SearchResultCandidate[] = [];
+  let csrf: string | null = null;
+  for (const term of terms) {
+    if (candidates.length >= targetCount) break;
+    const found = await searchFillerCandidatesViaHttp(mainPage, term);
+    if (found.length === 0) {
+      logger.info('step.fillerBuy.fillers.searchEmpty', { term }, cid);
+      continue;
     }
-    return { candidates: out, csrf };
-  };
-
-  // Submit a batch cart-add for the given candidates. Returns committed
-  // ASINs (per the phantom-commit guard) or [] on any HTTP/shape error.
-  const submitBatch = async (
-    cands: SearchResultCandidate[],
-    csrf: string,
-    label: 'strict' | 'permissive',
-  ): Promise<string[]> => {
-    if (cands.length === 0) return [];
-    const items = cands.map((c) => ({
-      asin: c.asin,
-      offerListingId: c.offerListingId,
-    }));
-    const body = buildBatchCartAddBody(csrf, items, {
-      clientName: SEARCH_CART_ADD_CLIENT_NAME,
-    });
-    const t0 = Date.now();
-    let res;
-    try {
-      res = await mainPage.context().request.post(CART_ADD_URL, {
-        headers: {
-          ...HTTP_BROWSERY_HEADERS,
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Origin: 'https://www.amazon.com',
-          Referer: 'https://www.amazon.com/',
-        },
-        data: body.toString(),
-        timeout: 20_000,
-      });
-    } catch (err) {
-      logger.warn(
-        'step.fillerBuy.fillers.batch.threw',
-        { label, error: String(err).slice(0, 120), candidates: items.length },
-        cid,
-      );
-      return [];
+    let added = 0;
+    for (const c of found) {
+      if (candidates.length >= targetCount) break;
+      if (seen.has(c.asin)) continue;
+      seen.add(c.asin);
+      candidates.push(c);
+      added++;
+      if (csrf === null) csrf = c.csrf;
     }
-    const tookMs = Date.now() - t0;
-    if (!res.ok()) {
-      logger.warn(
-        'step.fillerBuy.fillers.batch.httpError',
-        { label, status: res.status(), candidates: items.length, tookMs },
-        cid,
-      );
-      return [];
-    }
-    const respText = await res.text().catch(() => '');
-    if (!looksLikeCartResponse(respText)) {
-      logger.warn(
-        'step.fillerBuy.fillers.batch.shapeMismatch',
-        { label, status: res.status(), candidates: items.length, tookMs },
-        cid,
-      );
-      return [];
-    }
-    const committed = asinsCommittedInResponse(
-      respText,
-      items.map((i) => i.asin),
-    );
     logger.info(
-      'step.fillerBuy.fillers.batch.ok',
-      {
-        label,
-        requested: items.length,
-        committed: committed.length,
-        tookMs,
-        status: res.status(),
-      },
+      'step.fillerBuy.fillers.searchHit',
+      { term, fresh: added, totalCandidates: candidates.length, of: targetCount },
       cid,
     );
-    return committed;
-  };
-
-  // Pass 1: STRICT — Sold-by-Amazon only. Preferred because cancellation
-  // flow is deterministic for Amazon-direct orders.
-  const strictPass = await collectCandidates(targetCount, true);
-  let committed: string[] = [];
-  if (strictPass.csrf && strictPass.candidates.length > 0) {
-    committed = await submitBatch(strictPass.candidates, strictPass.csrf, 'strict');
   }
 
-  // Pass 2: PERMISSIVE — fall back to any-Prime when strict didn't
-  // hit the floor. FBA / Seller Fulfilled Prime items will land in
-  // the cart; pre-ship cancel sweep covers them in the vast majority
-  // of cases. A small number may stall on merchant approval; that
-  // trade-off is acceptable vs leaving the rebuy with a naked cart.
-  if (committed.length < MIN_FILLERS_FOR_COVER) {
-    const deficit = targetCount - committed.length;
-    logger.info(
-      'step.fillerBuy.fillers.permissive.start',
-      {
-        strictCommitted: committed.length,
-        deficit,
-        floor: MIN_FILLERS_FOR_COVER,
-      },
-      cid,
-    );
-    const permissivePass = await collectCandidates(deficit, false);
-    if (permissivePass.csrf && permissivePass.candidates.length > 0) {
-      const extra = await submitBatch(
-        permissivePass.candidates,
-        permissivePass.csrf,
-        'permissive',
-      );
-      committed = committed.concat(extra);
-    }
-  }
-
-  if (committed.length === 0) {
+  if (candidates.length === 0 || csrf === null) {
     logger.warn(
       'step.fillerBuy.fillers.noCandidates',
       { termsTried: terms.length, targetCount },
       cid,
     );
+    return { added: 0, asins: [] };
   }
+
+  // 2. Single batch POST. Phantom-commit guard runs against the
+  //    response body — we count every ASIN that appears as
+  //    `data-asin="..."` in the cart-page HTML Amazon returns.
+  const items = candidates.map((c) => ({ asin: c.asin, offerListingId: c.offerListingId }));
+  const body = buildBatchCartAddBody(csrf, items, { clientName: SEARCH_CART_ADD_CLIENT_NAME });
+
+  const t0 = Date.now();
+  let res;
+  try {
+    res = await mainPage.context().request.post(CART_ADD_URL, {
+      headers: {
+        ...HTTP_BROWSERY_HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Origin: 'https://www.amazon.com',
+        Referer: 'https://www.amazon.com/',
+      },
+      data: body.toString(),
+      timeout: 20_000,
+    });
+  } catch (err) {
+    logger.warn(
+      'step.fillerBuy.fillers.batch.threw',
+      { error: String(err).slice(0, 120), candidates: items.length },
+      cid,
+    );
+    return { added: 0, asins: [] };
+  }
+  const tookMs = Date.now() - t0;
+  if (!res.ok()) {
+    logger.warn(
+      'step.fillerBuy.fillers.batch.httpError',
+      { status: res.status(), candidates: items.length, tookMs },
+      cid,
+    );
+    return { added: 0, asins: [] };
+  }
+  const respText = await res.text().catch(() => '');
+  if (!looksLikeCartResponse(respText)) {
+    logger.warn(
+      'step.fillerBuy.fillers.batch.shapeMismatch',
+      { status: res.status(), candidates: items.length, tookMs },
+      cid,
+    );
+    return { added: 0, asins: [] };
+  }
+  const committed = asinsCommittedInResponse(
+    respText,
+    items.map((i) => i.asin),
+  );
+  logger.info(
+    'step.fillerBuy.fillers.batch.ok',
+    {
+      requested: items.length,
+      committed: committed.length,
+      tookMs,
+      status: res.status(),
+    },
+    cid,
+  );
   return { added: committed.length, asins: committed };
 }
 
