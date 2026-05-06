@@ -28,7 +28,6 @@ import {
   BYG_BUTTON_SELECTOR,
   BYG_HEADER_SELECTOR,
   parseOrderConfirmation,
-  readTargetCashbackFromDom,
   buildTitlePrefix,
   type CashbackDiag,
 } from '../parsers/amazonCheckout.js';
@@ -1751,29 +1750,165 @@ async function verifyTargetCashback(
     )
     .catch(() => undefined);
 
-  // The DOM reader is a pure function in parsers/amazonCheckout.ts —
-  // one source of truth shared with fixture tests. Two steps are done
-  // in-browser before handing off to the parser:
-  //   1) Sync `.checked` property → `[checked]` attribute. `page.content()`
-  //      serializes ATTRIBUTES, not live form-control properties; without
-  //      this step a radio clicked by `pickBestCashbackDelivery` would not
-  //      show as :checked in the JSDOM copy.
-  //   2) `page.content()` returns the current serialized HTML.
-  // Then JSDOM reconstructs the document and the pure parser reads it.
-  await page
-    .evaluate(() => {
-      document
-        .querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]')
-        .forEach((el) => {
-          if (el.checked) el.setAttribute('checked', '');
-          else el.removeAttribute('checked');
-        });
-    })
-    .catch(() => undefined);
-  const html = await page.content().catch(() => '');
-  const hit = html
-    ? readTargetCashbackFromDom(new JSDOM(html).window.document, targetAsin, targetTitle)
-    : ({ found: false as const, diag: { totalLinks: 0, asinInBody: false, titleSearched: null, titleInBody: false, url: page.url() } });
+  // Run the target-cashback walk inline in the browser instead of pulling
+  // /spc HTML over CDP and re-parsing via JSDOM. The CDP serialize round-
+  // trip is the dominant cost (~80-150ms on a 318KB /spc); the pure
+  // parser at parsers/amazonCheckout.ts:369 (`readTargetCashbackFromDom`)
+  // stays exported so its fixture tests keep passing — this evaluate
+  // mirrors the same logic 1:1 with two browser-only optimizations:
+  //   1) Live `r.checked` property reads, no syncCheckedAttribute step
+  //      needed (the property is the source of truth in a real browser;
+  //      JSDOM-only callers still need the sync). Saves ~30ms.
+  //   2) Browser-native `el.innerText` instead of the visibleText
+  //      tree-walker helper (same whitespace-normalized output, faster).
+  // Update both this evaluate AND the pure parser if the detection rules
+  // ever change.
+  const titlePrefix = buildTitlePrefix(targetTitle);
+  const hit = await page
+    .evaluate(
+      ({ asin, titlePrefix: prefix }) => {
+        const SKIP_NAME_RE =
+          /destinationSubmissionUrl|paymentMethodForUrl|paymentMethod|ship-to-this|addressRadio/i;
+        const visibleText = (el: Element): string =>
+          ((el as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').trim();
+
+        // Step 1: locate by ASIN href.
+        let anchor: Element | null = document.querySelector(`a[href*="${asin}"]`);
+
+        // Step 1.5: hidden testid pin. Chewbacca /spc renders
+        // <span data-testid="Item_asin_N_N_N" class="aok-hidden">ASIN</span>
+        // inside each line-item. Most reliable anchor when /dp/<asin>
+        // hrefs are stripped by the checkout shell.
+        if (!anchor) {
+          const spans = document.querySelectorAll<HTMLElement>(
+            '[data-testid^="Item_asin_"]',
+          );
+          for (const s of spans) {
+            if ((s.textContent ?? '').trim() === asin) {
+              anchor = s;
+              break;
+            }
+          }
+        }
+
+        // Step 1b: title-prefix fallback (bidirectional shared prefix).
+        if (!anchor && prefix && prefix.length > 5) {
+          const needle = prefix.toLowerCase();
+          const walker = document.createTreeWalker(document.body, 4 /* SHOW_TEXT */, null);
+          let n: Node | null;
+          while ((n = walker.nextNode()) !== null) {
+            const txt = ((n as Text).textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+            if (txt.length < 6) continue;
+            const k = Math.min(needle.length, txt.length);
+            if (k >= 6 && txt.slice(0, k) === needle.slice(0, k)) {
+              anchor = (n as Text).parentElement;
+              break;
+            }
+          }
+        }
+
+        if (!anchor) {
+          const bodyText = visibleText(document.body);
+          return {
+            found: false as const,
+            diag: {
+              totalLinks: document.querySelectorAll('a').length,
+              asinInBody: bodyText.includes(asin),
+              titleSearched: prefix ?? null,
+              titleInBody: prefix ? bodyText.toLowerCase().includes(prefix.toLowerCase()) : false,
+              url: location.href,
+            },
+          };
+        }
+
+        // Step 2: walk up to the INNERMOST shipping group containing the
+        // target. A shipping group is the smallest ancestor containing
+        // BOTH "Arriving …" text AND at least one delivery radio. STOP
+        // there — never expand outward looking for "% back", which
+        // would swallow sibling shipping groups whose radios belong to
+        // OTHER items (INC-2026-05-05).
+        const MAX_SCOPE_CHARS = 200_000;
+        let group: Element | null = null;
+        let el: Element | null = anchor.parentElement;
+        let depth = 0;
+        while (el && el !== document.body && depth < 20) {
+          const text = visibleText(el);
+          if (text.length > MAX_SCOPE_CHARS) break;
+          if (text.length > 200) {
+            const hasArriving = /\bArriving\b/i.test(text);
+            const hasRadio = el.querySelector('input[type="radio"]') !== null;
+            if (hasArriving && hasRadio) {
+              group = el;
+              break;
+            }
+          }
+          el = el.parentElement;
+          depth++;
+        }
+        const scope: Element =
+          group ?? (anchor.parentElement as Element | null) ?? anchor;
+
+        // Step 3: read "% back" from the CHECKED radio's label only.
+        // Reading any "% back" in scope was too loose (INC-2026-05-05).
+        const checkedRadios = Array.from(
+          scope.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+        );
+        const relevantChecked = checkedRadios
+          .filter((r) => r.checked)
+          .filter((r) => !SKIP_NAME_RE.test(r.name || r.id || ''));
+        let selectedPct: number | null = null;
+        let selectedLabel: string | null = null;
+        for (const r of relevantChecked) {
+          const card =
+            r.closest('label, .a-radio, [role="radio"]') ??
+            (r.parentElement as Element | null);
+          const label = card ? visibleText(card) : '';
+          const m = label.match(/(\d{1,2})\s*%\s*back/i);
+          if (m) {
+            const n = Number(m[1]);
+            if (Number.isFinite(n) && n >= 0 && n <= 99) {
+              if (selectedPct === null || n > selectedPct) {
+                selectedPct = n;
+                selectedLabel = label.slice(0, 120);
+              }
+            }
+          } else if (selectedLabel === null) {
+            selectedLabel = label.slice(0, 120);
+          }
+        }
+
+        // Step 4: diagnostics.
+        const text = visibleText(scope);
+        const bodyText = visibleText(document.body);
+        const bodyMatches = bodyText.match(/\d{1,2}\s*%\s*back/gi) ?? [];
+        const scopeMatches = text.match(/\d{1,2}\s*%\s*back/gi) ?? [];
+
+        return {
+          found: true as const,
+          pct: selectedPct,
+          selectedLabel,
+          checkedRadioCount: relevantChecked.length,
+          groupFound: group !== null,
+          walkDepth: depth,
+          scopeChars: text.length,
+          bodyMatches: bodyMatches.slice(0, 8),
+          scopeMatches: scopeMatches.slice(0, 8),
+          scopeStart: text.slice(0, 200),
+          scopeEnd: text.slice(Math.max(0, text.length - 200)),
+        };
+      },
+      { asin: targetAsin, titlePrefix },
+    )
+    .catch(() => ({
+      found: false as const,
+      diag: {
+        totalLinks: 0,
+        asinInBody: false,
+        titleSearched: null as string | null,
+        titleInBody: false,
+        url: page.url(),
+      },
+    }));
 
   if (!hit.found) {
     return {

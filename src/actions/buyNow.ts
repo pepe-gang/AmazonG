@@ -3,10 +3,8 @@ import { JSDOM } from 'jsdom';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../shared/logger.js';
-import { findCashbackPct } from '../parsers/amazonProduct.js';
 import {
   DELIVERY_OPTIONS_CHANGED_SELECTOR,
-  computeCashbackRadioPlans,
   isVerifyCardChallenge,
   parseOrderConfirmation,
 } from '../parsers/amazonCheckout.js';
@@ -1478,9 +1476,38 @@ async function readCurrentAddress(page: Page): Promise<string> {
 }
 
 async function readCashbackOnPage(page: Page): Promise<number | null> {
-  const html = await page.content();
-  const doc = new JSDOM(html).window.document;
-  return findCashbackPct(doc);
+  // Run the cashback-% scan inline in the browser instead of pulling the
+  // whole /spc HTML over CDP and re-parsing via JSDOM. The CDP serialize
+  // round-trip is the dominant cost (~80-150ms on a 318KB /spc); browser-
+  // native DOM is faster than JSDOM for the same query. Logic mirrors the
+  // pure parser at parsers/amazonProduct.ts:74 (`findCashbackPct`) — kept
+  // as an export there so fixture tests keep passing. Update both if the
+  // detection rules ever change.
+  return page
+    .evaluate(() => {
+      const candidates: string[] = [];
+      document
+        .querySelectorAll(
+          '[id*="cashback" i], [class*="cashback" i], [data-feature-name*="cashback" i]',
+        )
+        .forEach((n) => {
+          const t = (n.textContent ?? '').trim();
+          if (t) candidates.push(t);
+        });
+      candidates.push(document.body?.textContent ?? '');
+      let best: number | null = null;
+      for (const c of candidates) {
+        const re = /(\d{1,2})\s*%\s*back/gi;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(c)) !== null) {
+          const n = Number(m[1]);
+          if (Number.isFinite(n) && (best === null || n > best)) best = n;
+        }
+        if (best !== null) break;
+      }
+      return best;
+    })
+    .catch(() => null);
 }
 
 export type ToggleResult =
@@ -2046,23 +2073,6 @@ function escCssAttr(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-/** Sync each form control's live `.checked` PROPERTY into the `[checked]`
- *  HTML attribute. `page.content()` serializes attributes, not properties —
- *  without this, a radio that was clicked via JS would not show up as
- *  :checked when the HTML is parsed by JSDOM. */
-async function syncCheckedAttribute(page: Page): Promise<void> {
-  await page
-    .evaluate(() => {
-      document
-        .querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]')
-        .forEach((el) => {
-          if (el.checked) el.setAttribute('checked', '');
-          else el.removeAttribute('checked');
-        });
-    })
-    .catch(() => undefined);
-}
-
 /**
  * Scan non-address / non-payment radio groups on /spc, find the option
  * whose label mentions the highest "N% back" (minimum = `minCashbackPct`),
@@ -2084,13 +2094,66 @@ export async function pickBestCashbackDelivery(
   const changes: { picked: string; pct: number }[] = [];
   const clicked = new Set<string>();
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    await syncCheckedAttribute(page);
-    const html = await page.content().catch(() => '');
-    if (!html) break;
-    const plans = computeCashbackRadioPlans(
-      new JSDOM(html).window.document,
-      minCashbackPct,
-    );
+    // Compute plans inline in the browser instead of pulling /spc HTML
+    // over CDP and re-parsing it with JSDOM each iteration. ~80-150ms
+    // saved per iteration on a 318KB /spc; typical 1-3 iters per buy.
+    // Mirrors the pure parser at parsers/amazonCheckout.ts:309
+    // (`computeCashbackRadioPlans`) — kept exported so fixture tests
+    // continue to cover it. Update both if the radio-grouping rules
+    // ever change.
+    //
+    // Note: syncCheckedAttribute is no longer needed here because we
+    // read live `:checked` properties directly (browser DOM, not JSDOM
+    // serialized HTML). The exported pure parser still relies on the
+    // attribute being synced — its callers handle that themselves.
+    const plans = await page
+      .evaluate((minPct: number) => {
+        const SKIP_NAME_RE =
+          /destinationSubmissionUrl|paymentMethodForUrl|paymentMethod|ship-to-this|addressRadio/i;
+        const radios = Array.from(
+          document.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+        ).filter((r) => !SKIP_NAME_RE.test(r.name || r.id || ''));
+        type Opt = { value: string; label: string; pct: number; checked: boolean };
+        const byName = new Map<string, Opt[]>();
+        for (const r of radios) {
+          if (!r.name) continue;
+          const card =
+            r.closest('label, .a-radio, [role="radio"]') ??
+            (r.parentElement as Element | null);
+          // Browser-native innerText handles script/style stripping +
+          // whitespace normalization for free — no treewalker needed.
+          const label = card
+            ? ((card as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').trim()
+            : '';
+          const m = label.match(/(\d{1,2})\s*%\s*back/i);
+          const pct = m ? Number(m[1]) : 0;
+          const opts = byName.get(r.name) ?? [];
+          opts.push({ value: r.value, label, pct, checked: r.checked });
+          byName.set(r.name, opts);
+        }
+        const out: {
+          name: string;
+          value: string;
+          label: string;
+          pickedPct: number;
+        }[] = [];
+        for (const [name, opts] of byName.entries()) {
+          if (opts.length < 2) continue;
+          const best = opts.reduce((a, b) => (b.pct > a.pct ? b : a));
+          const current = opts.find((o) => o.checked);
+          const currentPct = current?.pct ?? 0;
+          if (best.pct >= minPct && best.pct > currentPct) {
+            out.push({
+              name,
+              value: best.value,
+              label: best.label.slice(0, 120),
+              pickedPct: best.pct,
+            });
+          }
+        }
+        return out;
+      }, minCashbackPct)
+      .catch(() => [] as { name: string; value: string; label: string; pickedPct: number }[]);
     const plan = plans.find((p) => !clicked.has(`${p.name}::${p.value}`));
     if (!plan) break;
     clicked.add(`${plan.name}::${plan.value}`);
