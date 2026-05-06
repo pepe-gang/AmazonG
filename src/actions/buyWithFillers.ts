@@ -43,7 +43,6 @@ import {
   extractCartAddTokens,
   extractSearchResultCandidates,
   looksLikeCartResponse,
-  pdpHttpFetchStreaming,
   type SearchResultCandidate,
 } from './amazonHttp.js';
 
@@ -2025,15 +2024,6 @@ export async function addFillerViaHttp(
   async function fetchPdpHtml(): Promise<
     { ok: true; html: string } | { ok: false; reason: string; status?: number }
   > {
-    // Try streaming-fetch first — saves ~990ms per fetch by stopping the
-    // body stream once <form id="addToCart"> is fully captured (the form
-    // lives in the first ~25% of a real 2MB PDP body; pass-5 verified).
-    // Bypasses APIRequestContext (no streaming API); uses native fetch
-    // with cookies copied from the BrowserContext. Returns null on any
-    // failure — we transparently fall back to ctx.request.get.
-    const streamed = await pdpHttpFetchStreaming(ctx, pdpUrl);
-    if (streamed !== null) return { ok: true, html: streamed };
-
     let res;
     try {
       res = await ctx.request.get(pdpUrl, {
