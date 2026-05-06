@@ -98,6 +98,12 @@ export type SchedulerDeps = {
     fetchTracking?: typeof runFetchTrackingTuple;
   };
   sleep?: Sleep;
+  /** Pre-claim eligibility gate. Mirrors legacy worker.start
+   *  (pollAndScrape.ts:842-855): if no Amazon accounts are signed in,
+   *  don't claim — leaves jobs queued for another instance instead of
+   *  claim-then-fail-burning every job in BG. Returns true when at
+   *  least one signed-in profile exists. */
+  hasEligibleProfiles?: () => Promise<boolean>;
 };
 
 export type JobContext = {
@@ -173,6 +179,8 @@ export class StreamingScheduler {
 
   private async runProducer(): Promise<void> {
     const sleep = this.sd.sleep ?? defaultSleep;
+    let lastNoProfilesWarn = 0;
+    const NO_PROFILES_WARN_INTERVAL_MS = 60_000;
     while (this.running) {
       const cap = this.sd.cap();
       // Don't pre-buffer too many tuples; we want the BG-claimed jobs
@@ -182,6 +190,29 @@ export class StreamingScheduler {
       if (this.readyQueue.length + this.inFlight.size >= cap * 2) {
         await sleep(200, () => this.running);
         continue;
+      }
+
+      // Pre-claim eligibility gate. Mirrors legacy worker (pollAndScrape.ts
+      // :842-855): if zero signed-in profiles, DO NOT claim — leaves jobs
+      // queued in BG for another AutoG instance instead of claim-then-fail
+      // burning every queued job. Without this gate a worker with no
+      // signed-in accounts would brick every BG job within seconds.
+      if (this.sd.hasEligibleProfiles) {
+        const ok = await this.sd.hasEligibleProfiles().catch(() => true);
+        if (!ok) {
+          if (Date.now() - lastNoProfilesWarn > NO_PROFILES_WARN_INTERVAL_MS) {
+            logger.warn(
+              'scheduler.idle.no_profiles',
+              {
+                note: 'No signed-in Amazon accounts. Streaming scheduler is polling but will not claim jobs until at least one account is signed in.',
+              },
+              this.sd.parentCid,
+            );
+            lastNoProfilesWarn = Date.now();
+          }
+          await sleep(5_000, () => this.running);
+          continue;
+        }
       }
 
       let job: AutoGJob | null = null;
@@ -553,12 +584,44 @@ export class StreamingScheduler {
   /** Append a result to its bundle. When the bundle reaches `total`
    *  results, finalize: fire BG status report (for buy phase only —
    *  verify/tracking phases report internally), resolve `done`,
-   *  remove from the bundles map. */
+   *  remove from the bundles map.
+   *
+   *  Bundle-missing is unexpected: producer creates bundle BEFORE
+   *  pushing tuples to readyQueue, and bundle is only deleted when
+   *  total is reached. A miss here means an invariant broke (e.g.
+   *  double-collect on the same tuple). Log loudly so we notice. */
   private collectResult(tuple: Tuple, result: ProfileResult): void {
     const bundle = this.bundles.get(tuple.jobId);
-    if (!bundle) return;
+    if (!bundle) {
+      logger.error(
+        'scheduler.collectResult.missing_bundle',
+        {
+          jobId: tuple.jobId,
+          phase: tuple.phase,
+          email: tuple.profile.email,
+          status: result.status,
+        },
+        this.sd.parentCid,
+      );
+      return;
+    }
     bundle.results.push(result);
     if (bundle.results.length < bundle.total) return;
+    if (bundle.results.length > bundle.total) {
+      // Defensive: we should never push past total because each tuple
+      // only collects once. If we do, something is double-collecting
+      // (e.g. stop() drain race with in-flight settle). Log + drop.
+      logger.error(
+        'scheduler.collectResult.overflow',
+        {
+          jobId: tuple.jobId,
+          total: bundle.total,
+          collected: bundle.results.length,
+        },
+        this.sd.parentCid,
+      );
+      return;
+    }
 
     // Bundle complete. For buy phase, fire the aggregate BG report
     // (matches today's end-of-pMap reportStatus call). For verify/

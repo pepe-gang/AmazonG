@@ -821,6 +821,13 @@ export function startWorker(deps: Deps): WorkerHandle {
         parentCid: 'worker',
         cap: () => cachedCap,
         resolveJobContext: resolveStreamingJobContext,
+        // Pre-claim gate: parity with legacy worker (lines 842-855).
+        // Without this, a worker with no signed-in profiles would
+        // claim and fail every queued job in BG within seconds.
+        hasEligibleProfiles: async () => {
+          const eligible = await deps.listEligibleProfiles().catch(() => []);
+          return eligible.length > 0;
+        },
       });
       logger.info('worker.scheduler.streaming.start', { initialCap: cachedCap });
       streamingHandle = sched;
