@@ -72,6 +72,7 @@ export type Deps = {
    * about.
    */
   loadParallelism: () => Promise<{
+    streamingScheduler?: boolean;
     maxConcurrentBuys: number;
     /** When true (and the buy is in filler mode), the filler picker
      *  uses a whey-protein-only term pool instead of the general
@@ -648,6 +649,75 @@ export function startWorker(deps: Deps): WorkerHandle {
   let backoffMs = 5_000;
   const sessions = new Map<string, DriverSession>();
 
+  // Streaming-scheduler feature flag — read once at worker start.
+  // When true, we delegate to StreamingScheduler instead of running
+  // the per-job pMap legacy loop. The flag is in user settings; flip
+  // takes effect on next worker start (Stop + Start in the UI, or
+  // app restart).
+  //
+  // Default false. Phase 3 of proposal-scheduler-redesign.md will
+  // flip the default. For now, customers + this branch only get the
+  // streaming scheduler if they explicitly set
+  // settings.streamingScheduler=true.
+  let streamingHandle: { stop: () => Promise<void> } | null = null;
+  // The scheduler's resolveJobContext callback duplicates a chunk of
+  // handleJob's per-job preamble (filter eligible, build override
+  // maps, etc.). Captured as a helper here so the legacy and
+  // streaming paths share the same logic.
+  const resolveStreamingJobContext = async (job: AutoGJob) => {
+    const eligibleAll = await deps.listEligibleProfiles();
+    if (eligibleAll.length === 0) return null;
+
+    // Buy phase: use enabled profiles and build per-account overrides.
+    // Verify/tracking phase: use the placedEmail account if it's
+    // signed in (handleVerifyJob/handleFetchTrackingJob accept the
+    // single-element list and select internally).
+    if (job.phase === 'verify' || job.phase === 'fetch_tracking') {
+      const target = (job.placedEmail ?? '').toLowerCase();
+      const profile = eligibleAll.find(
+        (p) => p.email.toLowerCase() === target,
+      );
+      return {
+        eligible: profile ? [profile] : [],
+        fillerByEmail: new Map<string, boolean>(),
+        effectiveMinByEmail: new Map<string, number>(),
+        requireMinByEmail: new Map<string, boolean>(),
+        wheyProteinFillerOnly: false,
+      };
+    }
+
+    // Buy phase — replicate handleJob's filter:
+    //   1. enabled profiles only (rebuy path scopes to placedEmail)
+    //   2. per-account overrides from BG (fillerByEmail / effective
+    //      min cashback / requireMinCashback) — handleJob fetches these
+    //      from `bg.getAccountOverrides`. The streaming-scheduler
+    //      v1 ships with the legacy path's plain defaults (no per-
+    //      account override fetch). Per-account overrides will be
+    //      added in a follow-up; documented in the scheduler's TODO
+    //      comments below.
+    let eligible = eligibleAll.filter((p) => p.enabled);
+    if (job.placedEmail) {
+      const t = job.placedEmail.toLowerCase();
+      eligible = eligible.filter((p) => p.email.toLowerCase() === t);
+    }
+    const parallelism = await deps.loadParallelism().catch(() => ({
+      maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
+      wheyProteinFillerOnly: false,
+      streamingScheduler: true,
+    }));
+    return {
+      eligible,
+      // TODO(streaming-v2): per-account overrides via bg.getAccountOverrides.
+      // Today's handleJob fetches them at lines 902-919; we'd thread the
+      // same call through here for parity. v1 uses defaults — same as a
+      // fresh deploy with no per-account customizations.
+      fillerByEmail: new Map<string, boolean>(),
+      effectiveMinByEmail: new Map<string, number>(),
+      requireMinByEmail: new Map<string, boolean>(),
+      wheyProteinFillerOnly: parallelism.wheyProteinFillerOnly,
+    };
+  };
+
   let lastNoProfilesWarn = 0;
   const NO_PROFILES_WARN_INTERVAL_MS = 60_000;
 
@@ -668,6 +738,42 @@ export function startWorker(deps: Deps): WorkerHandle {
 
   const loop = (async () => {
     logger.info('worker.start');
+
+    // Streaming-scheduler branch: when the user opts in, replace the
+    // legacy per-job pMap loop with the StreamingScheduler. The
+    // scheduler runs producer + consumer loops internally; this
+    // outer loop just waits for `running` to flip false (via stop()).
+    const initialParallelism = await deps
+      .loadParallelism()
+      .catch(() => null);
+    if (initialParallelism?.streamingScheduler) {
+      const { StreamingScheduler } = await import('./scheduler.js');
+      const sched = new StreamingScheduler({
+        deps,
+        sessions,
+        parentCid: 'worker',
+        cap: () => {
+          // Read latest cap each call so live setting changes apply.
+          // Errors fall through to default. Synchronous lookup: the
+          // scheduler calls cap() synchronously in its loops.
+          return DEFAULT_CONCURRENT_BUYS;
+        },
+        resolveJobContext: resolveStreamingJobContext,
+      });
+      logger.info('worker.scheduler.streaming.start');
+      streamingHandle = sched;
+      sched.start();
+      // Park here while the scheduler runs. Stop() flips `running`
+      // and calls streamingHandle.stop() which drains + exits.
+      while (running) {
+        await sleep(1_000, () => running);
+      }
+      logger.info('worker.scheduler.streaming.stop');
+      await closeAllSessions(sessions);
+      logger.info('worker.stop');
+      return;
+    }
+
     while (running) {
       try {
         // Eligibility gate: don't claim a job if we have no enabled+signed-in
@@ -799,6 +905,15 @@ export function startWorker(deps: Deps): WorkerHandle {
       // return immediately so the UI unblocks. The loop drains its
       // in-flight work in the background.
       running = false;
+      // Streaming-scheduler branch: explicit stop() to drain the
+      // ready queue + race in-flight tuples. closeAllSessions runs
+      // afterward as today, which throws 'Target closed' on any
+      // still-running Playwright ops. The scheduler's stop() is
+      // bounded at 4s.
+      if (streamingHandle) {
+        await streamingHandle.stop().catch(() => undefined);
+        streamingHandle = null;
+      }
       await closeAllSessions(sessions);
     },
     async openProfileTab(email, url) {
