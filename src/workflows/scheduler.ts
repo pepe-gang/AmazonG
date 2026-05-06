@@ -488,9 +488,29 @@ export class StreamingScheduler {
 
   private async runTuple(tuple: Tuple): Promise<void> {
     const bundle = this.bundles.get(tuple.jobId);
-    if (!bundle || bundle.abortController.signal.aborted) {
-      // Job aborted before we could dispatch. Mark failed in bundle.
-      this.collectResult(tuple, this.failedResult(tuple, 'aborted before start'));
+    if (!bundle) {
+      // Bundle missing is an invariant break — collectResult will
+      // fail loudly. Don't try to label this as an abort.
+      this.collectResult(
+        tuple,
+        this.failedResult(tuple, 'internal: bundle missing at dispatch'),
+      );
+      return;
+    }
+    if (bundle.abortController.signal.aborted) {
+      // Sibling on the same job hit a PRODUCT-level failure
+      // (out_of_stock / price_exceeds) and fired bundle.abortController.
+      // Surface the reason so this row's failure message points at the
+      // root cause instead of the cryptic "aborted before start".
+      // Matches runForProfile's aborted_by_sibling format
+      // (pollAndScrape.ts:2079) for log consistency.
+      const reason = String(
+        bundle.abortController.signal.reason ?? 'unknown',
+      );
+      this.collectResult(
+        tuple,
+        this.failedResult(tuple, `aborted before start: sibling reported ${reason}`),
+      );
       return;
     }
 
