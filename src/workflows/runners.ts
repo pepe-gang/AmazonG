@@ -2,18 +2,12 @@
  * Per-tuple runners — uniform API surface for the three workflow
  * phases AmazonG handles (`buy`, `verify`, `fetch_tracking`).
  *
- * Phase 1 of the streaming-scheduler rollout (proposal-scheduler-
- * redesign.md §8) extracts this surface so the existing pMap-driven
- * code path AND the future StreamingScheduler can both invoke phases
- * via the same boundary.
- *
- * Today only `runBuyTuple` is exposed — it's a thin delegator over
- * `runForProfile` in `pollAndScrape.ts`. `runVerifyTuple` and
- * `runFetchTrackingTuple` will be added in Phase 2 when the scheduler
- * needs per-tuple dispatch for verify/tracking jobs.
- *
- * No behavior change in this file vs today's direct `runForProfile`
- * call site at `pollAndScrape.ts:1015-1029`.
+ * Both the legacy pMap path and the StreamingScheduler invoke phases
+ * through these thin delegators. Keeps the dispatch boundary in one
+ * place so the two paths can't drift in argument ordering or option
+ * shape — a refactor in `runForProfile` / `handleVerifyJob` /
+ * `handleFetchTrackingJob` only needs to update the matching ctx
+ * type here.
  */
 
 import type { AmazonProfile, AutoGJob } from '../shared/types.js';

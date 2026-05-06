@@ -70,9 +70,6 @@ type JobBundle = {
   total: number;
   results: ProfileResult[];
   abortController: AbortController;
-  // Resolves after the bundle's BG status report has fired.
-  done: Promise<void>;
-  resolve: () => void;
   // Per-account filler-mode flags captured at expandToTuples time.
   // Needed by buildBuyJobReport for the per-purchase `viaFiller` flag.
   // For verify/tracking phases this stays empty (helper isn't called
@@ -504,7 +501,18 @@ export class StreamingScheduler {
     }
 
     try {
-      if (tuple.phase === 'buy' && tuple.buyCtx) {
+      if (tuple.phase === 'buy') {
+        // buyCtx is set by expandToTuples for every buy-phase tuple —
+        // missing here is an invariant break, not an expected branch.
+        // Fail loudly so the bundle finalizes instead of silently
+        // hanging on a missing collectResult.
+        if (!tuple.buyCtx) {
+          this.collectResult(
+            tuple,
+            this.failedResult(tuple, 'internal: buy tuple missing context'),
+          );
+          return;
+        }
         const buyRunner = this.sd.runners?.buy ?? runBuyTuple;
         const result = await buyRunner({
           deps: this.sd.deps,
@@ -529,8 +537,9 @@ export class StreamingScheduler {
           profile: tuple.profile,
           parentCid: this.sd.parentCid,
         });
-        // verify reports its own BG status internally (handleVerifyJob
-        // calls reportSafe). Bundle aggregation just tracks completion.
+        // verify/tracking runners report their own BG status internally
+        // (handleVerifyJob/handleFetchTrackingJob call reportSafe).
+        // Bundle aggregation just tracks completion via a placeholder.
         this.collectResult(tuple, this.lifecycleCompletionMarker(tuple));
       } else if (tuple.phase === 'fetch_tracking') {
         const trackingRunner =
@@ -543,6 +552,12 @@ export class StreamingScheduler {
           parentCid: this.sd.parentCid,
         });
         this.collectResult(tuple, this.lifecycleCompletionMarker(tuple));
+      } else {
+        // Defensive: unknown phase. Fail rather than silently no-op.
+        this.collectResult(
+          tuple,
+          this.failedResult(tuple, `unknown phase: ${tuple.phase}`),
+        );
       }
     } catch (err) {
       // Per-tuple error — don't take down the whole job. Mark this
@@ -568,15 +583,11 @@ export class StreamingScheduler {
     total: number,
     fillerByEmail: Map<string, boolean>,
   ): JobBundle {
-    let resolve!: () => void;
-    const done = new Promise<void>((r) => (resolve = r));
     return {
       jobId,
       total,
       results: [],
       abortController: new AbortController(),
-      done,
-      resolve,
       fillerByEmail,
     };
   }
@@ -635,7 +646,6 @@ export class StreamingScheduler {
         );
       });
     }
-    bundle.resolve();
     this.bundles.delete(tuple.jobId);
   }
 
