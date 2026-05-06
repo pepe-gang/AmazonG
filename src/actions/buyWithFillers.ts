@@ -219,7 +219,6 @@ export type BuyWithFillersResult =
         | 'buy_now_click'
         | 'buy_now_nav'
         | 'cart_verify'
-        | 'fillers_below_floor'
         | 'proceed_checkout'
         | 'spc_wait'
         | 'spc_ready'
@@ -239,25 +238,6 @@ const CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
 const FILLER_COUNT = 8;
 const FILLER_MIN_PRICE = 20;
 const FILLER_MAX_PRICE = 100;
-
-/**
- * Hard floor on filler count below which we refuse to checkout. A cart
- * containing only the target (or target + 1-2 stragglers) defeats the
- * whole point of filler mode — the rebuy reads as exactly what it is.
- *
- * Set to 6 (out of the typical 8 target). Two slots of slack for
- * Amazon's batch-add silently dropping items, but anything below that
- * means search/cart-add was meaningfully throttled and a retry is
- * warranted instead of placing a naked-cart order.
- *
- * Failure mode this catches: noCandidates, batch.threw, batch.httpError,
- * batch.shapeMismatch, OR phantom-commit (response OK but data-asin
- * absent) — all of these previously fell through to a Place Order
- * click with just the target in the cart. Particularly common during
- * rebuys (account just hit /checkout/cancel-order and the search
- * endpoint is throttled for a few minutes).
- */
-const MIN_FILLERS_FOR_COVER = 6;
 
 // Low-risk impulse-item search terms borrowed from AutoG. Shuffled on each
 // run so we don't always hit the same items first (helps avoid rate-limit
@@ -599,32 +579,6 @@ export async function buyWithFillers(
       { fillersAdded, fillersRequested: fillerTargetCount },
       cid,
     );
-  }
-
-  // Hard floor: refuse to checkout if too few fillers landed. Without
-  // this guard a search-throttled rebuy would proceed with just the
-  // target in the cart — defeating the whole purpose of filler mode.
-  // Common during rebuys (account just hit cancel-order, search
-  // endpoint rate-limited for several minutes). Bailing here lets
-  // runFillerBuyWithRetries retry the whole flow once Amazon
-  // un-throttles, instead of leaving a naked-cart order placed.
-  if (fillersAdded < MIN_FILLERS_FOR_COVER) {
-    logger.error(
-      'step.fillerBuy.fillers.belowFloor',
-      {
-        fillersAdded,
-        fillersRequested: fillerTargetCount,
-        floor: MIN_FILLERS_FOR_COVER,
-        targetAsin,
-      },
-      cid,
-    );
-    return {
-      ok: false,
-      stage: 'fillers_below_floor',
-      reason: `only ${fillersAdded} filler(s) committed (floor: ${MIN_FILLERS_FOR_COVER}) — refusing to checkout without cover`,
-      detail: `requested=${fillerTargetCount} added=${fillersAdded}`,
-    };
   }
 
   // 6. Enter checkout directly. /checkout/entry/cart?proceedToCheckout=1
