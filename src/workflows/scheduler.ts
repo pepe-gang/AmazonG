@@ -178,13 +178,13 @@ export class StreamingScheduler {
     const sleep = this.sd.sleep ?? defaultSleep;
     let lastNoProfilesWarn = 0;
     const NO_PROFILES_WARN_INTERVAL_MS = 60_000;
-    // Fast poll for the no-job and error paths. New rebuys / scheduled
-    // jobs become claimable in BG at countdown expiry — at 5s polling
-    // a job ready right after our last poll waits up to 5s for the
-    // next call. With multiple workers idle and one busy on a long
-    // buy, the BG queue can fill while we sleep. 1s polling catches
-    // ready-now jobs within a second without meaningfully more BG load.
-    const NO_JOB_SLEEP_MS = 1_000;
+    // Fast poll for the no-job path. New rebuys / scheduled jobs
+    // become claimable in BG at countdown expiry — at 5s polling
+    // a job ready right after our last poll waits up to 5s. 2s
+    // strikes a balance: fast enough to keep idle workers fed
+    // when a single new job appears mid-flight, while keeping
+    // BG load modest (~30 req/min vs ~12 req/min at 5s).
+    const NO_JOB_SLEEP_MS = 2_000;
     // Eligibility / error backoff stays at 5s — these are "wait for a
     // user action / wait for BG to recover" cases, not "wait for the
     // next job to be ready". No reason to hammer BG when no profile
