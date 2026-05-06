@@ -270,6 +270,32 @@ export type Settings = {
    * resource profiles comparable.
    */
   maxConcurrentBuys: number;
+  /**
+   * Experimental flags. Default unset / off — none of these change
+   * production behavior unless explicitly opted in via settings.json.
+   */
+  experimental?: {
+    /**
+     * When on AND the cashback gate fails with the B1 reason ("no '%
+     * back' shown on target X's shipping group"), AmazonG runs a
+     * surgical recovery flow INSTEAD of the default 3-attempt
+     * replace-fillers retry:
+     *   Phase A — identify which non-target ASINs share the target's
+     *     bad shipping group, HTTP-delete each from cart, recreate
+     *     /spc, re-check cashback. Up to 5 removals.
+     *   Phase B — if Phase A exhausts and still no 6%, HTTP-add a
+     *     fresh batch of fillers (not previously seen in any bad
+     *     group), recreate /spc, re-check.
+     * On exhaustion the buy fails — there is NO outer 3-attempt retry
+     * when this flag is on.
+     *
+     * Research-only data is recorded to
+     * `userData/research-logs/cashback-experiments.jsonl` ONLY when
+     * `process.env.NODE_ENV === 'development'` (npm run dev). The
+     * recording is fire-and-forget; never blocks the buy flow.
+     */
+    surgicalCashbackRecovery?: boolean;
+  };
 };
 
 /**

@@ -304,3 +304,155 @@ async function clearCartViaHttp(page: Page): Promise<HttpClearResult> {
     totalMs: Date.now() - t0,
   };
 }
+
+export type RemoveByAsinResult =
+  | { ok: true; removedAsins: string[]; missingAsins: string[]; totalMs: number }
+  | { ok: false; reason: string; status?: number };
+
+/**
+ * Remove specific items from the active cart by ASIN. Used by the
+ * experimental `surgicalCashbackRecovery` flow to delete the items
+ * Amazon co-bundled with the target into a non-cashback shipping
+ * group.
+ *
+ * Walks the cart HTML to map each requested ASIN → its delete-active
+ * UUID, then POSTs the same per-item delete the cart's <form
+ * id="activeCartViewForm"> uses (mirrors `clearCartViaHttp`). Sequential
+ * because Amazon's cart server has a known race when two delete POSTs
+ * hit simultaneously.
+ *
+ * Saved-for-Later items are left alone — we ONLY target
+ * `submit.delete-active.*` UUIDs.
+ *
+ * Best-effort: returns the subset that was found AND successfully
+ * deleted. ASINs that didn't appear in the cart are reported via
+ * `missingAsins` (could be already-removed, or a parse miss). The
+ * caller treats `missingAsins` as informational, not an error.
+ */
+export async function removeCartItemsByAsin(
+  page: Page,
+  asinsToRemove: readonly string[],
+): Promise<RemoveByAsinResult> {
+  if (asinsToRemove.length === 0) {
+    return { ok: true, removedAsins: [], missingAsins: [], totalMs: 0 };
+  }
+  const wantedSet = new Set(asinsToRemove.map((a) => a.toUpperCase()));
+  const ctx = page.context();
+  const t0 = Date.now();
+
+  let cartRes;
+  try {
+    cartRes = await ctx.request.get(CART_URL, {
+      headers: HTTP_BROWSERY_HEADERS,
+      timeout: 15_000,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'cart_fetch_threw:' + String(err).slice(0, 80),
+    };
+  }
+  if (!cartRes.ok()) {
+    return { ok: false, reason: 'cart_http_error', status: cartRes.status() };
+  }
+  let cartHtml: string;
+  try {
+    cartHtml = await cartRes.text();
+  } catch {
+    return { ok: false, reason: 'cart_body_read_threw' };
+  }
+
+  const doc = new JSDOM(cartHtml).window.document;
+  const form = doc.getElementById('activeCartViewForm');
+  if (!form) return { ok: false, reason: 'no_activeCartViewForm' };
+  const csrf = (
+    form.querySelector('input[name="anti-csrftoken-a2z"]') as HTMLInputElement | null
+  )?.value;
+  if (!csrf) return { ok: false, reason: 'no_csrf' };
+  const action = form.getAttribute('action');
+  if (!action) return { ok: false, reason: 'no_form_action' };
+
+  // Walk line items to build (ASIN → UUID) map. The cart's row markup
+  // ships data-asin on a wrapper element that ALSO contains the
+  // submit.delete-active.<UUID> input. Match by walking up from each
+  // delete input to the closest [data-asin] ancestor.
+  const asinToUuid = new Map<string, string>();
+  const deleteInputs = form.querySelectorAll<HTMLInputElement>(
+    'input[name^="submit.delete-active."]',
+  );
+  for (const input of Array.from(deleteInputs)) {
+    const name = input.getAttribute('name') ?? '';
+    const uuid = name.replace(/^submit\.delete-active\./, '');
+    if (!uuid) continue;
+    let el: Element | null = input;
+    let asin: string | null = null;
+    let depth = 0;
+    while (el && depth < 12) {
+      const a = el.getAttribute?.('data-asin');
+      if (a && /^[A-Z0-9]{10}$/i.test(a)) {
+        asin = a.toUpperCase();
+        break;
+      }
+      el = el.parentElement;
+      depth++;
+    }
+    if (asin && wantedSet.has(asin) && !asinToUuid.has(asin)) {
+      asinToUuid.set(asin, uuid);
+    }
+  }
+
+  const missingAsins: string[] = [];
+  for (const want of wantedSet) {
+    if (!asinToUuid.has(want)) missingAsins.push(want);
+  }
+
+  if (asinToUuid.size === 0) {
+    return {
+      ok: true,
+      removedAsins: [],
+      missingAsins,
+      totalMs: Date.now() - t0,
+    };
+  }
+
+  const postUrl = new URL(action, 'https://www.amazon.com').toString();
+  const removedAsins: string[] = [];
+  for (const [asin, uuid] of asinToUuid) {
+    const body = new URLSearchParams();
+    body.append('anti-csrftoken-a2z', csrf);
+    body.append(`submit.delete-active.${uuid}`, 'Delete');
+    let postRes;
+    try {
+      postRes = await ctx.request.post(postUrl, {
+        headers: {
+          ...HTTP_BROWSERY_HEADERS,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Referer: CART_URL,
+          Origin: 'https://www.amazon.com',
+        },
+        data: body.toString(),
+        timeout: 15_000,
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `delete_threw_for_${asin}:` + String(err).slice(0, 80),
+      };
+    }
+    if (!postRes.ok()) {
+      return {
+        ok: false,
+        reason: `delete_http_error_for_${asin}`,
+        status: postRes.status(),
+      };
+    }
+    removedAsins.push(asin);
+  }
+
+  return {
+    ok: true,
+    removedAsins,
+    missingAsins,
+    totalMs: Date.now() - t0,
+  };
+}

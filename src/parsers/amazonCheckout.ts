@@ -235,6 +235,19 @@ export type CashbackHit =
       found: true;
       pct: number | null;
       scopeEnd: string;
+      /**
+       * ASINs found inside the target's shipping group (the innermost
+       * Arriving+radio ancestor). Includes the target itself when it's
+       * the only item in its own group; otherwise the OTHER items
+       * Amazon co-bundled with the target.
+       *
+       * Used by experimental.surgicalCashbackRecovery to identify
+       * which non-target items to remove when the target's group has
+       * no cashback option (B1 case). Optional on the wire so older
+       * fixture tests that pin specific CashbackHit shapes don't have
+       * to be updated; runtime callers always populate it.
+       */
+      groupAsins?: string[];
     } & CashbackDiag);
 
 /** Rendered-text reader: walks text nodes inside `el`, skipping
@@ -528,6 +541,30 @@ export function readTargetCashbackFromDom(
   const bodyMatches = bodyText.match(/\d{1,2}\s*%\s*back/gi) ?? [];
   const scopeMatches = text.match(/\d{1,2}\s*%\s*back/gi) ?? [];
 
+  // Step 5: enumerate ASINs inside the scope. Used by the experimental
+  // surgical-cashback-recovery flow to know which non-target items
+  // share the target's bad shipping group (the items we'd HTTP-delete
+  // to try to break Amazon's grouping). Sources, in priority order:
+  //   1. <a href="/dp/<ASIN>"> or /gp/product/<ASIN> — most reliable
+  //   2. data-asin="..." attributes on any descendant element
+  //   3. <span data-testid="Item_asin_*"> hidden testid pin (Chewbacca)
+  // Deduped, target ASIN excluded by the caller (we return all ASINs
+  // including target here for symmetry; caller filters as needed).
+  const groupAsins = new Set<string>();
+  scope.querySelectorAll('a[href]').forEach((a) => {
+    const href = a.getAttribute('href') ?? '';
+    const m = href.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})\b/i);
+    if (m && m[1]) groupAsins.add(m[1]);
+  });
+  scope.querySelectorAll('[data-asin]').forEach((el) => {
+    const a = (el.getAttribute('data-asin') ?? '').trim();
+    if (/^[A-Z0-9]{10}$/i.test(a)) groupAsins.add(a);
+  });
+  scope.querySelectorAll('[data-testid^="Item_asin_"]').forEach((s) => {
+    const a = (s.textContent ?? '').trim();
+    if (/^[A-Z0-9]{10}$/i.test(a)) groupAsins.add(a);
+  });
+
   return {
     found: true,
     pct: selectedPct,
@@ -540,6 +577,7 @@ export function readTargetCashbackFromDom(
     scopeMatches: scopeMatches.slice(0, 8),
     scopeStart: text.slice(0, 200),
     scopeEnd: text.slice(Math.max(0, text.length - 200)),
+    groupAsins: [...groupAsins],
   };
 }
 

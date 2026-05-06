@@ -78,6 +78,13 @@ export type Deps = {
      *  impulse mix. Read every claim so a Settings toggle takes
      *  effect on the next deal without restarting the worker. */
     wheyProteinFillerOnly: boolean;
+    /** Experimental: when true AND the buy is in filler mode AND the
+     *  cashback gate fails with B1 (target's group has no "% back"
+     *  radio at all), run surgical recovery (remove bundle-mates
+     *  from cart, optionally replace fillers) instead of the default
+     *  3-attempt replace-everything retry. Read every claim so a
+     *  Settings toggle takes effect on the next deal. */
+    surgicalCashbackRecovery: boolean;
   }>;
   /** Returns every enabled+loggedIn profile we should fan out the job to. */
   listEligibleProfiles: () => Promise<AmazonProfile[]>;
@@ -482,6 +489,11 @@ async function runFillerBuyWithRetries(
   /** Live "Whey Protein Filler only" toggle, re-read each claim. Single-
    *  mode buys never reach here. */
   wheyProteinFillerOnly: boolean,
+  /** Live experimental.surgicalCashbackRecovery toggle. When on,
+   *  buyWithFillers handles B1 cashback failures via the inline
+   *  surgical flow AND we skip the 3-attempt outer retry — surgical
+   *  is the only recovery path. */
+  surgicalCashbackRecovery: boolean,
   /** Pre-scraped info from the worker's verify phase. Passed to the
    *  FIRST attempt so buyWithFillers can skip its internal scrapeProduct
    *  (saves 2-4s). Subsequent retries refetch in case Amazon changed
@@ -507,13 +519,22 @@ async function runFillerBuyWithRetries(
   // shipping-group fan-out → different cashback eligibility, which
   // is the whole point of retrying on a cashback_gate miss.
   const attemptedAsins = new Set<string>();
-  for (let attempt = 1; attempt <= FILLER_MAX_ATTEMPTS; attempt++) {
+  // When surgical recovery is on, we run buyWithFillers ONCE — it
+  // handles B1 cashback failures inline via the surgical flow. The
+  // outer 3-attempt retry exists to give "different-fillers shuffle"
+  // a chance; surgical is a different (and incompatible) recovery
+  // strategy that runs in-place. Forcing maxAttempts=1 when surgical
+  // is on means a non-cashback_gate failure short-circuits same as
+  // before; a cashback_gate failure surfaces the surgical-exhausted
+  // result directly.
+  const maxAttempts = surgicalCashbackRecovery ? 1 : FILLER_MAX_ATTEMPTS;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (attempt > 1) {
       logger.info(
         'step.fillerBuy.retryWhole.start',
         {
           attempt,
-          maxAttempts: FILLER_MAX_ATTEMPTS,
+          maxAttempts,
           priorReason: lastRaw.ok ? null : lastRaw.reason,
           excludedAsinsCount: attemptedAsins.size,
         },
@@ -541,13 +562,16 @@ async function runFillerBuyWithRetries(
       // disk-log sink (main/index.ts:798-815).
       jobId: job.id,
       profile,
+      // Experimental — buyWithFillers handles B1 cashback failures
+      // inline when this is on. See BuyWithFillersOptions.surgicalCashbackRecovery.
+      surgicalCashbackRecovery,
       onStage,
     });
     if (lastRaw.ok) {
       if (attempt > 1) {
         logger.info(
           'step.fillerBuy.retryWhole.ok',
-          { attempt, maxAttempts: FILLER_MAX_ATTEMPTS },
+          { attempt, maxAttempts },
           cid,
         );
       }
@@ -558,10 +582,10 @@ async function runFillerBuyWithRetries(
     // etc.) points at account or product state that a rerun won't fix —
     // cheaper to bail out than to burn another ~60–80s per attempt.
     if (lastRaw.stage !== 'cashback_gate') break;
-    if (attempt >= FILLER_MAX_ATTEMPTS) {
+    if (attempt >= maxAttempts) {
       logger.warn(
         'step.fillerBuy.retryWhole.exhausted',
-        { attempt, maxAttempts: FILLER_MAX_ATTEMPTS, lastReason: lastRaw.reason },
+        { attempt, maxAttempts, lastReason: lastRaw.reason },
         cid,
       );
       break;
@@ -659,6 +683,7 @@ export function startWorker(deps: Deps): WorkerHandle {
         effectiveMinByEmail: new Map<string, number>(),
         requireMinByEmail: new Map<string, boolean>(),
         wheyProteinFillerOnly: false,
+        surgicalCashbackRecovery: false,
       };
     }
 
@@ -679,6 +704,7 @@ export function startWorker(deps: Deps): WorkerHandle {
     const parallelism = await deps.loadParallelism().catch(() => ({
       maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
       wheyProteinFillerOnly: false,
+      surgicalCashbackRecovery: false,
     }));
 
     const fillerByEmail = new Map<string, boolean>(
@@ -715,6 +741,7 @@ export function startWorker(deps: Deps): WorkerHandle {
       effectiveMinByEmail,
       requireMinByEmail,
       wheyProteinFillerOnly: parallelism.wheyProteinFillerOnly,
+      surgicalCashbackRecovery: parallelism.surgicalCashbackRecovery,
     };
   };
 
@@ -1588,6 +1615,10 @@ export async function runForProfile(
    *  whey-protein-only term pool with a 10–12 random count. Re-read
    *  per claim by the caller. Single-mode buys ignore. */
   wheyProteinFillerOnly: boolean,
+  /** Live experimental.surgicalCashbackRecovery toggle. Re-read per
+   *  claim. Filler-mode only (single-mode buys never hit the cashback
+   *  gate's recovery paths in the same way). */
+  surgicalCashbackRecovery: boolean,
   /** Shared kill-switch fired when ONE profile in the fan-out detects
    *  a PRODUCT-level failure (out_of_stock / price_exceeds). When this
    *  signal is aborted, every other profile bails at its next
@@ -1823,7 +1854,7 @@ export async function runForProfile(
         .update(attemptId, { stage }, { forceFlush: true })
         .then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, info, preflightCleared, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, surgicalCashbackRecovery, info, preflightCleared, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       productTitle = r.productTitle;

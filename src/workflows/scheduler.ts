@@ -60,6 +60,7 @@ type Tuple = {
     effectiveMinCashbackPct: number;
     requireMinCashback: boolean;
     wheyProteinFillerOnly: boolean;
+    surgicalCashbackRecovery: boolean;
   };
 };
 
@@ -111,6 +112,7 @@ export type JobContext = {
   effectiveMinByEmail: Map<string, number>;
   requireMinByEmail: Map<string, boolean>;
   wheyProteinFillerOnly: boolean;
+  surgicalCashbackRecovery: boolean;
   // Optional: the verify/tracking job carries placedEmail at the
   // job level. For those phases the eligible list is already filtered
   // to one profile (or empty if the email isn't signed in).
@@ -380,6 +382,7 @@ export class StreamingScheduler {
           requireMinCashback:
             ctx.requireMinByEmail.get(account) ?? true,
           wheyProteinFillerOnly: ctx.wheyProteinFillerOnly,
+          surgicalCashbackRecovery: ctx.surgicalCashbackRecovery,
         };
       }
       tuples.push(tuple);
@@ -554,6 +557,7 @@ export class StreamingScheduler {
           effectiveMinCashbackPct: tuple.buyCtx.effectiveMinCashbackPct,
           requireMinCashback: tuple.buyCtx.requireMinCashback,
           wheyProteinFillerOnly: tuple.buyCtx.wheyProteinFillerOnly,
+          surgicalCashbackRecovery: tuple.buyCtx.surgicalCashbackRecovery,
           abortSignal: bundle.abortController.signal,
           abortSiblings: (reason) => bundle.abortController.abort(reason),
         });

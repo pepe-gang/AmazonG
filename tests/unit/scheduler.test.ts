@@ -123,6 +123,7 @@ function makeDeps(opts: {
         effectiveMinByEmail: new Map(),
         requireMinByEmail: new Map(),
         wheyProteinFillerOnly: false,
+        surgicalCashbackRecovery: false,
       };
     },
     runners: {
