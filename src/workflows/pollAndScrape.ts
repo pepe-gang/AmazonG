@@ -782,19 +782,35 @@ export function startWorker(deps: Deps): WorkerHandle {
       .catch(() => null);
     if (initialParallelism?.streamingScheduler) {
       const { StreamingScheduler } = await import('./scheduler.js');
+      // Live-cap cache: scheduler calls cap() synchronously, but the
+      // user's "Parallel buys" setting is async-loaded. We refresh the
+      // cache in the background every 5s so live setting changes take
+      // effect without restart. Math.max(1, …) guards against a 0 in
+      // settings.json that would otherwise stall the consumer.
+      let cachedCap = Math.max(
+        1,
+        initialParallelism.maxConcurrentBuys ?? DEFAULT_CONCURRENT_BUYS,
+      );
+      const capRefreshTimer = setInterval(() => {
+        deps
+          .loadParallelism()
+          .then((p) => {
+            cachedCap = Math.max(
+              1,
+              p.maxConcurrentBuys ?? DEFAULT_CONCURRENT_BUYS,
+            );
+          })
+          .catch(() => undefined);
+      }, 5_000);
+
       const sched = new StreamingScheduler({
         deps,
         sessions,
         parentCid: 'worker',
-        cap: () => {
-          // Read latest cap each call so live setting changes apply.
-          // Errors fall through to default. Synchronous lookup: the
-          // scheduler calls cap() synchronously in its loops.
-          return DEFAULT_CONCURRENT_BUYS;
-        },
+        cap: () => cachedCap,
         resolveJobContext: resolveStreamingJobContext,
       });
-      logger.info('worker.scheduler.streaming.start');
+      logger.info('worker.scheduler.streaming.start', { initialCap: cachedCap });
       streamingHandle = sched;
       sched.start();
       // Park here while the scheduler runs. Stop() flips `running`
@@ -802,6 +818,7 @@ export function startWorker(deps: Deps): WorkerHandle {
       while (running) {
         await sleep(1_000, () => running);
       }
+      clearInterval(capRefreshTimer);
       logger.info('worker.scheduler.streaming.stop');
       await closeAllSessions(sessions);
       logger.info('worker.stop');

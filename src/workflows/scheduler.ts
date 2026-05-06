@@ -34,6 +34,7 @@
 import { logger } from '../shared/logger.js';
 import type { AmazonProfile, AutoGJob } from '../shared/types.js';
 import type { DriverSession } from '../browser/driver.js';
+import { makeAttemptId } from '../shared/sanitize.js';
 import { AccountLock } from './accountLock.js';
 import {
   runBuyTuple,
@@ -200,35 +201,67 @@ export class StreamingScheduler {
         continue;
       }
 
-      // Resolve per-job context (eligible profiles + overrides). Skip
-      // jobs with no eligible profiles after reporting failed to BG —
-      // matches today's behavior at pollAndScrape.ts:850-865.
+      // Resolve per-job context (eligible profiles + overrides). Mirror
+      // legacy handleJob's empty-eligible path (pollAndScrape.ts:1022-
+      // 1036): report `failed` to BG so the job moves out of `claimed`
+      // state. Otherwise the job stays stuck until BG's stale-claim
+      // recovery (~10 min) and we'd reclaim it forever.
       const ctx = await this.sd.resolveJobContext(job).catch(() => null);
-      if (!ctx || ctx.eligible.length === 0) {
-        // No tuples to schedule. Don't stall the worker.
-        if (!ctx) {
-          // The resolver throwing is unusual — log + skip.
-          logger.warn(
-            'scheduler.resolve.error',
-            { jobId: job.id, phase: job.phase },
-            this.sd.parentCid,
-          );
-        }
+      if (!ctx) {
+        logger.warn(
+          'scheduler.resolve.error',
+          { jobId: job.id, phase: job.phase },
+          this.sd.parentCid,
+        );
+        await this.sd.deps.bg
+          .reportStatus(job.id, {
+            status: 'failed',
+            error: 'failed to resolve job context',
+          })
+          .catch(() => undefined);
+        continue;
+      }
+      if (ctx.eligible.length === 0) {
+        const error =
+          job.phase === 'buy'
+            ? 'no enabled Amazon accounts available for this buy'
+            : `target account ${job.placedEmail ?? '(none)'} not signed in`;
+        logger.warn(
+          'scheduler.eligible.empty',
+          { jobId: job.id, phase: job.phase, placedEmail: job.placedEmail },
+          this.sd.parentCid,
+        );
+        await this.sd.deps.bg
+          .reportStatus(job.id, { status: 'failed', error })
+          .catch(() => undefined);
         continue;
       }
 
       const tuples = await this.expandToTuples(job, ctx);
       if (tuples.length === 0) {
-        // All eligible profiles already finished on a previous instance;
-        // record empty bundle and move on. The job's previous
-        // instance(s) should have already reported per-purchase rows;
-        // the parent job's status will move via the verify/tracking
-        // lifecycle. No new aggregate report needed.
+        // Buy phase reclaim where every account already finished on a
+        // prior instance — purchases are reported, but the parent job
+        // is still `claimed`. Roll the parent forward via a no-op
+        // `awaiting_verification` report so BG can transition it (BG
+        // de-dupes purchases by amazonEmail; an empty purchases list
+        // just moves the parent state).
         logger.info(
           'scheduler.expand.empty',
           { jobId: job.id, phase: job.phase },
           this.sd.parentCid,
         );
+        await this.sd.deps.bg
+          .reportStatus(job.id, {
+            status: 'awaiting_verification',
+            placedAt: null,
+            placedQuantity: null,
+            placedPrice: null,
+            placedCashbackPct: null,
+            placedOrderId: null,
+            placedEmail: null,
+            purchases: [],
+          })
+          .catch(() => undefined);
         continue;
       }
 
@@ -313,6 +346,61 @@ export class StreamingScheduler {
       }
       tuples.push(tuple);
     }
+
+    // Mirror legacy handleJob's upfront attempt-row creation (lines
+    // 1127-1153). Without this, the UI table shows nothing for
+    // streaming-scheduled buys: runForProfile only does .update on
+    // the row (jobStore.updateAttempt is a no-op when the row is
+    // missing). Lifecycle phases (verify/fetch_tracking) handle
+    // their own row creation via ensureLifecycleAttempt — skip here.
+    if (job.phase === 'buy' && tuples.length > 0) {
+      await Promise.all(
+        tuples.map((t) =>
+          this.sd.deps.jobAttempts
+            .create({
+              attemptId: makeAttemptId(job.id, t.profile.email),
+              jobId: job.id,
+              amazonEmail: t.profile.email,
+              phase: job.phase,
+              dealKey: job.dealKey,
+              dealId: job.dealId,
+              dealTitle: job.dealTitle,
+              productUrl: job.productUrl,
+              maxPrice: job.maxPrice,
+              price: job.price,
+              quantity: job.quantity,
+              cost: null,
+              cashbackPct: null,
+              orderId: null,
+              status: 'queued',
+              error: null,
+              buyMode: ctx.fillerByEmail.get(t.profile.email)
+                ? 'filler'
+                : 'single',
+              dryRun: this.sd.deps.buyDryRun,
+              trackingIds: null,
+              fillerOrderIds: null,
+              productTitle: null,
+              stage: null,
+            })
+            .catch((err) => {
+              // Per-row failures shouldn't block the whole job —
+              // runForProfile's update will still no-op and the
+              // BG report path is unaffected. Log and continue.
+              logger.warn(
+                'scheduler.attempts.create.error',
+                {
+                  jobId: job.id,
+                  email: t.profile.email,
+                  error: err instanceof Error ? err.message : String(err),
+                },
+                this.sd.parentCid,
+              );
+            }),
+        ),
+      );
+    }
+
     return tuples;
   }
 

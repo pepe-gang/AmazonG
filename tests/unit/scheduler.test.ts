@@ -95,10 +95,22 @@ function makeDeps(opts: {
     }),
   };
 
+  const jobAttempts = {
+    create: vi.fn(async (a) => ({
+      ...a,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    })),
+    update: vi.fn(async () => null),
+    get: vi.fn(async () => null),
+  };
+
   const sd: SchedulerDeps = {
     deps: {
       bg,
       minCashbackPct: 6,
+      buyDryRun: false,
+      jobAttempts,
     } as unknown as SchedulerDeps['deps'],
     sessions: new Map(),
     parentCid: 'test-cid',
