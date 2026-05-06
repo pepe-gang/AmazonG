@@ -1012,6 +1012,12 @@ async function handleJob(
     abortController.abort(reason);
   };
 
+  // Instrumentation: fan-out wall-clock timing. Streaming-scheduler
+  // proposal §13 Phase 0 baseline metrics — captures whether the loop
+  // is bottlenecked by a slow tail-round profile while other slots
+  // sit idle. Comparing fanoutDurationMs against per-profile durations
+  // tells us how much wall-clock the streaming scheduler could save.
+  const fanoutStartMs = Date.now();
   const results = await pMap(eligible, concurrency, (profile) =>
     runForProfile(
       deps,
@@ -1026,6 +1032,28 @@ async function handleJob(
       abortController.signal,
       abortSiblings,
     ),
+  );
+  const fanoutDurationMs = Date.now() - fanoutStartMs;
+  logger.info(
+    'job.fanout.complete',
+    {
+      jobId: job.id,
+      eligibleCount: eligible.length,
+      concurrency,
+      // When eligibleCount > concurrency, pMap runs in waves of `concurrency`
+      // size; the final wave has (eligibleCount % concurrency) workers active.
+      // Idle slots in the final wave: concurrency - (eligibleCount % concurrency
+      // || concurrency). E.g. N=5, M=3 → final wave has 2 active, 1 idle.
+      tailWaveIdleSlots:
+        eligible.length > concurrency
+          ? concurrency -
+            (eligible.length % concurrency === 0
+              ? concurrency
+              : eligible.length % concurrency)
+          : Math.max(0, concurrency - eligible.length),
+      fanoutDurationMs,
+    },
+    cid,
   );
 
   // Aggregate.
