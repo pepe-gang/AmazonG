@@ -295,7 +295,7 @@ blocklist (passes 4-7 originals) is verified safe and stays in place.
 
 ## Surgical cashback recovery (flag-gated, dev-tracked)
 
-**Commit:** _to be filled in after this commit lands_
+**Commit:** `90dfb7d`
 **Files:**
 - `src/shared/ipc.ts` — added `experimental.surgicalCashbackRecovery` to Settings
 - `src/shared/researchLog.ts` — NEW: dev-only JSONL writer (allowlist: `cashback-experiments`)
