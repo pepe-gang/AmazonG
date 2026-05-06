@@ -103,89 +103,70 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
   //   - image (PNG/JPEG/WebP/GIF): ~50-200 product+rec thumbnails per page
   //   - font: Amazon Ember web fonts (~200KB across weights)
   //   - media: video/audio (never autoplayed in checkout)
-  //   - telemetry / ad-system hosts (fls-na, unagi, aax-us-iad, dtm,
-  //     cs.amazon.com, aax.amazon-adsystem) — fire-and-forget beacons +
-  //     XHRs. Empirically verified (2026-05-05) to never serve JS to the
-  //     page and to never feed buy-box DOM.
   //
-  // Implementation note (CDP migration, see pass-5 research doc):
-  // Previously this used context.route('**/*', cb) which IPCs Node↔
-  // Chromium per request — every one of ~250+ sub-resources per PDP
-  // pays ~1-3ms each, even passes through. CDP Network.setBlockedURLs
-  // configures Chromium's network layer ONCE; matching URLs drop
-  // pre-renderer with zero per-request IPC. Saves ~500-2000ms per
-  // PDP nav on top of the bandwidth/render savings the block intent
-  // already provides.
+  // Cuts ~3-5s off PDP and /spc hydration. SVGs are passed through —
+  // they carry semantic icons (Prime badge sprites use background-image
+  // PNG, but cashback radio labels and a few buy-box affordances use
+  // <img src=".svg"> for the small mark next to the text).
   //
-  // SVGs are passed through (no .svg pattern). Buy-box layout is
-  // CSS-driven; runtimeVisibilityChecks reads getBoundingClientRect /
-  // getComputedStyle which don't depend on image-derived layout. Prime
-  // badges (#prime-badge .a-icon-prime) use a background-image sprite
-  // that gets blocked here — the <i> element still has its CSS-defined
-  // 53×15px box, so isVisible() still returns true. Empirically
-  // verified on iPad B0DZ751XN6 + Echo Spot B0BFC7WQ6R.
+  // The visibility logic in scrapeProduct.runtimeVisibilityChecks reads
+  // CSS box dimensions (getBoundingClientRect / getComputedStyle), not
+  // image-derived layout, so blocking the sprite PNG doesn't collapse
+  // the badge to 0×0 — the <i id="prime-badge"> element still has its
+  // CSS-defined width/height. verifyTargetCashback / findCashbackPct
+  // read DOM textContent for "% back"; no image dependency.
   //
-  // Only browser-page requests pass through CDP. The ctx.request HTTP-
-  // only paths (clearCart, search, cart-add, verify, ship-track) use
-  // APIRequestContext, a separate request infrastructure that bypasses
-  // page-level interception entirely.
+  // Only browser-page requests pass through this handler. The
+  // ctx.request HTTP-only paths (clearCart, search, cart-add, verify,
+  // ship-track) use APIRequestContext, which is bypassed.
   //
-  // Per-category counters (blockedImages/Fonts/Media/Hosts) were
-  // dropped: the only CDP event carrying URLs is requestWillBeSent,
-  // which fires for every request and re-introduces the per-request
-  // IPC cost the migration eliminates. We track total blocks via
-  // loadingFailed (fires only on blocked + actually-failed requests,
-  // ~100/PDP — affordable). For deeper diagnostics, re-enable the
-  // requestWillBeSent listener temporarily.
-  const BLOCKED_URL_PATTERNS = [
-    // Image extensions (covers query-string variants via trailing *).
-    // SVG intentionally absent — keeps semantic icons available for
-    // any DOM element that depends on them. (Buy-box doesn't, but
-    // future-proofing this is cheap.)
-    '*.png*', '*.jpg*', '*.jpeg*', '*.webp*', '*.gif*', '*.bmp*', '*.ico*',
-    // Font extensions
-    '*.woff*', '*.ttf*', '*.otf*', '*.eot*',
-    // Media extensions
-    '*.mp4*', '*.webm*', '*.mp3*', '*.wav*', '*.ogg*', '*.m3u8*',
-    // Telemetry / ad-system hosts (full URL globs; CDP `*` matches any
-    // chars including slashes)
-    '*://fls-na.amazon.com/*',
-    '*://unagi.amazon.com/*',
-    '*://aax-us-iad.amazon.com/*',
-    '*://dtm.amazon.com/*',
-    '*://cs.amazon.com/*',
-    '*://aax.amazon-adsystem.com/*',
-  ];
-  let blockedTotal = 0;
-  const attachCdpBlocking = async (page: Page): Promise<void> => {
-    try {
-      const cdp = await context.newCDPSession(page);
-      await cdp.send('Network.enable');
-      await cdp.send('Network.setBlockedURLs', { urls: BLOCKED_URL_PATTERNS });
-      cdp.on('Network.loadingFailed', (ev) => {
-        if (ev.errorText === 'net::ERR_BLOCKED_BY_CLIENT') {
-          blockedTotal++;
-        }
-      });
-    } catch (err) {
-      // CDP attach failed — page loads normally without blocking.
-      // Worst case: more CPU/bandwidth used, no functional break.
-      // Logged once per failed page so production traffic surfaces it.
-      logger.warn('driver.cdp.block.attach.failed', {
-        profile,
-        error: err instanceof Error ? err.message : String(err),
-      });
+  // Also block fire-and-forget telemetry / ad-system XHRs that fire on
+  // every nav. Verified empirically (2026-05-05 via Playwright MCP):
+  //   - fls-na.amazon.com: page-event beacons (img + xhr, response body
+  //     unread by page JS)
+  //   - unagi.amazon.com:  CSM/nexus client telemetry (beacon + xhr)
+  //   - aax-us-iad / aax.amazon-adsystem.com: display-ad auction
+  //   - dtm.amazon.com:    cross-domain measurement
+  //   - cs.amazon.com:     customer-service widget bootstrap
+  // None of these serve JS to the page (no script/link initiator),
+  // none are referenced by buy-box DOM nodes, and aborting them
+  // (fetch/XHR/sendBeacon/Image) raises zero JS errors on the live
+  // PDP. ~16 requests blocked per PDP load on top of ~96 images.
+  const BLOCKED_HOSTS =
+    /^(?:fls-na|aax-us-iad|unagi|dtm|cs)\.amazon\.com$|^aax\.amazon-adsystem\.com$/i;
+  let blockedImageCount = 0;
+  let blockedFontCount = 0;
+  let blockedMediaCount = 0;
+  let blockedHostCount = 0;
+  await context.route('**/*', (route) => {
+    const req = route.request();
+    const type = req.resourceType();
+    if (type === 'font') {
+      blockedFontCount++;
+      return route.abort();
     }
-  };
-  // Attach to every page that exists OR is created in this context.
-  // The 'page' event fires for newPage() AND popup-opened tabs but NOT
-  // for the initial about:blank that launchPersistentContext spawns —
-  // so we attach to current pages explicitly + listen for future ones.
-  for (const p of context.pages()) {
-    void attachCdpBlocking(p);
-  }
-  context.on('page', (p) => {
-    void attachCdpBlocking(p);
+    if (type === 'media') {
+      blockedMediaCount++;
+      return route.abort();
+    }
+    if (type === 'image' && !/\.svg(?:\?|#|$)/i.test(req.url())) {
+      blockedImageCount++;
+      return route.abort();
+    }
+    // Host-based block for telemetry + ad-system requests that come
+    // through as xhr/fetch/beacon (so the type-based filters above
+    // don't catch them). Wrapped in try/catch since malformed URLs
+    // would throw on `new URL` and stall the request.
+    try {
+      const host = new URL(req.url()).hostname;
+      if (BLOCKED_HOSTS.test(host)) {
+        blockedHostCount++;
+        return route.abort();
+      }
+    } catch {
+      // fall through to continue on unparseable URL
+    }
+    return route.continue();
   });
 
   // Playwright's launchPersistentContext always boots with a single
@@ -272,7 +253,10 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
         logger.info('session.close.ok', {
           profile,
           durationMs: Date.now() - t0,
-          blockedTotal,
+          blockedImages: blockedImageCount,
+          blockedFonts: blockedFontCount,
+          blockedMedia: blockedMediaCount,
+          blockedHosts: blockedHostCount,
         });
       }
     },
