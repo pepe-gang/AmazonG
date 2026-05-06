@@ -20,7 +20,11 @@ import type { AmazonProfile, AutoGJob } from '../shared/types.js';
 import type { ProfileResult } from './pollAndScrape.js';
 import type { Deps } from './pollAndScrape.js';
 import type { DriverSession } from '../browser/driver.js';
-import { runForProfile } from './pollAndScrape.js';
+import {
+  runForProfile,
+  handleVerifyJobForTuple,
+  handleFetchTrackingJobForTuple,
+} from './pollAndScrape.js';
 
 /**
  * Inputs the buy-phase runner needs. Matches `runForProfile`'s
@@ -57,5 +61,41 @@ export async function runBuyTuple(ctx: BuyTupleCtx): Promise<ProfileResult> {
     ctx.wheyProteinFillerOnly,
     ctx.abortSignal,
     ctx.abortSiblings,
+  );
+}
+
+/**
+ * Inputs for verify / fetch_tracking tuple runners. These phases are
+ * already single-account per job (the job carries `placedEmail`), so
+ * the tuple maps 1:1 with the existing `handleVerifyJob` /
+ * `handleFetchTrackingJob` shape. The runners just delegate.
+ */
+export type LifecycleTupleCtx = {
+  deps: Deps;
+  sessions: Map<string, DriverSession>;
+  job: AutoGJob;
+  profile: AmazonProfile;
+  parentCid: string;
+};
+
+export async function runVerifyTuple(ctx: LifecycleTupleCtx): Promise<void> {
+  return handleVerifyJobForTuple(
+    ctx.deps,
+    ctx.sessions,
+    ctx.job,
+    ctx.parentCid,
+    [ctx.profile],
+  );
+}
+
+export async function runFetchTrackingTuple(
+  ctx: LifecycleTupleCtx,
+): Promise<void> {
+  return handleFetchTrackingJobForTuple(
+    ctx.deps,
+    ctx.sessions,
+    ctx.job,
+    ctx.parentCid,
+    [ctx.profile],
   );
 }

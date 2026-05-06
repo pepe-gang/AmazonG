@@ -1209,6 +1209,10 @@ async function handleJob(
  *   cancelled  → 'cancelled' (BG flips the original buy purchase row)
  *   timeout    → 'failed'    (BG keeps retrying / leaves as-is)
  */
+// Re-exported under a tuple-shaped alias so runners.ts can import without
+// circular-import warnings. Same body, same arguments.
+export { handleVerifyJob as handleVerifyJobForTuple };
+
 async function handleVerifyJob(
   deps: Deps,
   sessions: Map<string, DriverSession>,
@@ -1578,6 +1582,8 @@ async function handleVerifyJob(
  *   retry        → BG 'pending_tracking'; local 'verified' (transient verify fail)
  *   cancelled    → BG 'cancelled'; local 'cancelled_by_amazon'
  */
+export { handleFetchTrackingJob as handleFetchTrackingJobForTuple };
+
 async function handleFetchTrackingJob(
   deps: Deps,
   sessions: Map<string, DriverSession>,
