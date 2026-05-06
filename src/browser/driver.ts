@@ -148,13 +148,29 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     // Media extensions
     '*.mp4*', '*.webm*', '*.mp3*', '*.wav*', '*.ogg*', '*.m3u8*',
     // Telemetry / ad-system hosts (full URL globs; CDP `*` matches any
-    // chars including slashes)
+    // chars including slashes). All empirically verified to not feed
+    // buy-box DOM and not serve JS to the page.
     '*://fls-na.amazon.com/*',
     '*://unagi.amazon.com/*',
+    '*://unagi-na.amazon.com/*',                    // NA-region telemetry (~299ms)
     '*://aax-us-iad.amazon.com/*',
+    '*://aax-us-east-retail-direct.amazon.com/*',   // ad auction
     '*://dtm.amazon.com/*',
     '*://cs.amazon.com/*',
     '*://aax.amazon-adsystem.com/*',
+    '*://s.amazon-adsystem.com/*',                  // display ads (~427ms)
+    '*://ara.paa-reporting-advertising.amazon/*',   // ad reporting (~207ms)
+    '*://pagead2.googlesyndication.com/*',          // Google ads
+    '*://d2lbyuknrhysf9.cloudfront.net/*',          // ad-asset CloudFront
+    // In-page widgets that fire on PDP (verified empirically) and never
+    // feed buy-box DOM. Skipped here (suspect for filler-mode /spc
+    // regression — investigate separately):
+    //   - cross_border_interstitial_sp/render (FIRES ON /spc per probe)
+    //   - cart/ewc/* (mini-cart preview)
+    //   - cart/add-to-cart/patc-template* + get-cart-items* (cart widgets)
+    '*://www.amazon.com/rufus/cl/*',                // Rufus AI chat (~850ms)
+    '*://www.amazon.com/dram/renderLazyLoaded*',    // recommendations (~630ms)
+    '*://www.amazon.com/acp/cr-media-carousel/*',   // review images
   ];
   let blockedTotal = 0;
   const attachCdpBlocking = async (page: Page): Promise<void> => {
