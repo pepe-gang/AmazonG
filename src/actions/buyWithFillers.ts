@@ -32,7 +32,6 @@ import { parsePrice } from '../parsers/amazonProduct.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import type { ProductInfo } from '../shared/types.js';
 import {
-  AMAZON_US_MERCHANT_ID,
   CART_ADD_CLIENT_NAME,
   CART_ADD_URL,
   HTTP_BROWSERY_HEADERS,
@@ -2076,16 +2075,18 @@ async function searchFillerCandidatesViaHttp(
   const all = extractSearchResultCandidates(doc);
   return all.filter((c) => {
     if (!c.isPrime) return false;
-    // "Sold by Amazon.com" gate. `p_6:ATVPDKIKX0DER` URL filter is
-    // a bin-level pre-filter that includes any listing where Amazon
-    // is one of multiple sellers — buy-box can still route to a 3p
-    // seller. The card's hidden `merchantId` input identifies the
-    // buy-box winner; only that being equal to Amazon US's merchant
-    // id guarantees "Sold by Amazon and shipped from Amazon", which
-    // the user requires for clean cancellation flow. (3p Prime via
-    // Seller Fulfilled Prime would slip through a Prime-only filter
-    // — the merchantId check excludes those too.)
-    if (c.merchantId !== AMAZON_US_MERCHANT_ID) return false;
+    // Sold-by-Amazon hard gate (commit 2f13ee2, 2026-05-05) was
+    // dropping ~73% of Prime candidates per term. With 8 fillers
+    // needed and many terms returning 0 post-filter, the for-loop
+    // ran out of terms before accumulating enough — committed
+    // counts of 2-4 became common, hitting MIN_FILLERS_FOR_COVER.
+    // Reverted 2026-05-06: keep the URL pre-filter
+    // (`p_6:ATVPDKIKX0DER`) which biases toward Amazon-fulfilled
+    // listings, but no longer require buy-box winner == Amazon US.
+    // FBA / Seller Fulfilled Prime items still cancel cleanly via
+    // Amazon's pre-ship cancel sweep in 99% of cases; the rare
+    // 3p-stall is preferable to repeated rebuy failures with empty
+    // carts.
     if (c.price === null) return false;
     if (c.price < FILLER_MIN_PRICE) return false;
     if (c.price > FILLER_MAX_PRICE) return false;
