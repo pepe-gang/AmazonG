@@ -98,6 +98,124 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     }
   });
 
+  // Block heavy resources Amazon ships on every PDP / /spc / cart nav
+  // that AmazonG never reads:
+  //   - image (PNG/JPEG/WebP/GIF): ~50-200 product+rec thumbnails per page
+  //   - font: Amazon Ember web fonts (~200KB across weights)
+  //   - media: video/audio (never autoplayed in checkout)
+  //   - telemetry / ad-system hosts (fls-na, unagi, aax-us-iad, dtm,
+  //     cs.amazon.com, aax.amazon-adsystem) — fire-and-forget beacons +
+  //     XHRs. Empirically verified (2026-05-05) to never serve JS to the
+  //     page and to never feed buy-box DOM.
+  //
+  // Implementation note (CDP migration, see pass-5 research doc):
+  // Previously this used context.route('**/*', cb) which IPCs Node↔
+  // Chromium per request — every one of ~250+ sub-resources per PDP
+  // pays ~1-3ms each, even passes through. CDP Network.setBlockedURLs
+  // configures Chromium's network layer ONCE; matching URLs drop
+  // pre-renderer with zero per-request IPC. Saves ~500-2000ms per
+  // PDP nav on top of the bandwidth/render savings the block intent
+  // already provides.
+  //
+  // SVGs are passed through (no .svg pattern). Buy-box layout is
+  // CSS-driven; runtimeVisibilityChecks reads getBoundingClientRect /
+  // getComputedStyle which don't depend on image-derived layout. Prime
+  // badges (#prime-badge .a-icon-prime) use a background-image sprite
+  // that gets blocked here — the <i> element still has its CSS-defined
+  // 53×15px box, so isVisible() still returns true. Empirically
+  // verified on iPad B0DZ751XN6 + Echo Spot B0BFC7WQ6R.
+  //
+  // Only browser-page requests pass through CDP. The ctx.request HTTP-
+  // only paths (clearCart, search, cart-add, verify, ship-track) use
+  // APIRequestContext, a separate request infrastructure that bypasses
+  // page-level interception entirely.
+  //
+  // Per-category counters (blockedImages/Fonts/Media/Hosts) were
+  // dropped: the only CDP event carrying URLs is requestWillBeSent,
+  // which fires for every request and re-introduces the per-request
+  // IPC cost the migration eliminates. We track total blocks via
+  // loadingFailed (fires only on blocked + actually-failed requests,
+  // ~100/PDP — affordable). For deeper diagnostics, re-enable the
+  // requestWillBeSent listener temporarily.
+  const BLOCKED_URL_PATTERNS = [
+    // Image extensions (covers query-string variants via trailing *).
+    // SVG intentionally absent — keeps semantic icons available for
+    // any DOM element that depends on them. (Buy-box doesn't, but
+    // future-proofing this is cheap.)
+    '*.png*', '*.jpg*', '*.jpeg*', '*.webp*', '*.gif*', '*.bmp*', '*.ico*',
+    // Font extensions
+    '*.woff*', '*.ttf*', '*.otf*', '*.eot*',
+    // Media extensions
+    '*.mp4*', '*.webm*', '*.mp3*', '*.wav*', '*.ogg*', '*.m3u8*',
+    // Telemetry / ad-system hosts (full URL globs; CDP `*` matches any
+    // chars including slashes). All empirically verified to not feed
+    // buy-box DOM and not serve JS to the page.
+    '*://fls-na.amazon.com/*',
+    '*://unagi.amazon.com/*',
+    '*://unagi-na.amazon.com/*',                    // NA-region telemetry (~299ms)
+    '*://aax-us-iad.amazon.com/*',
+    '*://aax-us-east-retail-direct.amazon.com/*',   // ad auction
+    '*://dtm.amazon.com/*',
+    '*://cs.amazon.com/*',
+    '*://aax.amazon-adsystem.com/*',
+    '*://s.amazon-adsystem.com/*',                  // display ads (~427ms)
+    '*://ara.paa-reporting-advertising.amazon/*',   // ad reporting (~207ms)
+    '*://pagead2.googlesyndication.com/*',          // Google ads
+    '*://d2lbyuknrhysf9.cloudfront.net/*',          // ad-asset CloudFront
+    // In-page widgets that fire on PDP and never feed buy-box DOM.
+    '*://www.amazon.com/rufus/cl/*',                // Rufus AI chat (~850ms)
+    '*://www.amazon.com/dram/renderLazyLoaded*',    // recommendations (~630ms)
+    '*://www.amazon.com/acp/cr-media-carousel/*',   // review images
+    // Cart-widget paths fire on PDP only (verified MCP probe — not on
+    // /spc). Different subpath from our HTTP-only POST
+    // /cart/add-to-cart/ref=... (which uses APIRequestContext and
+    // bypasses CDP regardless).
+    '*://www.amazon.com/cart/ewc/*',                       // mini-cart preview (~608ms)
+    '*://www.amazon.com/cart/add-to-cart/patc-template*',  // added-to-cart animation (~166ms)
+    '*://www.amazon.com/cart/add-to-cart/get-cart-items*', // cart-fetch widget (~161ms)
+    // /spc-side widget. Fires unconditionally on every /spc load (~250ms).
+    // Bisect-suspected for the filler-mode Place-Order 500: when blocked
+    // via CDP, Chromium returns net::ERR_BLOCKED_BY_CLIENT to the page's
+    // JS, which may break a checkout-init handler that the cart-based
+    // /spc entry path depends on (single-mode /spc enters differently
+    // and does not regress).
+    // If this re-introduces the regression, revert THIS COMMIT only —
+    // the rest of the blocklist is verified safe. If it doesn't, all
+    // 13 originally-shipped path-blocks are recovered.
+    '*://www.amazon.com/cross_border_interstitial_sp/render*',
+  ];
+  let blockedTotal = 0;
+  const attachCdpBlocking = async (page: Page): Promise<void> => {
+    try {
+      const cdp = await context.newCDPSession(page);
+      await cdp.send('Network.enable');
+      await cdp.send('Network.setBlockedURLs', { urls: BLOCKED_URL_PATTERNS });
+      cdp.on('Network.loadingFailed', (ev) => {
+        if (ev.errorText === 'net::ERR_BLOCKED_BY_CLIENT') {
+          blockedTotal++;
+        }
+      });
+    } catch (err) {
+      // CDP attach failed — page loads normally without blocking.
+      // Worst case: more CPU/bandwidth used, no functional break.
+      // Logged once per failed page so production traffic surfaces it.
+      logger.warn('driver.cdp.block.attach.failed', {
+        profile,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+  // Attach to every page that exists OR is created in this context.
+  // The 'page' event fires for newPage() AND popup-opened tabs but NOT
+  // for the initial about:blank that launchPersistentContext spawns —
+  // so we attach to current pages explicitly + listen for future ones.
+  for (const p of context.pages()) {
+    void attachCdpBlocking(p);
+  }
+  context.on('page', (p) => {
+    void attachCdpBlocking(p);
+  });
+
   // Playwright's launchPersistentContext always boots with a single
   // about:blank tab. Headless mode never shows it, but in headed
   // mode every work tab the worker opens sits next to a stranded
@@ -179,7 +297,11 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
           note: 'context.close() did not complete within budget; window may linger',
         });
       } else {
-        logger.info('session.close.ok', { profile, durationMs: Date.now() - t0 });
+        logger.info('session.close.ok', {
+          profile,
+          durationMs: Date.now() - t0,
+          blockedTotal,
+        });
       }
     },
   };

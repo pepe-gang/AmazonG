@@ -32,6 +32,7 @@ import { parsePrice } from '../parsers/amazonProduct.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import type { ProductInfo } from '../shared/types.js';
 import {
+  AMAZON_US_MERCHANT_ID,
   CART_ADD_CLIENT_NAME,
   CART_ADD_URL,
   HTTP_BROWSERY_HEADERS,
@@ -611,7 +612,10 @@ export async function buyWithFillers(
   //    waitForSpcOrHandleByg. Worst case: same wall-clock as before.
   let usedShortcut = false;
   try {
-    await page.goto(SPC_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // 'commit' = ~50ms vs ~300ms for DCL. Next op (page.url() check)
+    // works at commit; downstream waitForCheckout polls for the Place
+    // Order button.
+    await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
   } catch (err) {
     return {
       ok: false,
@@ -640,7 +644,7 @@ export async function buyWithFillers(
       cid,
     );
     try {
-      await page.goto(CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.goto(CART_URL, { waitUntil: 'commit', timeout: 30_000 });
     } catch (err) {
       return {
         ok: false,
@@ -820,9 +824,10 @@ export async function buyWithFillers(
       { changes: delivery.changes },
       cid,
     );
-    // Let the page settle — Amazon re-renders totals + cashback banner
-    // after a delivery radio click.
-    await page.waitForTimeout(1_500);
+    // Wait for the eligibleshipoption XHR to complete + 200ms post-
+    // settle. Replaces a blind 1500ms wait — typical XHR returns in
+    // ~1s, saving ~300ms; cap at 2.5s for slow networks.
+    await waitForDeliverySettle(page);
   } else {
     logger.info(
       'step.fillerBuy.spc.delivery.nochange',
@@ -964,7 +969,7 @@ export async function buyWithFillers(
           { changes: redelivery.changes },
           cid,
         );
-        await page.waitForTimeout(1_500);
+        await waitForDeliverySettle(page);
       }
 
       // Re-verify target cashback on the newly-rendered /spc. We ignore
@@ -1342,7 +1347,7 @@ async function fetchOrderIdsForAsins(
   try {
     await page.goto(
       'https://www.amazon.com/gp/css/order-history?ref_=nav_AccountFlyout_orders',
-      { waitUntil: 'domcontentloaded', timeout: 30_000 },
+      { waitUntil: 'commit', timeout: 30_000 },
     );
   } catch {
     return [];
@@ -1905,6 +1910,34 @@ async function verifyTargetLineItemPrice(
   return { ok: true, priceText: hit.text, price: n };
 }
 
+/**
+ * After clicking a delivery-option radio on /spc, wait for Amazon's
+ * `eligibleshipoption` XHR to complete + a 200ms post-settle before
+ * reading the updated cashback. The XHR refreshes totals + cashback
+ * banner; the 200ms post-settle covers the rare "6%→5% strip" case
+ * where Amazon briefly shows 6% then re-renders to 5% milliseconds
+ * later (INC-2026-05-05 — the iPad-no-Amazon-day fixture).
+ *
+ * Cap at 2.5s. Typical XHRs return in 800-1200ms; the cap prevents a
+ * stuck network from blocking the caller indefinitely. On timeout we
+ * still post-settle and return — downstream cashback gate reads
+ * whatever rendered, same fallback as the blind 1500ms wait this
+ * helper replaced.
+ *
+ * URL pattern verified stable across saved /spc fixtures (per
+ * docs/research/amazon-pipeline.md). Pipeline param distinguishes
+ * Chewbacca SPC from legacy SPC; both write to the same path.
+ */
+export async function waitForDeliverySettle(page: Page): Promise<void> {
+  await page
+    .waitForResponse(
+      (resp) => /eligibleshipoption/i.test(resp.url()) && resp.ok(),
+      { timeout: 2_500 },
+    )
+    .catch(() => undefined);
+  await page.waitForTimeout(200);
+}
+
 function shuffle<T>(arr: readonly T[]): T[] {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -1918,10 +1951,21 @@ function shuffle<T>(arr: readonly T[]): T[] {
 }
 
 function buildFillerSearchUrl(term: string): string {
-  // p_85:2470955011 = Prime-eligible; p_36:low-high = price in cents
+  // Search filters (Amazon's `rh=` syntax, comma-joined):
+  //   p_85:2470955011  — Prime-eligible
+  //   p_6:ATVPDKIKX0DER — sold by Amazon.com (Amazon's US merchant id);
+  //                        restricts to "Ships from and sold by Amazon"
+  //                        OR "Ships from Amazon" (FBA where Amazon is
+  //                        the seller). 3rd-party-sold listings filtered
+  //                        out, which keeps cancellation flow clean —
+  //                        Amazon-direct cancels are predictable; 3p
+  //                        cancels can stall behind merchant approval.
+  //   p_36:low-high     — price in cents
   const minCents = Math.round(FILLER_MIN_PRICE * 100);
   const maxCents = Math.round(FILLER_MAX_PRICE * 100);
-  const rh = encodeURIComponent(`p_85:2470955011,p_36:${minCents}-${maxCents}`);
+  const rh = encodeURIComponent(
+    `p_85:2470955011,p_6:ATVPDKIKX0DER,p_36:${minCents}-${maxCents}`,
+  );
   return `https://www.amazon.com/s?k=${encodeURIComponent(term)}&rh=${rh}&s=review-rank`;
 }
 
@@ -1964,6 +2008,16 @@ async function searchFillerCandidatesViaHttp(
   const all = extractSearchResultCandidates(doc);
   return all.filter((c) => {
     if (!c.isPrime) return false;
+    // "Sold by Amazon.com" gate. `p_6:ATVPDKIKX0DER` URL filter is
+    // a bin-level pre-filter that includes any listing where Amazon
+    // is one of multiple sellers — buy-box can still route to a 3p
+    // seller. The card's hidden `merchantId` input identifies the
+    // buy-box winner; only that being equal to Amazon US's merchant
+    // id guarantees "Sold by Amazon and shipped from Amazon", which
+    // the user requires for clean cancellation flow. (3p Prime via
+    // Seller Fulfilled Prime would slip through a Prime-only filter
+    // — the merchantId check excludes those too.)
+    if (c.merchantId !== AMAZON_US_MERCHANT_ID) return false;
     if (c.price === null) return false;
     if (c.price < FILLER_MIN_PRICE) return false;
     if (c.price > FILLER_MAX_PRICE) return false;

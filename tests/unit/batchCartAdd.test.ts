@@ -79,6 +79,7 @@ describe('extractSearchResultCandidates', () => {
       csrf: 'hCw4ZUkLdDsl7hLY+rdfAY1zwkqX4J',
       price: 24.99,
       isPrime: true,
+      merchantId: 'ATVPDKIKX0DER',
     });
   });
 

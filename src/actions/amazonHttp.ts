@@ -124,6 +124,22 @@ export function extractCartAddTokens(doc: Document): CartAddTokens | null {
 }
 
 /**
+ * Amazon US's merchant id, hardcoded into every search card's
+ * `<input name="merchantId">` when Amazon (not a 3p seller) wins
+ * the buy-box for that listing. Used to filter fillers down to
+ * "Sold by Amazon.com" only — guarantees Amazon is both seller and
+ * fulfiller, which keeps cancellation deterministic (Amazon-direct
+ * cancels are immediate; 3p cancels can stall behind merchant
+ * approval).
+ *
+ * The same id is used in URL filters as `p_6:ATVPDKIKX0DER`, but
+ * that's a "any-offer-from-Amazon" bin filter — buy-box can still
+ * route to a 3p seller. The per-card `merchantId` is the precise
+ * buy-box-winner check.
+ */
+export const AMAZON_US_MERCHANT_ID = 'ATVPDKIKX0DER';
+
+/**
  * Cart-add candidate harvested from a search-result card. Each Amazon
  * search-result `<form>` already carries `anti-csrftoken-a2z` +
  * `items[0.base][offerListingId]` + `items[0.base][asin]` (verified live
@@ -145,6 +161,11 @@ export type SearchResultCandidate = {
    *  listings, but caller may double-check for resilience to Amazon
    *  drift. */
   isPrime: boolean;
+  /** Buy-box winner's merchant id from the card's `<input name=
+   *  "merchantId">`. Null when the field is absent (rare; treat as
+   *  "unknown — exclude" when filtering for Amazon-sold). Equal to
+   *  `AMAZON_US_MERCHANT_ID` for "Sold by Amazon" listings. */
+  merchantId: string | null;
 };
 
 /**
@@ -191,7 +212,11 @@ export function extractSearchResultCandidates(doc: Document): SearchResultCandid
       card.querySelector('[aria-label*="Prime"]') !== null ||
       card.innerHTML.includes('a-icon-prime');
 
-    out.push({ asin, offerListingId, csrf, price, isPrime });
+    const merchantId =
+      (form.querySelector('input[name="merchantId"]') as HTMLInputElement | null)
+        ?.value ?? null;
+
+    out.push({ asin, offerListingId, csrf, price, isPrime, merchantId });
   });
   return out;
 }

@@ -14,7 +14,7 @@ import { effectivePriceTolerance } from '../parsers/productConstraints.js';
 import type { BuyResult } from '../shared/types.js';
 import { evaluateCashbackGate } from '../shared/cashbackGate.js';
 import { clearCart, type ClearCartResult } from './clearCart.js';
-import { addFillerViaHttp } from './buyWithFillers.js';
+import { addFillerViaHttp, waitForDeliverySettle } from './buyWithFillers.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import { SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHttp.js';
 
@@ -163,6 +163,15 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     step('step.buy.path', { path });
 
     if (path === 'buy-now') {
+      // Buy-now-click bypasses the cart entirely, so any inflight
+      // preflightCleared from pollAndScrape is unused. Drain its
+      // promise so a rejection (rare — bot challenge, csrf rotation)
+      // doesn't surface as an unhandled rejection. pollAndScrape now
+      // gates preflight on useFillers, so this is normally a no-op
+      // belt-and-suspenders for any future caller that passes one.
+      if (opts.preflightCleared) {
+        void opts.preflightCleared.catch(() => undefined);
+      }
       step('step.buy.click', { button: 'buy-now' });
       try {
         await page.locator('#buy-now-button').first().click({ timeout: 10_000 });
@@ -212,7 +221,10 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
             quantity: placedQuantity,
           });
           try {
-            await page.goto(SPC_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+            // 'commit' = ~50ms vs ~300ms for DCL. Next op (page.url() check)
+            // works at commit; downstream waitForCheckout polls for the
+            // Place Order button.
+            await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
           } catch (err) {
             warn('step.buy.spc.shortcut.gotoErr', { error: String(err).slice(0, 120) });
           }
@@ -309,10 +321,10 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     const delivery = await pickBestCashbackDelivery(page, opts.minCashbackPct);
     if (delivery.changes.length > 0) {
       step('step.checkout.delivery.picked', { changes: delivery.changes });
-      // Let the page settle after the radio click — Amazon re-renders the
-      // total + cashback banner and sometimes re-evaluates "place order"
-      // button state after delivery updates.
-      await page.waitForTimeout(1_500);
+      // Wait for the eligibleshipoption XHR + 200ms post-settle (covers
+      // the 6%→5% strip race). Replaces a blind 1500ms wait — typical
+      // XHR ~1s, saving ~300ms.
+      await waitForDeliverySettle(page);
     } else {
       step('step.checkout.delivery.nochange', {
         note: 'default delivery already optimal (or no options found)',
@@ -592,7 +604,9 @@ async function addToCartThenCheckout(
   await page.waitForLoadState('domcontentloaded', { timeout: 8_000 }).catch(() => undefined);
 
   try {
-    await page.goto(ATC_CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // 'commit' = ~50ms vs ~300ms for DCL. Next op is a Playwright
+    // locator click which polls for visibility internally.
+    await page.goto(ATC_CART_URL, { waitUntil: 'commit', timeout: 30_000 });
   } catch (err) {
     return { ok: false, reason: 'failed to load cart page', detail: String(err) };
   }
@@ -1971,14 +1985,32 @@ export async function setMaxQuantity(
 }
 
 export async function findPlaceOrderLocator(page: Page) {
-  for (const sel of CHECKOUT_PLACE_SELECTORS) {
-    const loc = page.locator(sel).first();
-    if ((await loc.count()) > 0) return loc;
+  // Walk every CSS selector in one browser-side evaluate instead of
+  // 9 sequential `await loc.count()` calls (each is a CDP round-trip
+  // costing ~5-15ms; cumulatively ~50-150ms before this consolidation).
+  // Browser-side `document.querySelector` resolves identically to
+  // Playwright's locator-count check for these selectors.
+  const matchedIdx = await page
+    .evaluate(
+      (selectors) => {
+        for (let i = 0; i < selectors.length; i++) {
+          if (document.querySelector(selectors[i])) return i;
+        }
+        return -1;
+      },
+      CHECKOUT_PLACE_SELECTORS as unknown as string[],
+    )
+    .catch(() => -1);
+  if (matchedIdx >= 0) {
+    const sel = CHECKOUT_PLACE_SELECTORS[matchedIdx];
+    if (sel) return page.locator(sel).first();
   }
   // Text fallback — mirrors waitForCheckout's detector. Picks any
   // visible interactive element whose label matches "Place your order".
   // Uses Playwright's role+name locator so auto-waiting + actionability
-  // checks still apply at click time.
+  // checks still apply at click time. These two probes can't be folded
+  // into the evaluate above — they use Playwright's role/text engines,
+  // not raw document.querySelector.
   const roleLoc = page.getByRole('button', { name: PLACE_ORDER_LABEL_RE }).first();
   if ((await roleLoc.count()) > 0) return roleLoc;
   const inputLoc = page
