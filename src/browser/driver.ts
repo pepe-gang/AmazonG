@@ -162,12 +162,7 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     '*://ara.paa-reporting-advertising.amazon/*',   // ad reporting (~207ms)
     '*://pagead2.googlesyndication.com/*',          // Google ads
     '*://d2lbyuknrhysf9.cloudfront.net/*',          // ad-asset CloudFront
-    // In-page widgets that fire on PDP (verified empirically) and never
-    // feed buy-box DOM. cross_border_interstitial_sp/render skipped —
-    // it's the only widget that empirically FIRES ON /spc in the MCP
-    // probe; suspected as the cause of the filler-mode /spc regression
-    // that bisect ruled out 9 other safe patterns from. Investigate
-    // separately if we want to recover that ~250ms.
+    // In-page widgets that fire on PDP and never feed buy-box DOM.
     '*://www.amazon.com/rufus/cl/*',                // Rufus AI chat (~850ms)
     '*://www.amazon.com/dram/renderLazyLoaded*',    // recommendations (~630ms)
     '*://www.amazon.com/acp/cr-media-carousel/*',   // review images
@@ -178,6 +173,16 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     '*://www.amazon.com/cart/ewc/*',                       // mini-cart preview (~608ms)
     '*://www.amazon.com/cart/add-to-cart/patc-template*',  // added-to-cart animation (~166ms)
     '*://www.amazon.com/cart/add-to-cart/get-cart-items*', // cart-fetch widget (~161ms)
+    // /spc-side widget. Fires unconditionally on every /spc load (~250ms).
+    // Bisect-suspected for the filler-mode Place-Order 500: when blocked
+    // via CDP, Chromium returns net::ERR_BLOCKED_BY_CLIENT to the page's
+    // JS, which may break a checkout-init handler that the cart-based
+    // /spc entry path depends on (single-mode /spc enters differently
+    // and does not regress).
+    // If this re-introduces the regression, revert THIS COMMIT only —
+    // the rest of the blocklist is verified safe. If it doesn't, all
+    // 13 originally-shipped path-blocks are recovered.
+    '*://www.amazon.com/cross_border_interstitial_sp/render*',
   ];
   let blockedTotal = 0;
   const attachCdpBlocking = async (page: Page): Promise<void> => {
