@@ -181,7 +181,20 @@ export async function cancelNonTargetItems(
       if (firstRadio && !firstRadio.checked) firstRadio.click();
     })
     .catch(() => undefined);
-  await page.waitForTimeout(500);
+  // Wait until the submit button actually enables instead of guessing
+  // 500ms. Same fix as cancelFillerOrder.ts post-reason-pick.
+  await page
+    .waitForFunction(
+      () => {
+        const submit = document.querySelector(
+          'input[name*="cancel" i][type="submit"]:not([disabled]), button[name*="cancel" i]:not([disabled])',
+        );
+        return !!submit;
+      },
+      undefined,
+      { timeout: 2_000 },
+    )
+    .catch(() => undefined);
 
   const submitted = await clickRequestCancellation(page);
   if (!submitted.clicked) {

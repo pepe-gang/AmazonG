@@ -24,8 +24,14 @@ export async function openCancelPage(
   orderId: string,
 ): Promise<OpenCancelPageResult> {
   try {
+    // 'commit' returns at TCP commit (~50ms) instead of DCL (~500-2000ms).
+    // The waitForFunction below is the actual readiness gate — it polls
+    // for the cancel form's checkbox + submit button at RAF cadence
+    // (~16ms) so we proceed as soon as the form is genuinely usable
+    // instead of guessing. Saves ~750ms per cancel vs the old
+    // DCL+1500ms-blind combo. Same pattern as scrapeProduct.ts:196.
     await page.goto(CANCEL_URL(orderId), {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'commit',
       timeout: 30_000,
     });
   } catch (err) {
@@ -36,8 +42,35 @@ export async function openCancelPage(
     };
   }
 
-  // Give the cancel form's React/a-declarative bits time to hydrate.
-  await page.waitForTimeout(1_500);
+  // Wait for the cancel form to actually be interactable: a primary form
+  // (action contains "cancel" OR has itemId/orderItem inputs) with at
+  // least one visible checkbox AND a submit/cancel button. 10s ceiling
+  // covers pathological hydration; typical cases resolve in 200-500ms.
+  // If this URL was going to redirect away (already-cancelled / shipped),
+  // the predicate never matches and we time out — the post-wait URL
+  // check below catches it as "not on cancel-items page".
+  await page
+    .waitForFunction(
+      () => {
+        const forms = Array.from(document.querySelectorAll('form'));
+        const primary = forms.find(
+          (f) =>
+            /cancel/i.test(f.getAttribute('action') || '') ||
+            f.querySelector('input[name*="itemId" i], input[name*="orderItem" i]'),
+        );
+        if (!primary) return false;
+        const cb = primary.querySelector(
+          'input[type="checkbox"]:not([disabled])',
+        );
+        const submit = primary.querySelector(
+          'input[name*="cancel" i][type="submit"], button[name*="cancel" i]',
+        );
+        return !!cb && !!submit;
+      },
+      undefined,
+      { timeout: 10_000 },
+    )
+    .catch(() => undefined);
 
   const here = page.url();
   if (!/cancel-items/i.test(here)) {
@@ -177,6 +210,9 @@ export async function waitForCancelOutcome(page: Page): Promise<void> {
   await page.waitForLoadState('domcontentloaded').catch(() => undefined);
 
   // 3. Poll for the visible outcome banner — handles inline rerenders.
+  //    Default polling is RAF (~16ms); banners typically appear ~50ms
+  //    after the response settles, so an explicit `polling: 500` was
+  //    making us wait up to 500ms before the first check. Removed.
   await page
     .waitForFunction(
       () => {
@@ -186,7 +222,7 @@ export async function waitForCancelOutcome(page: Page): Promise<void> {
         return refused.test(body) || ok.test(body);
       },
       undefined,
-      { timeout: 15_000, polling: 500 },
+      { timeout: 15_000 },
     )
     .catch(() => undefined);
 
@@ -195,6 +231,15 @@ export async function waitForCancelOutcome(page: Page): Promise<void> {
   //    banner renders, and tearing the page down mid-beacon has been
   //    observed to invalidate the cancel server-side). Short timeout
   //    so we don't hang on long-poll connections.
+  //
+  // TODO(perf-pass-9): the 5s timeout almost always maxes out per pass-9
+  // audit because Amazon's telemetry beacons keep firing — net 5s tax
+  // per cancel. Pass 9 recommended dropping this entirely on the basis
+  // that the response/nav promises drained at step 1 are the load-
+  // bearing signal, but the comment above documents a real bug this
+  // wait was added to prevent. Decision deferred until we have post-
+  // telemetry-fix production data showing whether cancels regress
+  // when this is removed/shortened. See pass-9 §1 + pass-18 §2.
   await page
     .waitForLoadState('networkidle', { timeout: 5_000 })
     .catch(() => undefined);

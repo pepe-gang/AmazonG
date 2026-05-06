@@ -136,9 +136,22 @@ export async function cancelFillerOrder(
       { via: reasonChosen.via, text: reasonChosen.text },
       cid,
     );
-    // Give the form a beat to react to the change (some Amazon forms
-    // enable the submit button only after a reason is picked).
-    await page.waitForTimeout(500);
+    // Wait until the submit button actually enables instead of guessing
+    // 500ms. Amazon's reason-required forms toggle disabled→enabled in
+    // ~50-200ms after the change event; the 2s ceiling covers any
+    // pathological hydration delay.
+    await page
+      .waitForFunction(
+        () => {
+          const submit = document.querySelector(
+            'input[name*="cancel" i][type="submit"]:not([disabled]), button[name*="cancel" i]:not([disabled])',
+          );
+          return !!submit;
+        },
+        undefined,
+        { timeout: 2_000 },
+      )
+      .catch(() => undefined);
   }
 
   const submitted = await clickRequestCancellation(page);
