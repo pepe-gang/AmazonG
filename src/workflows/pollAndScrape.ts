@@ -686,15 +686,17 @@ export function startWorker(deps: Deps): WorkerHandle {
       };
     }
 
-    // Buy phase — replicate handleJob's filter:
+    // Buy phase — replicate handleJob's filter + per-account overrides
+    // (lines 1004-1036 below) so streaming and legacy behave identically:
     //   1. enabled profiles only (rebuy path scopes to placedEmail)
-    //   2. per-account overrides from BG (fillerByEmail / effective
-    //      min cashback / requireMinCashback) — handleJob fetches these
-    //      from `bg.getAccountOverrides`. The streaming-scheduler
-    //      v1 ships with the legacy path's plain defaults (no per-
-    //      account override fetch). Per-account overrides will be
-    //      added in a follow-up; documented in the scheduler's TODO
-    //      comments below.
+    //   2. fillerByEmail from `shouldUseFillers(deps.buyWithFillers,
+    //      profile, job.viaFiller)` — same per-profile decision as
+    //      legacy
+    //   3. requireMinByEmail from BG's listAmazonAccounts (one HTTP
+    //      call per claim — same as legacy)
+    //   4. effectiveMinByEmail derived from per-account requireMinCashback
+    //      AND-combined with job.requireMinCashback (same gate logic
+    //      as pollAndScrape.ts:1029-1036)
     let eligible = eligibleAll.filter((p) => p.enabled);
     if (job.placedEmail) {
       const t = job.placedEmail.toLowerCase();
@@ -705,15 +707,46 @@ export function startWorker(deps: Deps): WorkerHandle {
       wheyProteinFillerOnly: false,
       streamingScheduler: true,
     }));
+
+    // Per-profile filler decision — same as handleJob:1004-1009.
+    const fillerByEmail = new Map<string, boolean>(
+      eligible.map((p) => [
+        p.email,
+        shouldUseFillers(deps.buyWithFillers, p, job.viaFiller),
+      ]),
+    );
+
+    // Per-Amazon-account requireMinCashback overrides from BG. Same
+    // call + fallback as handleJob:1015-1025. On failure we default
+    // to gate-enforced so a BG outage can't silently skip the gate.
+    const accountOverrides = await deps.bg.listAmazonAccounts().catch(() => ({
+      accounts: [] as Array<{ email: string; requireMinCashback: boolean }>,
+      bgAccounts: [],
+    }));
+    const requireMinByEmail = new Map<string, boolean>(
+      accountOverrides.accounts.map((a) => [
+        a.email.toLowerCase(),
+        a.requireMinCashback,
+      ]),
+    );
+
+    // Per-job override AND-combines with the per-account flag — same
+    // logic as handleJob:1029-1036. Either side saying "skip" means skip.
+    const jobRequiresMinCashback = job.requireMinCashback !== false;
+    const effectiveMinByEmail = new Map<string, number>(
+      eligible.map((p) => {
+        const accountRequires =
+          requireMinByEmail.get(p.email.toLowerCase()) ?? true;
+        const enforce = accountRequires && jobRequiresMinCashback;
+        return [p.email, enforce ? deps.minCashbackPct : 0];
+      }),
+    );
+
     return {
       eligible,
-      // TODO(streaming-v2): per-account overrides via bg.getAccountOverrides.
-      // Today's handleJob fetches them at lines 902-919; we'd thread the
-      // same call through here for parity. v1 uses defaults — same as a
-      // fresh deploy with no per-account customizations.
-      fillerByEmail: new Map<string, boolean>(),
-      effectiveMinByEmail: new Map<string, number>(),
-      requireMinByEmail: new Map<string, boolean>(),
+      fillerByEmail,
+      effectiveMinByEmail,
+      requireMinByEmail,
       wheyProteinFillerOnly: parallelism.wheyProteinFillerOnly,
     };
   };
