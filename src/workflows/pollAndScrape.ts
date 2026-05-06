@@ -551,11 +551,23 @@ async function runFillerBuyWithRetries(
       }
       break;
     }
-    // Only retry when the failure is specifically a cashback_gate miss.
+    // Retry on:
+    //   - cashback_gate: target's /spc reading was below the floor;
+    //     retrying with a different filler set produces a new shipping-
+    //     group fan-out, so a different cashback rate is plausible.
+    //   - fillers_below_floor: search/cart-add was throttled and we
+    //     bailed out before placing a naked-cart order. Common during
+    //     rebuys on accounts that just hit /checkout/cancel-order.
+    //     Throttling clears in a few minutes; retry costs ~60-80s and
+    //     usually recovers.
     // Any other stage (item_unavailable, buy_now_click, checkout_address,
     // etc.) points at account or product state that a rerun won't fix —
     // cheaper to bail out than to burn another ~60–80s per attempt.
-    if (lastRaw.stage !== 'cashback_gate') break;
+    if (
+      lastRaw.stage !== 'cashback_gate' &&
+      lastRaw.stage !== 'fillers_below_floor'
+    )
+      break;
     if (attempt >= FILLER_MAX_ATTEMPTS) {
       logger.warn(
         'step.fillerBuy.retryWhole.exhausted',
