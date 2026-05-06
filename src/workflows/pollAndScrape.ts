@@ -38,6 +38,7 @@ export type JobAttemptStore = {
   update(
     attemptId: string,
     patch: Partial<Omit<JobAttempt, 'attemptId' | 'jobId' | 'amazonEmail' | 'createdAt'>>,
+    opts?: { forceFlush?: boolean },
   ): Promise<JobAttempt | null>;
   get(attemptId: string): Promise<JobAttempt | null>;
 };
@@ -2155,8 +2156,16 @@ async function runForProfile(
     // sweep can tell "stopped in a safe re-runnable phase" from
     // "stopped mid-Place-Order" (which Amazon may or may not have
     // accepted and must not be auto-retried).
+    // Force-flush the `placing` marker so a hard kill within the
+    // 250ms debounce window can't leave an on-disk row showing
+    // stage=null while Amazon was actually processing the click.
+    // The recovery sweep would otherwise mis-classify the row as
+    // safe-to-retry and risk a duplicate order. Cost: ~5ms fsync
+    // per critical-section transition (set + clear = 2× per buy).
     const onStage = (stage: 'placing' | null): Promise<void> =>
-      deps.jobAttempts.update(attemptId, { stage }).then(() => undefined);
+      deps.jobAttempts
+        .update(attemptId, { stage }, { forceFlush: true })
+        .then(() => undefined);
     if (useFillers) {
       const r = await runFillerBuyWithRetries(page, deps, job, cid, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, info, preflightCleared, onStage);
       buy = r.buy;

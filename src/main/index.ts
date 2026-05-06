@@ -764,8 +764,8 @@ async function startWorkerNow(): Promise<void> {
         scheduleBroadcastJobs();
         return a;
       },
-      async update(attemptId, patch) {
-        const a = await storeUpdateAttempt(attemptId, patch);
+      async update(attemptId, patch, opts) {
+        const a = await storeUpdateAttempt(attemptId, patch, opts);
         scheduleBroadcastJobs();
         return a;
       },

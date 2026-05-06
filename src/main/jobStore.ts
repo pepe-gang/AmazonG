@@ -91,6 +91,23 @@ function scheduleSave(): void {
   }, 250);
 }
 
+/**
+ * Synchronous flush variant — bypasses the 250ms debounce and persists
+ * immediately. Use for writes that MUST be on disk before the next
+ * statement runs (e.g., `stage='placing'` markers — recovery sweep
+ * mis-classifies a row whose stage write didn't land before a hard
+ * kill, risking duplicate orders).
+ *
+ * Cost: ~5ms fsync per call. Reserve for critical-section markers.
+ */
+async function persistNow(): Promise<void> {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  await persist().catch(() => undefined);
+}
+
 function evictOldestIfNeeded(): void {
   if (!cache) return;
   for (const id of pickIdsToEvict(cache.attempts, MAX_ATTEMPTS)) {
@@ -119,6 +136,7 @@ export async function createAttempt(
 export async function updateAttempt(
   attemptId: string,
   patch: Partial<Omit<JobAttempt, 'attemptId' | 'jobId' | 'amazonEmail' | 'createdAt'>>,
+  opts?: { forceFlush?: boolean },
 ): Promise<JobAttempt | null> {
   const store = await load();
   const existing = store.attempts[attemptId];
@@ -129,7 +147,14 @@ export async function updateAttempt(
     updatedAt: new Date().toISOString(),
   };
   store.attempts[attemptId] = updated;
-  scheduleSave();
+  if (opts?.forceFlush) {
+    // Synchronous flush: caller cannot proceed until this row is on
+    // disk. Used for `stage='placing'` markers so a hard kill can't
+    // leave a stale on-disk row that the recovery sweep mis-classifies.
+    await persistNow();
+  } else {
+    scheduleSave();
+  }
   return updated;
 }
 
