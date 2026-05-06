@@ -39,6 +39,13 @@ const DEFAULTS: Settings = {
   // typical Apple Silicon Macs. Customers on older / fanless laptops
   // can dial down to 1.
   maxConcurrentBuys: 3,
+  // Streaming scheduler feature flag. When true, the worker uses the
+  // account-aware streaming scheduler from
+  // proposal-scheduler-redesign.md instead of today's per-job pMap +
+  // lifecycleInFlight. Default OFF until Phase 3 flips it after live
+  // validation. Setting this to true in settings.json activates the
+  // scheduler on next worker start.
+  streamingScheduler: false,
 };
 
 function filePath(): string {

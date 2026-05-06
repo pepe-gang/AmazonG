@@ -92,6 +92,21 @@ export type BGClient = {
   claimJob(): Promise<AutoGJob | null>;
   reportStatus(jobId: string, report: JobStatusReport): Promise<void>;
   listPurchases(limit?: number): Promise<ServerPurchase[]>;
+  /**
+   * Per-job filter — returns just the purchases for one AutoBuyJob.
+   * Used by the streaming scheduler's recovery sweep
+   * (proposal-scheduler-redesign.md §15.7) to detect accounts that
+   * already finished `awaiting_verification` on a previous instance
+   * before the current one reclaimed the stale job. Without this
+   * filter, recovery would re-issue Place Order clicks for accounts
+   * already done — duplicate-order risk.
+   *
+   * Requires BG to expose the `?jobId=<id>` query param (BG commit
+   * lands ahead of any AmazonG release that calls this). Falls back
+   * to client-side filtering of `listPurchases` if BG returns the
+   * full list (older BG); see implementation.
+   */
+  listPurchasesForJob(jobId: string): Promise<ServerPurchase[]>;
   /** Hard-delete purchase attempts for the authed user. Returns the
    *  count BG removed (purchase rows + synthetic no-attempt jobs). */
   deletePurchases(attemptIds: string[]): Promise<number>;
@@ -280,6 +295,22 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         { method: 'GET' },
       );
       return r?.attempts ?? [];
+    },
+
+    async listPurchasesForJob(jobId: string) {
+      // BG honors `?jobId=<id>` server-side (BG commit e5b2920+).
+      // If a customer is somehow on an older BG, the param is
+      // silently ignored and the response includes ALL their buy
+      // jobs (default 200) — we filter client-side as fallback.
+      const url = `/api/autog/purchases?jobId=${encodeURIComponent(jobId)}&limit=500`;
+      const r = await request<{ attempts: ServerPurchase[] }>(url, {
+        method: 'GET',
+      });
+      const all = r?.attempts ?? [];
+      // Defensive client-side filter — no-op when BG honored the
+      // server-side filter; trims the response when an older BG
+      // didn't.
+      return all.filter((a) => a.jobId === jobId);
     },
 
     async deletePurchases(attemptIds: string[]): Promise<number> {
