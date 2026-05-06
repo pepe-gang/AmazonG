@@ -737,7 +737,6 @@ async function startWorkerNow(): Promise<void> {
       return {
         maxConcurrentBuys: s.maxConcurrentBuys,
         wheyProteinFillerOnly: s.wheyProteinFillerOnly,
-        streamingScheduler: s.streamingScheduler ?? false,
       };
     },
     listEligibleProfiles: async () => {

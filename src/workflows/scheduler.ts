@@ -25,10 +25,8 @@
  *
  * Per-job aggregation via JobBundle: each tuple's result is collected
  * into the bundle for its jobId; when bundle.results.length === total,
- * we fire the existing bg.reportStatus once (same atomicity as today's
+ * we fire bg.reportStatus once (same atomicity as the previous
  * end-of-pMap report).
- *
- * Behind the `streamingScheduler` settings flag (default false).
  */
 
 import { logger } from '../shared/logger.js';

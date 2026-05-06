@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { BGClient } from '../bg/client.js';
 import type { DriverSession } from '../browser/driver.js';
@@ -73,7 +72,6 @@ export type Deps = {
    * about.
    */
   loadParallelism: () => Promise<{
-    streamingScheduler?: boolean;
     maxConcurrentBuys: number;
     /** When true (and the buy is in filler mode), the filler picker
      *  uses a whey-protein-only term pool instead of the general
@@ -109,15 +107,10 @@ export type WorkerHandle = {
   openProfileTab(email: string, url: string): Promise<boolean>;
 };
 
-/** Bounds for the parallel-buy setting exposed in the Settings page.
- *  The user-set value is clamped to this range so a hand-edited
- *  settings.json can't ask for 100 parallel Chromium windows. Lower
- *  bound 1 keeps the worker functional. */
-const MIN_CONCURRENT_BUYS = 1;
-const MAX_CONCURRENT_BUYS = 5;
-/** Fallback defaults if a Settings field is missing (e.g. a user
- *  upgrading from a version where these didn't exist). Loadsettings
- *  itself merges defaults, so this is belt-and-suspenders. */
+/** Fallback default for the parallel-buy setting if a Settings field
+ *  is missing (e.g. upgrading from a version that didn't ship it).
+ *  loadSettings itself merges defaults — belt-and-suspenders. The
+ *  streaming scheduler clamps to Math.max(1, …) at the call site. */
 const DEFAULT_CONCURRENT_BUYS = 3;
 
 /**
@@ -574,22 +567,6 @@ async function runFillerBuyWithRetries(
 }
 
 /**
- * Effective fan-out concurrency — how many Amazon accounts run the
- * same job in parallel. The user-set value comes from the Settings
- * page (Parallel buys panel); falls back to DEFAULT_CONCURRENT_BUYS
- * if a settings field is missing, and is clamped to safe bounds.
- *
- * Single-mode and filler-mode share this knob since v0.13.19 — the
- * batch cart-add refactor brought filler-mode's per-account resource
- * profile in line with single-mode (no more parallel tabs inside one
- * window, just one HTTP POST).
- */
-function fanoutConcurrency(parallelism: { maxConcurrentBuys: number }): number {
-  const v = parallelism.maxConcurrentBuys ?? DEFAULT_CONCURRENT_BUYS;
-  return Math.max(MIN_CONCURRENT_BUYS, Math.min(MAX_CONCURRENT_BUYS, v));
-}
-
-/**
  * Translate a BuyWithFillersResult into the BuyResult shape the rest of
  * runForProfile consumes. Keeps the worker loop agnostic about which
  * flavor ran. Stage labels pass through unchanged — we broadened
@@ -647,24 +624,13 @@ export type ProfileResult = {
 
 export function startWorker(deps: Deps): WorkerHandle {
   let running = true;
-  let backoffMs = 5_000;
   const sessions = new Map<string, DriverSession>();
 
-  // Streaming-scheduler feature flag — read once at worker start.
-  // When true, we delegate to StreamingScheduler instead of running
-  // the per-job pMap legacy loop. The flag is in user settings; flip
-  // takes effect on next worker start (Stop + Start in the UI, or
-  // app restart).
-  //
-  // Default false. Phase 3 of proposal-scheduler-redesign.md will
-  // flip the default. For now, customers + this branch only get the
-  // streaming scheduler if they explicitly set
-  // settings.streamingScheduler=true.
   let streamingHandle: { stop: () => Promise<void> } | null = null;
-  // The scheduler's resolveJobContext callback duplicates a chunk of
-  // handleJob's per-job preamble (filter eligible, build override
-  // maps, etc.). Captured as a helper here so the legacy and
-  // streaming paths share the same logic.
+  // Per-job preamble for the streaming scheduler: filter eligible,
+  // build per-account override maps. Called by StreamingScheduler's
+  // producer for every claimed job before tuples are pushed to the
+  // ready queue.
   const resolveStreamingJobContext = async (job: AutoGJob) => {
     const eligibleAll = await deps.listEligibleProfiles();
     if (eligibleAll.length === 0) return null;
@@ -687,17 +653,15 @@ export function startWorker(deps: Deps): WorkerHandle {
       };
     }
 
-    // Buy phase — replicate handleJob's filter + per-account overrides
-    // (lines 1004-1036 below) so streaming and legacy behave identically:
+    // Buy phase preamble:
     //   1. enabled profiles only (rebuy path scopes to placedEmail)
-    //   2. fillerByEmail from `shouldUseFillers(deps.buyWithFillers,
-    //      profile, job.viaFiller)` — same per-profile decision as
-    //      legacy
-    //   3. requireMinByEmail from BG's listAmazonAccounts (one HTTP
-    //      call per claim — same as legacy)
+    //   2. fillerByEmail from shouldUseFillers (per-profile decision)
+    //   3. requireMinByEmail from BG's listAmazonAccounts. On failure
+    //      default to gate-enforced so a BG outage can't silently
+    //      skip the cashback gate.
     //   4. effectiveMinByEmail derived from per-account requireMinCashback
-    //      AND-combined with job.requireMinCashback (same gate logic
-    //      as pollAndScrape.ts:1029-1036)
+    //      AND-combined with job.requireMinCashback. Either side saying
+    //      "skip" means skip.
     let eligible = eligibleAll.filter((p) => p.enabled);
     if (job.placedEmail) {
       const t = job.placedEmail.toLowerCase();
@@ -706,10 +670,8 @@ export function startWorker(deps: Deps): WorkerHandle {
     const parallelism = await deps.loadParallelism().catch(() => ({
       maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
       wheyProteinFillerOnly: false,
-      streamingScheduler: true,
     }));
 
-    // Per-profile filler decision — same as handleJob:1004-1009.
     const fillerByEmail = new Map<string, boolean>(
       eligible.map((p) => [
         p.email,
@@ -717,9 +679,6 @@ export function startWorker(deps: Deps): WorkerHandle {
       ]),
     );
 
-    // Per-Amazon-account requireMinCashback overrides from BG. Same
-    // call + fallback as handleJob:1015-1025. On failure we default
-    // to gate-enforced so a BG outage can't silently skip the gate.
     const accountOverrides = await deps.bg.listAmazonAccounts().catch(() => ({
       accounts: [] as Array<{ email: string; requireMinCashback: boolean }>,
       bgAccounts: [],
@@ -731,8 +690,6 @@ export function startWorker(deps: Deps): WorkerHandle {
       ]),
     );
 
-    // Per-job override AND-combines with the per-account flag — same
-    // logic as handleJob:1029-1036. Either side saying "skip" means skip.
     const jobRequiresMinCashback = job.requireMinCashback !== false;
     const effectiveMinByEmail = new Map<string, number>(
       eligible.map((p) => {
@@ -752,222 +709,76 @@ export function startWorker(deps: Deps): WorkerHandle {
     };
   };
 
-  let lastNoProfilesWarn = 0;
-  const NO_PROFILES_WARN_INTERVAL_MS = 60_000;
-
-  // Tracked set of in-flight lifecycle jobs (verify + fetch_tracking).
-  // When the user bulk-clicks "Verify" or "Tracking now" on N rows,
-  // BG queues N lifecycle jobs at once. The default serial loop
-  // drains them at ~one-every-5s; running them in parallel up to
-  // `maxConcurrentBuys` (the existing "Parallel buys" setting) cuts
-  // the total wall-clock by Nx for typical
-  // bulk operations. Both phases share one cap because they both
-  // open a Playwright page in the same per-profile context — letting
-  // them sum to 2× the cap could blow past the user's intended
-  // window count. Buy stays serial (it has its own per-job profile
-  // fan-out) and drains this set before running so phases don't
-  // compete for the same browser resources. Held outside the loop
-  // closure so the stop handler can drain it.
-  const lifecycleInFlight = new Set<Promise<void>>();
-
   const loop = (async () => {
     logger.info('worker.start');
 
-    // Streaming-scheduler branch: when the user opts in, replace the
-    // legacy per-job pMap loop with the StreamingScheduler. The
-    // scheduler runs producer + consumer loops internally; this
-    // outer loop just waits for `running` to flip false (via stop()).
+    // The worker delegates to StreamingScheduler — claim jobs, fan
+    // out tuples, dispatch with per-account locking. The IIFE just
+    // owns lifecycle (start/stop, session cleanup).
     const initialParallelism = await deps
       .loadParallelism()
       .catch(() => null);
-    if (initialParallelism?.streamingScheduler) {
-      const { StreamingScheduler } = await import('./scheduler.js');
-      // Live-cap cache: scheduler calls cap() synchronously, but the
-      // user's "Parallel buys" setting is async-loaded. We refresh the
-      // cache in the background every 5s so live setting changes take
-      // effect without restart. Math.max(1, …) guards against a 0 in
-      // settings.json that would otherwise stall the consumer.
-      let cachedCap = Math.max(
-        1,
-        initialParallelism.maxConcurrentBuys ?? DEFAULT_CONCURRENT_BUYS,
-      );
-      const capRefreshTimer = setInterval(() => {
-        deps
-          .loadParallelism()
-          .then((p) => {
-            cachedCap = Math.max(
-              1,
-              p.maxConcurrentBuys ?? DEFAULT_CONCURRENT_BUYS,
-            );
-          })
-          .catch(() => undefined);
-      }, 5_000);
+    const { StreamingScheduler } = await import('./scheduler.js');
 
-      const sched = new StreamingScheduler({
-        deps,
-        sessions,
-        parentCid: 'worker',
-        cap: () => cachedCap,
-        resolveJobContext: resolveStreamingJobContext,
-        // Pre-claim gate: parity with legacy worker (lines 842-855).
-        // Without this, a worker with no signed-in profiles would
-        // claim and fail every queued job in BG within seconds.
-        hasEligibleProfiles: async () => {
-          const eligible = await deps.listEligibleProfiles().catch(() => []);
-          return eligible.length > 0;
-        },
-      });
-      logger.info('worker.scheduler.streaming.start', { initialCap: cachedCap });
-      streamingHandle = sched;
-      sched.start();
-      // Park here while the scheduler runs. Stop() flips `running`
-      // and calls streamingHandle.stop() which drains + exits.
-      while (running) {
-        await sleep(1_000, () => running);
-      }
-      clearInterval(capRefreshTimer);
-      logger.info('worker.scheduler.streaming.stop');
-      await closeAllSessions(sessions);
-      logger.info('worker.stop');
-      return;
-    }
+    // Live-cap cache: scheduler calls cap() synchronously, but the
+    // user's "Parallel buys" setting is async-loaded. Refresh the
+    // cache every 5s so live tuning takes effect without restart.
+    // Math.max(1, …) guards against a 0 in settings.json that would
+    // otherwise stall the consumer.
+    let cachedCap = Math.max(
+      1,
+      initialParallelism?.maxConcurrentBuys ?? DEFAULT_CONCURRENT_BUYS,
+    );
+    const capRefreshTimer = setInterval(() => {
+      deps
+        .loadParallelism()
+        .then((p) => {
+          cachedCap = Math.max(
+            1,
+            p.maxConcurrentBuys ?? DEFAULT_CONCURRENT_BUYS,
+          );
+        })
+        .catch(() => undefined);
+    }, 5_000);
 
+    const sched = new StreamingScheduler({
+      deps,
+      sessions,
+      parentCid: 'worker',
+      cap: () => cachedCap,
+      resolveJobContext: resolveStreamingJobContext,
+      // Pre-claim gate: don't claim if no signed-in profile. Leaves
+      // jobs queued in BG for another AmazonG instance instead of
+      // claiming + failing every queued job in seconds.
+      hasEligibleProfiles: async () => {
+        const eligible = await deps.listEligibleProfiles().catch(() => []);
+        return eligible.length > 0;
+      },
+    });
+    logger.info('worker.scheduler.streaming.start', { initialCap: cachedCap });
+    streamingHandle = sched;
+    sched.start();
+    // Park here while the scheduler runs. Stop() flips `running` and
+    // calls streamingHandle.stop() which drains + exits.
     while (running) {
-      try {
-        // Eligibility gate: don't claim a job if we have no enabled+signed-in
-        // Amazon profiles to run it on. Leaves the job in BG for another
-        // AutoG instance instead of claiming and immediately failing it
-        // (which would mark it permanently failed in BG).
-        const eligible = await deps.listEligibleProfiles();
-        if (eligible.length === 0) {
-          if (Date.now() - lastNoProfilesWarn > NO_PROFILES_WARN_INTERVAL_MS) {
-            logger.warn('worker.idle.no_profiles', {
-              note: 'No signed-in Amazon accounts. Worker is polling but will not claim jobs until at least one account is signed in. (Disabled-but-signed-in accounts can still process verify/tracking; buys require enabled.)',
-            });
-            lastNoProfilesWarn = Date.now();
-          }
-          await sleep(5_000, () => running);
-          continue;
-        }
-
-        // Re-read the parallelism setting each cycle so the user can
-        // tune live without restarting. Math.max(1, …) defends against
-        // a 0 in settings.json (saved by mistake) — we'd otherwise
-        // refuse to ever claim.
-        const cap = Math.max(
-          1,
-          (await deps.loadParallelism().catch(() => ({
-            maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
-            wheyProteinFillerOnly: false,
-          }))).maxConcurrentBuys,
-        );
-
-        // At-cap → wait for one lifecycle job to finish before
-        // claiming again. Promise.race resolves on the first settle
-        // (success or rejection); the .finally() inside the spawn
-        // removes the resolved promise from the set, so the next
-        // loop iteration sees one slot freed.
-        if (lifecycleInFlight.size >= cap) {
-          await Promise.race(lifecycleInFlight).catch(() => undefined);
-          continue;
-        }
-
-        const job = await deps.bg.claimJob();
-        if (!job) {
-          backoffMs = 5_000;
-          // If background lifecycle work is in flight, loop again
-          // right away (no sleep) so we re-claim as soon as any of
-          // them finishes — keeps the pipeline saturated when BG has
-          // more work waiting. Only sleep when truly idle.
-          if (lifecycleInFlight.size > 0) {
-            await Promise.race(lifecycleInFlight).catch(() => undefined);
-            continue;
-          }
-          await sleep(5_000, () => running);
-          continue;
-        }
-        const cid = randomUUID();
-        logger.info('job.claim', { jobId: job.id, phase: job.phase, url: job.productUrl }, cid);
-
-        if (job.phase === 'verify' || job.phase === 'fetch_tracking') {
-          // Fire-and-track: don't await the handler. The loop body
-          // continues to the next claim immediately, up to `cap`
-          // concurrent in-flight jobs. Errors are logged inside the
-          // IIFE so an unhandled rejection can't sneak past Node's
-          // process-level handlers and crash the worker. Phase is
-          // included in the log key so a wedged verify vs a wedged
-          // tracking is distinguishable from log search alone.
-          const phase = job.phase;
-          const p = (async () => {
-            try {
-              await handleJob(deps, sessions, job, cid, eligible);
-            } catch (err) {
-              logger.error(
-                `worker.${phase}.background.error`,
-                {
-                  error: err instanceof Error ? err.message : String(err),
-                  jobId: job.id,
-                },
-                cid,
-              );
-            }
-          })();
-          lifecycleInFlight.add(p);
-          // Self-removal so the next at-cap check is accurate. void
-          // discards the chained promise (we don't need its result).
-          void p.finally(() => {
-            lifecycleInFlight.delete(p);
-          });
-          backoffMs = 5_000;
-          continue;
-        }
-
-        // Buy path — serial. Drain any background verify /
-        // fetch_tracking first so the buy run doesn't compete with
-        // them for the same Playwright session resources.
-        if (lifecycleInFlight.size > 0) {
-          await Promise.allSettled([...lifecycleInFlight]);
-        }
-        await handleJob(deps, sessions, job, cid, eligible);
-        backoffMs = 5_000;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        logger.error('worker.loop.error', { error: message });
-        await sleep(backoffMs, () => running);
-        backoffMs = Math.min(backoffMs * 2, 60_000);
-      }
+      await sleep(1_000, () => running);
     }
-    // On shutdown, give in-flight lifecycle jobs a beat to settle
-    // (their Playwright ops will throw shortly after closeAllSessions
-    // runs, which is what we want). allSettled never rejects, so this
-    // is safe even if some are mid-error.
-    if (lifecycleInFlight.size > 0) {
-      await Promise.allSettled([...lifecycleInFlight]);
-    }
+    clearInterval(capRefreshTimer);
+    logger.info('worker.scheduler.streaming.stop');
     await closeAllSessions(sessions);
     logger.info('worker.stop');
   })();
 
   return {
     async stop() {
-      // Flip the running flag so the polling loop stops claiming new
-      // jobs, then proactively close every open session. Closing the
-      // BrowserContexts makes any in-flight Playwright op throw
-      // immediately (page.click, page.goto, waitForSelector, etc.),
-      // which the loop catches + logs, iterates once, then exits via
-      // the `while (running)` gate. That means pressing Stop aborts
-      // the current buy within a second or two instead of waiting
-      // for the 60–300 s filler flow to finish on its own.
-      //
-      // We don't await `loop` — the renderer's Stop click should
-      // return immediately so the UI unblocks. The loop drains its
-      // in-flight work in the background.
+      // Flip running, drain the scheduler, close sessions. The
+      // scheduler's stop() drains its ready queue + races in-flight
+      // tuples, bounded at 4s. closeAllSessions afterward throws
+      // 'Target closed' on any still-running Playwright op so the
+      // overall Stop returns within a second or two even if a buy
+      // was mid-flight. UI doesn't await `loop` — Stop click returns
+      // immediately, loop drains in the background.
       running = false;
-      // Streaming-scheduler branch: explicit stop() to drain the
-      // ready queue + race in-flight tuples. closeAllSessions runs
-      // afterward as today, which throws 'Target closed' on any
-      // still-running Playwright ops. The scheduler's stop() is
-      // bounded at 4s.
       if (streamingHandle) {
         await streamingHandle.stop().catch(() => undefined);
         streamingHandle = null;
@@ -992,293 +803,6 @@ export function startWorker(deps: Deps): WorkerHandle {
   };
 }
 
-async function handleJob(
-  deps: Deps,
-  sessions: Map<string, DriverSession>,
-  job: AutoGJob,
-  cid: string,
-  eligible: AmazonProfile[],
-): Promise<void> {
-  if (job.phase === 'verify') {
-    await handleVerifyJob(deps, sessions, job, cid, eligible);
-    return;
-  }
-  if (job.phase === 'fetch_tracking') {
-    await handleFetchTrackingJob(deps, sessions, job, cid, eligible);
-    return;
-  }
-  // Buy / rebuy phase — disabled accounts are excluded here. `eligible`
-  // arrives carrying every signed-in account (including disabled ones,
-  // because verify/tracking phases above need them); we filter down to
-  // only `enabled` accounts before fan-out so disabling correctly
-  // blocks new buys while leaving in-flight verify/tracking jobs intact.
-  //
-  // Rebuy path: when BG scopes a buy-phase job to a single Amazon account
-  // (placedEmail set — e.g. the user clicked Re-buy on a cancelled row),
-  // skip fan-out and run only for that account. viaFiller on a buy-phase
-  // job is a per-job override of the global toggle so a rebuy always goes
-  // through the filler flow even if buyWithFillers is off globally.
-  if (job.placedEmail) {
-    const target = job.placedEmail.toLowerCase();
-    const match = eligible.find(
-      (p) => p.email.toLowerCase() === target && p.enabled,
-    );
-    if (!match) {
-      const signedInButDisabled = eligible.some(
-        (p) => p.email.toLowerCase() === target && !p.enabled,
-      );
-      const error = signedInButDisabled
-        ? `rebuy target ${job.placedEmail} is signed in but disabled — re-enable in the Accounts tab to allow rebuys`
-        : `rebuy target ${job.placedEmail} is not enabled or not signed in`;
-      logger.error('job.rebuy.no_profile', { jobId: job.id, target: job.placedEmail, signedInButDisabled }, cid);
-      await deps.bg
-        .reportStatus(job.id, { status: 'failed', error })
-        .catch(() => undefined);
-      return;
-    }
-    eligible = [match];
-  } else {
-    // Fan-out buy: filter to enabled-only accounts. Disabled accounts that
-    // are signed in stay in the parent `eligible` list for verify/tracking
-    // but are dropped here so they can't take new buys.
-    const beforeFilter = eligible.length;
-    eligible = eligible.filter((p) => p.enabled);
-    if (eligible.length === 0) {
-      const error =
-        beforeFilter === 0
-          ? 'no signed-in Amazon accounts available for this buy'
-          : `no enabled Amazon accounts available for this buy (${beforeFilter} signed-in but all disabled)`;
-      logger.error(
-        'job.buy.no_enabled_profiles',
-        { jobId: job.id, signedInCount: beforeFilter },
-        cid,
-      );
-      await deps.bg
-        .reportStatus(job.id, { status: 'failed', error })
-        .catch(() => undefined);
-      return;
-    }
-  }
-  // Per-profile filler decision. The returned map lets every downstream
-  // step (row create, BG report, runForProfile branch) agree on which
-  // accounts ran through the filler flow, without re-computing.
-  const fillerByEmail = new Map<string, boolean>(
-    eligible.map((p) => [p.email, shouldUseFillers(deps.buyWithFillers, p, job.viaFiller)]),
-  );
-
-  // Per-Amazon-account cashback-gate overrides from BG. One HTTP call per
-  // job claim; on failure we fall through to the default (gate enabled)
-  // so a BG outage can't silently skip the gate. Accounts the user
-  // hasn't registered on BG aren't in the map → default to requireMinCashback=true.
-  const accountOverrides = await deps.bg.listAmazonAccounts().catch((err) => {
-    logger.warn(
-      'job.accounts.load.fail',
-      { jobId: job.id, error: err instanceof Error ? err.message : String(err) },
-      cid,
-    );
-    return { accounts: [], bgAccounts: [] };
-  });
-  const requireMinByEmail = new Map<string, boolean>(
-    accountOverrides.accounts.map((a) => [a.email.toLowerCase(), a.requireMinCashback]),
-  );
-  // Per-job override AND-combines with the per-account flag — either side
-  // saying "skip" means skip. Defaults to true (gate enforced) so older BG
-  // deployments that don't send the field keep the existing behavior.
-  const jobRequiresMinCashback = job.requireMinCashback !== false;
-  const effectiveMinByEmail = new Map<string, number>(
-    eligible.map((p) => {
-      const accountRequires = requireMinByEmail.get(p.email.toLowerCase()) ?? true;
-      const enforce = accountRequires && jobRequiresMinCashback;
-      return [p.email, enforce ? deps.minCashbackPct : 0];
-    }),
-  );
-  logger.info(
-    'job.accounts.gates',
-    {
-      jobId: job.id,
-      jobRequiresMinCashback,
-      gates: eligible.map((p) => ({
-        email: p.email,
-        requireMinCashback: requireMinByEmail.get(p.email.toLowerCase()) ?? true,
-        effectiveMinCashbackPct: effectiveMinByEmail.get(p.email) ?? deps.minCashbackPct,
-      })),
-    },
-    cid,
-  );
-  const anyFiller = Array.from(fillerByEmail.values()).some(Boolean);
-  // Re-read parallelism settings per claim — lets the user tune from
-  // the Settings page without restarting the worker. Loadsettings is
-  // cheap (one JSON file read) and only fires once per job claim
-  // (~5s cadence under heavy load), so the cost is negligible.
-  const parallelism = await deps.loadParallelism().catch(() => ({
-    maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
-    wheyProteinFillerOnly: false,
-  }));
-  const concurrency = fanoutConcurrency(parallelism);
-  logger.info(
-    'job.fanout.start',
-    {
-      jobId: job.id,
-      profiles: eligible.map((p) => p.email),
-      concurrency: Math.min(concurrency, eligible.length),
-      maxConcurrentBuys: parallelism.maxConcurrentBuys,
-      buyWithFillers: deps.buyWithFillers,
-      anyFiller,
-      rebuy: !!job.placedEmail,
-    },
-    cid,
-  );
-
-  // Create one attempt row per (job, profile) so the table reflects work
-  // about to start (status: queued → in_progress as each runs).
-  await Promise.all(
-    eligible.map((p) =>
-      deps.jobAttempts.create({
-        attemptId: makeAttemptId(job.id, p.email),
-        jobId: job.id,
-        amazonEmail: p.email,
-        phase: job.phase,
-        dealKey: job.dealKey,
-        dealId: job.dealId,
-        dealTitle: job.dealTitle,
-        productUrl: job.productUrl,
-        maxPrice: job.maxPrice,
-        price: job.price,
-        quantity: job.quantity,
-        cost: null,
-        cashbackPct: null,
-        orderId: null,
-        status: 'queued',
-        error: null,
-        buyMode: fillerByEmail.get(p.email) ? 'filler' : 'single',
-        dryRun: deps.buyDryRun,
-        trackingIds: null,
-        fillerOrderIds: null,
-        productTitle: null,
-        stage: null,
-      }),
-    ),
-  );
-
-  // Sibling-abort controller — shared across the fan-out. When ONE
-  // profile detects a PRODUCT-level failure (out_of_stock or
-  // price_exceeds), it fires `abortController.abort(reason)` to short-
-  // circuit every other profile. In-flight siblings catch it at the
-  // next checkpoint and bail with `stage: 'aborted_by_sibling'`; queued
-  // workers (waiting for an in-flight slot) bail at preflight without
-  // doing any PDP load. ACCOUNT-level failures (cashback_gate,
-  // checkout_address, etc.) do NOT propagate — they may be specific to
-  // one account's eligibility / address state, so we let other profiles
-  // run independently.
-  //
-  // Critical invariant: the abort signal is checked BEFORE buyNow /
-  // runFillerBuyWithRetries. We never abort during or after the Place
-  // Order click — once the buy is in flight at Amazon, killing it
-  // would leave us not knowing if it succeeded.
-  const abortController = new AbortController();
-  const abortSiblings = (reason: 'out_of_stock' | 'price_exceeds'): void => {
-    if (abortController.signal.aborted) return;
-    logger.info(
-      'job.fanout.abort.fired',
-      { jobId: job.id, reason },
-      cid,
-    );
-    abortController.abort(reason);
-  };
-
-  // Instrumentation: fan-out wall-clock timing. Streaming-scheduler
-  // proposal §13 Phase 0 baseline metrics — captures whether the loop
-  // is bottlenecked by a slow tail-round profile while other slots
-  // sit idle. Comparing fanoutDurationMs against per-profile durations
-  // tells us how much wall-clock the streaming scheduler could save.
-  const fanoutStartMs = Date.now();
-  const results = await pMap(eligible, concurrency, (profile) =>
-    runBuyTuple({
-      deps,
-      sessions,
-      job,
-      profile,
-      parentCid: cid,
-      useFiller: fillerByEmail.get(profile.email) === true,
-      effectiveMinCashbackPct:
-        effectiveMinByEmail.get(profile.email) ?? deps.minCashbackPct,
-      requireMinCashback:
-        requireMinByEmail.get(profile.email.toLowerCase()) ?? true,
-      wheyProteinFillerOnly: parallelism.wheyProteinFillerOnly,
-      abortSignal: abortController.signal,
-      abortSiblings,
-    }),
-  );
-  const fanoutDurationMs = Date.now() - fanoutStartMs;
-  logger.info(
-    'job.fanout.complete',
-    {
-      jobId: job.id,
-      eligibleCount: eligible.length,
-      concurrency,
-      // When eligibleCount > concurrency, pMap runs in waves of `concurrency`
-      // size; the final wave has (eligibleCount % concurrency) workers active.
-      // Idle slots in the final wave: concurrency - (eligibleCount % concurrency
-      // || concurrency). E.g. N=5, M=3 → final wave has 2 active, 1 idle.
-      tailWaveIdleSlots:
-        eligible.length > concurrency
-          ? concurrency -
-            (eligible.length % concurrency === 0
-              ? concurrency
-              : eligible.length % concurrency)
-          : Math.max(0, concurrency - eligible.length),
-      fanoutDurationMs,
-    },
-    cid,
-  );
-
-  // Aggregate.
-  // For non-summary uses (the BG report payload, winner pick, status
-  // rollup), delegate to `buildBuyJobReport` — single source of truth
-  // shared with the streaming scheduler. Local result-bucket counts
-  // here are kept for the summary log line below.
-  const successes = results.filter((r) => r.status === 'completed' && !r.dryRun);
-  const dryRunPasses = results.filter((r) => r.status === 'completed' && r.dryRun);
-  const failures = results.filter((r) => r.status === 'failed');
-  const actionRequireds = results.filter((r) => r.status === 'action_required');
-
-  // Summary log line — celebratory for dry-run all-pass, neutral otherwise.
-  if (dryRunPasses.length === results.length && results.length > 0) {
-    logger.info(
-      'job.fanout.dryrun.success',
-      {
-        jobId: job.id,
-        total: results.length,
-        message: `✓ Dry run successful: all ${results.length} profile(s) would have placed an order`,
-      },
-      cid,
-    );
-  } else {
-    logger.info(
-      'job.fanout.done',
-      {
-        jobId: job.id,
-        total: results.length,
-        placed: successes.length,
-        dryRunPassed: dryRunPasses.length,
-        failed: failures.length,
-        actionRequired: actionRequireds.length,
-      },
-      cid,
-    );
-  }
-
-  // Build the BG report via the shared helper — single source of truth
-  // for status rollup, winner pick, dry-run handling, and per-purchase
-  // shape. Same helper is used by the streaming scheduler.
-  const report = buildBuyJobReport({ results, fillerByEmail });
-
-  try {
-    await deps.bg.reportStatus(job.id, report);
-  } catch (err) {
-    logger.error('job.report.error', { jobId: job.id, error: String(err) }, cid);
-  }
-}
 
 /**
  * Verify-phase job: BG sends these ~10min after a successful buy to check
@@ -2621,24 +2145,6 @@ async function closeAllSessions(sessions: Map<string, DriverSession>): Promise<v
       }
     }),
   );
-}
-
-/** Concurrency-limited Promise.all. Preserves input order in results. */
-async function pMap<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  const workers = Array.from(
-    { length: Math.min(concurrency, items.length) },
-    async () => {
-      while (true) {
-        const i = next++;
-        if (i >= items.length) return;
-        results[i] = await fn(items[i]!);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
 }
 
 async function sleep(ms: number, stillRunning: () => boolean): Promise<void> {

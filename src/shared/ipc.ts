@@ -270,14 +270,6 @@ export type Settings = {
    * resource profiles comparable.
    */
   maxConcurrentBuys: number;
-  /**
-   * When true, the worker uses the account-aware streaming scheduler
-   * instead of per-job pMap. See proposal-scheduler-redesign.md.
-   * Default false until Phase 3 flips it after live validation.
-   * Optional in the type so existing serialized settings.json files
-   * load without migration.
-   */
-  streamingScheduler?: boolean;
 };
 
 /**
