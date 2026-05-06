@@ -44,6 +44,7 @@ import type {
   Deps,
   ProfileResult,
 } from './pollAndScrape.js';
+import { buildBuyJobReport, syntheticFailedResult } from './jobReport.js';
 
 type Phase = 'buy' | 'verify' | 'fetch_tracking';
 
@@ -71,6 +72,11 @@ type JobBundle = {
   // Resolves after the bundle's BG status report has fired.
   done: Promise<void>;
   resolve: () => void;
+  // Per-account filler-mode flags captured at expandToTuples time.
+  // Needed by buildBuyJobReport for the per-purchase `viaFiller` flag.
+  // For verify/tracking phases this stays empty (helper isn't called
+  // for those phases).
+  fillerByEmail: Map<string, boolean>;
 };
 
 type Sleep = (ms: number, stillRunning: () => boolean) => Promise<void>;
@@ -226,7 +232,7 @@ export class StreamingScheduler {
         continue;
       }
 
-      const bundle = this.createBundle(job.id, tuples.length);
+      const bundle = this.createBundle(job.id, tuples.length, ctx.fillerByEmail);
       this.bundles.set(job.id, bundle);
       this.readyQueue.push(...tuples);
     }
@@ -438,7 +444,11 @@ export class StreamingScheduler {
 
   // ─── Bundle aggregation ───────────────────────────────────────
 
-  private createBundle(jobId: string, total: number): JobBundle {
+  private createBundle(
+    jobId: string,
+    total: number,
+    fillerByEmail: Map<string, boolean>,
+  ): JobBundle {
     let resolve!: () => void;
     const done = new Promise<void>((r) => (resolve = r));
     return {
@@ -448,6 +458,7 @@ export class StreamingScheduler {
       abortController: new AbortController(),
       done,
       resolve,
+      fillerByEmail,
     };
   }
 
@@ -481,60 +492,60 @@ export class StreamingScheduler {
     bundle: JobBundle,
     job: AutoGJob,
   ): Promise<void> {
-    // Aggregate per-profile results into the BG report shape. The
-    // legacy handleJob path does this aggregation inline at
-    // pollAndScrape.ts:1062-1158; we replicate the minimum here.
-    // Full parity (winner pick, partial-vs-full status, etc.) is
-    // delegated to a new helper TODO; for now we use a placeholder
-    // shape that captures completed/failed counts.
-    const completed = bundle.results.filter((r) => r.status === 'completed' && !r.dryRun);
-    const failed = bundle.results.filter((r) => r.status === 'failed');
-    const dryRun = bundle.results.filter((r) => r.status === 'completed' && r.dryRun);
-    const status =
-      completed.length > 0
-        ? 'completed'
-        : dryRun.length === bundle.results.length
-          ? 'completed'
-          : failed.length === bundle.results.length
-            ? 'failed'
-            : 'partial';
-
-    const summary = bundle.results.map((r) => {
-      const item: { amazonEmail: string; status: string; orderId?: string | null; error?: string | null } = {
-        amazonEmail: r.amazonEmail,
-        status: r.status,
-      };
-      if ('orderId' in r && r.orderId !== undefined) item.orderId = r.orderId;
-      if ('error' in r && r.error !== undefined) item.error = r.error;
-      return item;
+    // Single source of truth for the report shape — same helper the
+    // legacy pMap path uses post-fan-out. Handles:
+    //   - awaiting_verification status for live successes (so BG
+    //     schedules verify-phase jobs)
+    //   - dry-run → 'failed' status mapping (so BG doesn't schedule
+    //     verify on dry-runs)
+    //   - winner pick + parent-level placed* fields
+    //   - per-purchase viaFiller flag from bundle.fillerByEmail
+    //   - stage / fillerOrderIds / amazonPurchaseId per-purchase audit
+    const report = buildBuyJobReport({
+      results: bundle.results,
+      fillerByEmail: bundle.fillerByEmail,
     });
-
-    await this.sd.deps.bg
-      .reportStatus(job.id, {
-        status: status as 'completed' | 'failed' | 'partial',
-        purchases: summary,
-      } as Parameters<typeof this.sd.deps.bg.reportStatus>[1])
-      .catch(() => undefined);
+    await this.sd.deps.bg.reportStatus(job.id, report).catch((err) => {
+      logger.error(
+        'scheduler.report.error',
+        {
+          jobId: job.id,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        this.sd.parentCid,
+      );
+    });
   }
 
   private failedResult(tuple: Tuple, error: string): ProfileResult {
-    return {
-      amazonEmail: tuple.profile.email,
-      status: 'failed' as const,
-      error,
-      dryRun: false,
-    } as ProfileResult;
+    // Use the helper from jobReport.ts so all required ProfileResult
+    // fields are populated with safe nulls — buildBuyJobReport reads
+    // every field, so a stub-shaped failure (missing fields) breaks
+    // aggregation.
+    return syntheticFailedResult(tuple.profile.email, error);
   }
 
   /** Lifecycle phases (verify/tracking) report their own status
-   *  internally. The bundle aggregator just needs SOMETHING to
-   *  count toward bundle.total — use a synthetic completion marker. */
+   *  internally. The bundle aggregator just needs SOMETHING to count
+   *  toward bundle.total. Using a fully-populated success-shape result
+   *  keeps types honest, but for verify/tracking the bundle is
+   *  finalized without firing reportBuyBundle (collectResult checks
+   *  phase) so this object is never read by buildBuyJobReport. */
   private lifecycleCompletionMarker(tuple: Tuple): ProfileResult {
     return {
-      amazonEmail: tuple.profile.email,
-      status: 'completed' as const,
+      email: tuple.profile.email,
+      status: 'completed',
+      orderId: null,
+      placedPrice: null,
+      placedCashbackPct: null,
+      placedAt: null,
+      placedQuantity: 0,
+      error: null,
+      stage: null,
       dryRun: false,
-    } as ProfileResult;
+      fillerOrderIds: [],
+      amazonPurchaseId: null,
+    };
   }
 }
 

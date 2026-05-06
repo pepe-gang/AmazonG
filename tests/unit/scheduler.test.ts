@@ -47,6 +47,31 @@ function makeProfile(email: string): AmazonProfile {
   } as unknown as AmazonProfile;
 }
 
+/** Build a properly-shaped ProfileResult — matches the actual type from
+ *  pollAndScrape. Test runners use this so buildBuyJobReport doesn't
+ *  crash on missing fields. */
+function makeProfileResult(
+  email: string,
+  status: 'completed' | 'failed' | 'action_required',
+) {
+  return {
+    email,
+    status,
+    orderId: null,
+    placedPrice: null,
+    placedCashbackPct: null,
+    placedAt: null,
+    placedQuantity: 0,
+    error: null,
+    stage: null,
+    dryRun: false,
+    fillerOrderIds: [],
+    amazonPurchaseId: null,
+  } as unknown as Awaited<
+    ReturnType<NonNullable<SchedulerDeps['runners']>['buy']>
+  >;
+}
+
 /** Build a SchedulerDeps with stubbed BG + runners. */
 function makeDeps(opts: {
   jobs: FakeJob[];
@@ -101,11 +126,7 @@ function makeDeps(opts: {
           startedAt,
           finishedAt,
         });
-        return {
-          amazonEmail: ctx.profile.email,
-          status: 'completed' as const,
-          dryRun: false,
-        } as Awaited<ReturnType<NonNullable<SchedulerDeps['runners']>['buy']>>;
+        return makeProfileResult(ctx.profile.email, 'completed');
       }),
     },
     sleep: async (ms, stillRunning) => {
@@ -191,11 +212,7 @@ describe('StreamingScheduler', () => {
           startedAt,
           finishedAt,
         });
-        return {
-          amazonEmail: ctx.profile.email,
-          status: 'completed' as const,
-          dryRun: false,
-        } as Awaited<ReturnType<NonNullable<SchedulerDeps['runners']>['buy']>>;
+        return makeProfileResult(ctx.profile.email, 'completed');
       }),
     };
     const sched = new StreamingScheduler(sd);

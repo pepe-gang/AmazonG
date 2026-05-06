@@ -19,6 +19,7 @@ import { verifyOrder } from '../actions/verifyOrder.js';
 import { fetchTracking } from '../actions/fetchTracking.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
 import { runBuyTuple } from './runners.js';
+import { buildBuyJobReport } from './jobReport.js';
 import { shouldUseFillers } from '../shared/fillerMode.js';
 import { logger } from '../shared/logger.js';
 import { captureFailureSnapshot, discardTracing, shouldCapture, startTracing } from '../browser/snapshot.js';
@@ -1208,6 +1209,10 @@ async function handleJob(
   );
 
   // Aggregate.
+  // For non-summary uses (the BG report payload, winner pick, status
+  // rollup), delegate to `buildBuyJobReport` — single source of truth
+  // shared with the streaming scheduler. Local result-bucket counts
+  // here are kept for the summary log line below.
   const successes = results.filter((r) => r.status === 'completed' && !r.dryRun);
   const dryRunPasses = results.filter((r) => r.status === 'completed' && r.dryRun);
   const failures = results.filter((r) => r.status === 'failed');
@@ -1239,104 +1244,13 @@ async function handleJob(
     );
   }
 
-  // Choose the "winning" purchase (highest cashback %, ties broken by first
-  // success). Used to populate parent-level placed* fields on BG.
-  const winner = [...successes].sort(
-    (a, b) => (b.placedCashbackPct ?? 0) - (a.placedCashbackPct ?? 0),
-  )[0];
-
-  // Determine overall status reported to BG. Dry-run never reports as
-  // completed (BG would schedule a verify phase for an order that wasn't
-  // actually placed). Real completions report as 'awaiting_verification'
-  // — the verify-phase job (~10 min later) flips them to 'completed'
-  // once Amazon confirms the order is still active. This matches the
-  // AmazonG Jobs-table label "Waiting for Verification".
-  //
-  // action_required ranks ABOVE failed in the rollup so a job where
-  // every profile needs human attention surfaces as Action Required
-  // (the user gets a cleaner signal of what to fix). When there's at
-  // least one success, partial still wins regardless — a partial fan-
-  // out's user value is the success rows, not the action-required ones.
-  let overallStatus: 'awaiting_verification' | 'partial' | 'failed' | 'action_required';
-  let parentError: string | null = null;
-  if (successes.length > 0) {
-    overallStatus = failures.length === 0 && actionRequireds.length === 0
-      ? 'awaiting_verification'
-      : 'partial';
-  } else if (dryRunPasses.length > 0) {
-    // All dry-run successes (no live orders) — BG status is 'failed' (no
-    // real order to verify), but the message clearly marks it as a
-    // successful test, not an actual failure.
-    overallStatus = 'failed';
-    parentError =
-      failures.length === 0
-        ? `[DRY RUN OK] All ${dryRunPasses.length} profile(s) passed all checks and would have placed orders. No real Place Order click — flip to LIVE mode to actually buy.`
-        : `[DRY RUN] ${dryRunPasses.length} profile(s) would have placed orders; ${failures.length} failed verification.`;
-  } else if (actionRequireds.length > 0) {
-    // No success, no dry-run pass, but at least one profile needs human
-    // attention. Surface as action_required (not failed) so the user can
-    // resolve it; failures.length > 0 alongside this still rolls up here
-    // because the actionable signal is what the user can do something about.
-    overallStatus = 'action_required';
-    parentError = actionRequireds[0]!.error ?? 'profile needs attention';
-  } else {
-    overallStatus = 'failed';
-    parentError = failures[0]?.error ?? 'all profiles failed';
-  }
-
-  // Per-profile purchase rows for BG. Live successes report as
-  // 'awaiting_verification' regardless of buy mode — the user wants the
-  // display status consistent across modes. Whether the buy went
-  // through the filler-items flow is signalled via a separate
-  // `viaFiller` field on each purchase, which BG reads to flag the
-  // scheduled verify job with `viaFiller=true` (which in turn triggers
-  // our filler-cancellation cleanup on the verify-phase run).
-  // Dry-runs always report as failed (no real order).
-  const purchases = results.map((r) => ({
-    amazonEmail: r.email,
-    status: r.dryRun
-      ? ('failed' as const)
-      : r.status === 'completed'
-        ? ('awaiting_verification' as const)
-        : r.status === 'action_required'
-          ? ('action_required' as const)
-          : ('failed' as const),
-    ...(fillerByEmail.get(r.email) && !r.dryRun && r.status === 'completed'
-      ? { viaFiller: true as const }
-      : {}),
-    purchasedCount: r.placedQuantity,
-    orderId: r.orderId,
-    placedPrice: r.placedPrice,
-    placedCashbackPct: r.placedCashbackPct,
-    placedAt: r.placedAt,
-    error: r.error,
-    // Structured failure category (e.g. 'cashback_gate'). Forwarded so
-    // BG can route follow-ups (auto-rebuy with fillers on cashback_gate)
-    // without text-matching the human-readable error string.
-    ...(r.stage ? { stage: r.stage } : {}),
-    // Audit snapshot — only attach when this profile ran in filler mode
-    // AND produced filler orders. BG persists on AutoBuyPurchase for
-    // post-hoc reconciliation (see PurchaseReport.fillerOrderIds docs).
-    ...(r.fillerOrderIds.length > 0 ? { fillerOrderIds: r.fillerOrderIds } : {}),
-    // Amazon's checkout-session purchaseId from the thank-you URL —
-    // distinct from orderId, captured at click time. Audit-only field;
-    // attach only when present (failed/dry-run buys leave it null and
-    // we don't bother sending null-only payloads).
-    ...(r.amazonPurchaseId ? { amazonPurchaseId: r.amazonPurchaseId } : {}),
-  }));
+  // Build the BG report via the shared helper — single source of truth
+  // for status rollup, winner pick, dry-run handling, and per-purchase
+  // shape. Same helper is used by the streaming scheduler.
+  const report = buildBuyJobReport({ results, fillerByEmail });
 
   try {
-    await deps.bg.reportStatus(job.id, {
-      status: overallStatus,
-      ...(parentError ? { error: parentError } : {}),
-      placedAt: winner?.placedAt ?? null,
-      placedQuantity: winner?.placedQuantity ?? null,
-      placedPrice: winner?.placedPrice ?? null,
-      placedCashbackPct: winner?.placedCashbackPct ?? null,
-      placedOrderId: winner?.orderId ?? null,
-      placedEmail: winner?.email ?? null,
-      purchases,
-    });
+    await deps.bg.reportStatus(job.id, report);
   } catch (err) {
     logger.error('job.report.error', { jobId: job.id, error: String(err) }, cid);
   }
