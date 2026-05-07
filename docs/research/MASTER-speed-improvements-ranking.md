@@ -40,7 +40,19 @@ read all six pass-N sub-reports to figure it out.
 - `amazon-comm-deep-dive-2026-05-05-pass2.md` (pass 2)
 - `amazon-comm-deep-dive-2026-05-05-pass3.md` (pass 3)
 - `amazon-comm-deep-dive-2026-05-05-pass4.md` (pass 4)
-- pass 5, 6 — pending
+- pass 5, 6 (appended below)
+- **`pass-7-deep-research-2026-05-06.md`** — added 2026-05-06: streaming-scheduler audit, session-lifecycle audit, live PDP probe finding 9 new blockable XHRs, Buy Now → /spc empirical timing.
+- **`pass-8-deep-research-2026-05-06.md`** — added 2026-05-06: live B3 A/B test (B3 confirmed DEAD, ~1.5s slower than click); cancel-sweep audit (25–55s savings hiding in `cancelForm.ts` + `cancelFillerOrder.ts`); jobStore forceFlush cost (negligible).
+- **`pass-9-deep-research-2026-05-06.md`** — added 2026-05-06: verify-phase + fetch_tracking-phase audit revealed cancel work fires **3× per filler buy lifecycle** — cancel-form Tier 1 fixes save ~55-70s (was ~25-30s). Live Place Order POST timing captured (~2010ms, status 200, returns next-page HTML inline not 302). Pending-order interstitial fires reliably; W rewrite estimate revised up to 0.5-7.5s/buy. New finding: `fetchOrderIdsForAsins` `polling: 1000` is mostly dead (~500ms saving).
+- **`pass-10-deep-research-2026-05-06.md`** — added 2026-05-06: 3 live-place attempts across cpnduy/amy/cpnnick, all failed at different stages (Amazon risk heuristics flagging accounts after rapid retries). New empirical findings: `/checkout/p/p-XXX/pay` interstitial path confirmed for amy (different from /spc); Place Order POST returns BOTH 200-with-body and 302-to-/cpe shapes within the same session; stale purchaseIds 500-error within ~5min on revisit. **Master ranking unchanged.** Recommendation: ship Phase A (esp. telemetry fix) before further live empirical research.
+- **`pass-11-deep-research-2026-05-06.md`** — added 2026-05-06: audited surfaces OUTSIDE the buy hot path. Major bug found: `listMergedAttempts` triggers full BG round-trip on every coalesced broadcast → ~500ms-2.4s wasted per fan-out + ~95% of BG request rate is wasted on UI freshness. Two NEW top-10 candidates (BG-fetch fix at #2, accounts cache at #9). Chase code audited and confirmed clean. Renderer uses virtualization correctly.
+- **`pass-12-deep-research-2026-05-06.md`** — added 2026-05-06: audited auto-enqueue (confirmed disabled stub), scheduler resource lifetime (correct on success path; small leak on overflow), tracing overhead on success paths (~500ms-1500ms tax when snapshotOnFailure=true), ring-buffer eviction (O(N log N) per attempt — easy lazy fix), and uncached `loadSettings`/`loadProfiles` (~150ms/min idle). Three NEW small-but-real candidates added at #13-15. Diminishing returns curve clearly flattening; recommend shipping Phase A.
+- **`pass-13-deep-research-2026-05-06.md`** — added 2026-05-06: failure-path audit. **Major finding:** `FILLER_MAX_ATTEMPTS=3` retries can burn 4 minutes per profile when cashback retries are doomed (target shows 0% cashback — no filler shuffle changes this). Short-circuit fix saves ~80-160s on failure cases. Plus three smaller candidates (toggleBGNameAndRetry event-driven waits, selectAllowedAddressRadio 500ms wait, debug-screenshots auto-prune).
+- **`pass-14-deep-research-2026-05-06.md`** — added 2026-05-06: **DIFFERENT ANGLE — BG (Better-BuyingGroup) server-side audit.** Audited every endpoint AmazonG hits + Prisma schema + git revert history. **Major finding:** AutoBuyJob is missing `@@index([userId, phase, createdAt(sort: Desc)])` — the index that the hottest endpoint (`/api/autog/purchases`) needs. Adding it saves 50-300ms per call × 5-8 calls/fan-out = 250ms-2.4s/fan-out per user, server-side. Also documented BG-side caching candidates (version endpoint), reverted-perf-experiment lessons.
+- **`pass-15-deep-research-2026-05-06.md`** — added 2026-05-06: **DIFFERENT ANGLE #2 — BG worker + deals catalog + dependency tree.** BG worker auto-poll cadence is 6 minutes (discovery latency floor — out of scope for AmazonG fixes). Found one BG-side missing index on SharedDeal.storeSlugs (~100-500ms/Deals-tab-open). Confirmed AmazonG dependencies are clean (lucide tree-shaken correctly). Renderer bundle 1.29MB could be code-split per route (~50-100ms app-launch parse savings). Diminishing returns now genuinely steep.
+- **`pass-16-deep-research-2026-05-06.md`** — added 2026-05-06: **DIFFERENT ANGLE #3 — BG `lib/` + auto-update.** Major finding: `autoSubmitTracking` is awaited inline in BG status endpoint — every fetch_tracking phase status report blocks BG response by ~500ms-2s for upstream buyinggroup.com submission. Easy `waitUntil` fix (BG-side). Plus secondary finding: `createRebuyJob` loop also awaited serially. AmazonG's auto-update is manual (no background download via electron-updater).
+- **`pass-17-deep-research-2026-05-06.md`** — added 2026-05-06: **CHECKOUT PAGE FOCUSED** (user-prompted). Major finding: 3 /spc readers use `page.content()` + JSDOM unnecessarily. The CDP serialize round-trip (~80-150ms per call) dominates; inlining the parsers into `page.evaluate` skips both the round-trip AND the parse. **~1.0-1.3s saved per buy on /spc-side reads alone** (pickBestCashbackDelivery + verifyTargetCashback + readCashbackOnPage). Distinct from A1 (HTTP-fetched sites still use node-html-parser swap).
+- **`pass-18-deep-research-2026-05-06.md`** — added 2026-05-06: **CHECKOUT FOLLOW-UP** (user-prompted continuation). Two minor wins: (1) `scrollTargetIntoView` runs 3× per filler buy redundantly — move to one upfront call (~100ms/filler-buy); (2) pre-place `waitFor({state:'visible'})` is redundant since `click()` does the same actionability check (~50-100ms/buy). Confirmed /spc resource blocking already near-optimal — pass 7 §3 covers remaining surface. **Pass 17+18 together: ~1.5-2s per typical buy on /spc** — biggest concentrated checkout-side saving in the arc.
 
 ## Ranking method
 
@@ -58,16 +70,36 @@ buy in a queue or only on multi-profile fan-out are noted separately.
 
 | Rank | Candidate | Saving | Risk | Score | Source | Status |
 |---|---|---|---|---|---|---|
-| 1 | **Skip duplicate `/order-details` fetch in `fetchTracking`** | ~1000ms / active tracking | Low | 1000 | Pass 2 #13 / Pass 4 #3 | unshipped |
-| 2 | **Swap `jsdom` → `node-html-parser` for read-only DOM parses** (15 call sites) | 500–800ms / filler buy, 300–500ms / single buy | Low | 500–800 | Pass 4 #1 | unshipped |
-| 3 | **`page.goto({ waitUntil: 'commit' })` for PDP + /spc + drop redundant `domcontentloaded` wait** | 450–900ms / buy (2 navs combined) | Low | 450–900 | Pass 4 #3 + #4 | unshipped |
-| 4 | **Replace `waitForTimeout(1500)` with `page.waitForResponse(/eligibleshipoption/)`** post-delivery-click | 500ms / typical buy | Low–Med | 333 | Pass 2 #16 | unshipped |
-| 5 | **HTTP buynow bypass (HARDENED)** — `POST /checkout/entry/buynow` instead of click | 300–700ms / single-mode buy | Med | 150–350 | Pass 3 #1 → Pass 4 #2 | unshipped, needs hardening |
-| 6 | **Multi-profile shared PDP scrape** | (N−1)×1500ms on N-profile fan-out | Med | 750/extra-profile | Pass 2 #6 | unshipped |
-| 7 | **Fix orphaned `preflightCleared` in buyNow buy-now-click branch** | ~1000ms HTTP capacity (resource hygiene) | Low | 1000 | Pass 2 #5 | unshipped |
-| 8 | **Combine 9 `findPlaceOrderLocator` `loc.count()` probes into one `evaluate`** | 50–150ms always | Low | 50–150 | Pass 2 #10 / A6 | unshipped |
-| 9 | **Parallel-fire first 2 filler search terms when term 1 might underflow** | ~1s in ~20% of buys | Low | 200 expected | Pass 2 #11 / A7 | unshipped |
-| 10 | **Anti-bot driver parity** — `--disable-blink-features=AutomationControlled` + `webdriver=false` stub | resilience (no per-buy ms) | Low | n/a | Pass 6 / C4 | unshipped |
+| 1 | **Cancel-form tier 1 (5 small fixes in cancelForm.ts + cancelFillerOrder.ts)** | **~55–70s/filler-buy across all 3 lifecycle phases** (Pass 9 §1 revised up from pass 8's 25-30s — same fixes apply at buy, verify, AND fetch_tracking) | Low | 55000–70000 | **Pass 8 §2 + Pass 9 §1** | unshipped |
+| 2 | **`listMergedAttempts` two-tier broadcast (local-only fast path; BG-merge slow path on 30s timer + on-demand)** ⭐ NEW | ~500ms-2.4s per fan-out + 95% BG request rate reduction | Low–Med | 500-2400 | **Pass 11 §1** | unshipped |
+| 3 | **Cancel-sweep tier 2 (parallelize across N pages + defer to scheduler tuple)** | **25–55s removed from buy slot per filler buy** | Med | 12500–27500 | **Pass 8 §2** | unshipped |
+| 3 | **Telemetry fix — propagate jobId+profile through step.* emitters** | 0ms (observability — but unblocks all future evidence-based perf work) | Low | n/a | **Pass 7 §1** | unshipped |
+| 4 | **Extend CDP blocklist with 9 newly-probed XHR patterns** (data.amazon.com, /vap/ew/*, twisterDimension, paymentOptions, billOfMaterial, /acp/*, paets advertising, location_selector, patc-config) | **2.0–2.3s / PDP nav** | Low | 2000–2300 | **Pass 7 §3** | unshipped |
+| 5 | **Doomed-cashback-retry short-circuit** ⭐ NEW | **~80-160s saved per failed cashback buy** (10-30% frequency: when attempt-1 cashback was 0/null, filler shuffle won't change Amazon's per-item baseline; current `FILLER_MAX_ATTEMPTS=3` retries blindly for 3-4min) | Low | 80000-160000 (when fires) | **Pass 13 §1** | unshipped |
+| 6 | **BG-side AutoBuyJob compound index** ⭐ NEW | ~50-300ms per `/api/autog/purchases` call × 5-8 calls/fan-out = **~250ms-2.4s/fan-out per user** (server-side; complements pass-11's AmazonG-side broadcast fix) | Low | 250-2400 | **Pass 14 §1** (lives in BG repo) | unshipped |
+| 7 | **Inline /spc parsers into `page.evaluate`** ⭐ NEW | **~1.0-1.3s per buy** (3 sites: pickBestCashbackDelivery iters + verifyTargetCashback + readCashbackOnPage; replaces page.content()+JSDOM with single in-page evaluate) | Low | 1000-1300 | **Pass 17 §1-3** | unshipped |
+| 8 | **BG-side `autoSubmitTracking` → `waitUntil`** | ~500ms-2s per fetch_tracking status report (BG-side; AmazonG's `bg.reportStatus()` returns faster) | Low | 500-2000 | **Pass 16 §1** (lives in BG repo) | unshipped |
+| 8 | **Idle-pool session lifecycle (60s TTL after success)** | **5–15s per consecutive same-profile buy** | Low–Med | 5000–15000 | **Pass 7 §5** | unshipped |
+| 9 | **Skip duplicate `/order-details` fetch in `fetchTracking`** | ~800ms / active tracking | Low | 800 | Pass 2 #13 / Pass 4 #3 | unshipped |
+| 7 | **Swap `jsdom` → `node-html-parser` for read-only DOM parses** | 500–800ms / filler buy, 300–500ms / single buy | Low | 500–800 | Pass 4 #1 | unshipped |
+| 8 | **Event-driven `waitForCheckout` AND `waitForConfirmationOrPending`** rewrite | 500ms–3.5s / buy | Med | 500 / 1500 | W + Pass 7 §4 | unshipped |
+| 9 | **AccountLock: switch verify/fetch_tracking to `acquireRead`** | 1–10s / collision | Low–Med | 1000 expected | **Pass 7 §6** | unshipped |
+| 10 | **Drop `polling: 1000` in `fetchOrderIdsForAsins`** | ~500ms expected/filler-buy (default RAF resolves typical case in ~16ms vs up to 1000ms) | Low | 500 | **Pass 9 §4** | unshipped |
+| 11 | **`listAmazonAccounts` 60s caching** | ~900ms-1.8s/N-job burst (saves N-1 BG round-trips) | Low | 900-1800 | **Pass 11 §3** | unshipped |
+| 12 | **Multi-profile shared PDP scrape with cache** | ~280ms × (N−1) | Med | 750/extra-profile | Pass 2 #6 | unshipped |
+| 13 | **`loadSettings`+`loadProfiles` mtime cache** ⭐ NEW | ~150ms/min idle, ~50ms/burst (file I/O hygiene) | Low | 150ms/min | **Pass 12 §5** | unshipped |
+| 14 | **Lazy `pickIdsToEvict` (move to persist path)** ⭐ NEW | ~50–75ms/fan-out (eliminates O(N log N) per attempt-create) | Low | 50–75 | **Pass 12 §4** | unshipped |
+| 15 | **Parallelize `setMaxQuantity` + `detectBuyPath`** ⭐ NEW | ~30–50ms/buy | Low | 30–50 | **Pass 12 §"sequential-await"** | unshipped |
+
+**🪦 New addition to dead list (was Top-10 #8 last revision):**
+- ~~B3 HTTP buynow bypass~~ — **Pass 8 §1 KILLED THIS.** Empirically 1.3–1.8s SLOWER than click on real cpnduy session. The MASTER doc's "300–700ms saving" estimate was based on the wrong assumption that POST returns a quick 302 to /spc; in reality Amazon now serves the full /spc HTML inline (~340-380KB body, ~2s edge work), and `ctx.request.{get,post}` doesn't stream like `page.goto({ waitUntil: 'commit' })` does. B3+A9 combined recovers parity but not a win.
+
+**Recently shipped between passes 6 and 7 (no longer in rankings):**
+- ~~`page.goto({ waitUntil: 'commit' })` (A5)~~ — shipped `f88cc07`
+- ~~`findPlaceOrderLocator` consolidation (A6)~~ — shipped `0c5ee70`
+- ~~Orphaned `preflightCleared` fix (A8)~~ — shipped `f47d83e`
+- ~~`waitForResponse(/eligibleshipoption/)` (B4)~~ — shipped `b4fc79e`
+- ~~Anti-bot driver parity (C4)~~ — shipped as part of `83e2542`
 
 **Recently shipped (no longer in rankings):**
 - ~~CDP `Network.setBlockedURLs` replaces `context.route()`~~ — shipped `a214bd1`
