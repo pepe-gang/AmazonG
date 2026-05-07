@@ -162,6 +162,29 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     '*://ara.paa-reporting-advertising.amazon/*',   // ad reporting (~207ms)
     '*://pagead2.googlesyndication.com/*',          // Google ads
     '*://d2lbyuknrhysf9.cloudfront.net/*',          // ad-asset CloudFront
+    // Real-User-Monitoring beacon. Image-typed (`<img src="…/rd/uedata?…">`),
+    // ~150-300ms × 2 calls per page, fires on EVERY browser nav AmazonG
+    // makes (PDP / /spc / cart / search / order-details / cancel-form /
+    // address-book). 371-byte empty pixel, pure telemetry, no DOM.
+    // ~2,800-4,000ms saved per filler-mode buy across all page navs.
+    // Live captured 2026-05-06 (blocklist-coverage-2026-05-06.md §rd/uedata).
+    '*://www.amazon.com/rd/uedata*',                // RUM beacon (~200ms × every nav)
+    // 3rd-party AWS API Gateway "monitoring" endpoint that fires once per
+    // search-results nav. Same shape as the existing `paa-reporting-
+    // advertising.amazon` block above. ~167ms × ~6 search-result navs per
+    // filler buy. If Amazon ever migrates this elsewhere, the block silently
+    // becomes a no-op.
+    '*://pgi7j6i5ab.execute-api.us-east-1.amazonaws.com/*',  // search analytics (~167ms × 6)
+    // Recommendations Hub Frame — "Recently viewed items and featured
+    // recommendations" carousel. Fires on every order-details, tracking,
+    // cancel-form, address-book, etc. browser nav. ~950ms × up to 6 calls
+    // per filler-buy lifecycle in cancel paths. Verified structurally
+    // separate from AmazonG's parser selectors (#rhf is a sibling subtree
+    // tagged role="complementary"; zero of [data-asin], [data-component=
+    // "cancelled"], #orderDetails, or the cancel form's
+    // input[name*="itemId"|"orderItem"] / submit buttons fall inside it).
+    // Live verification recorded in blocklist-coverage-2026-05-06.md.
+    '*://www.amazon.com/hz/rhf*',                   // Recs Hub Frame widget (~950ms × cancel paths)
     // In-page widgets that fire on PDP and never feed buy-box DOM.
     '*://www.amazon.com/rufus/cl/*',                // Rufus AI chat (~850ms)
     '*://www.amazon.com/dram/renderLazyLoaded*',    // recommendations (~630ms)
