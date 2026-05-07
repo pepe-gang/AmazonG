@@ -2161,10 +2161,17 @@ export async function pickBestCashbackDelivery(
     try {
       await page.locator(sel).first().click({ timeout: 5_000 });
       changes.push({ picked: plan.label, pct: plan.pickedPct });
-      // Settle: Amazon re-renders totals + cashback banner after each
-      // radio click. 500ms is generous but keeps us under the
-      // downstream cashback_gate's budget.
-      await page.waitForTimeout(500);
+      // No settle wait between iterations — `:checked` updates
+      // synchronously on click (live measured ~7ms), and on this profile's
+      // /spc Amazon doesn't async-re-render the radio labels in the post-
+      // click window (verified at t+0/+100/+500/+1000/+2000/+3500ms — no
+      // label drift). The next iter's `page.evaluate` CDP round-trip is
+      // itself ~10-30ms, which is enough buffer for the click event to
+      // propagate. Real shipping-options settle happens downstream in
+      // `waitForDeliverySettle` (waits up to 2.5s for the
+      // `eligibleshipoption` response). Saves 500ms × N clicks per call
+      // site (typical 1-2 = 500-1000ms; ~4-6 call sites per filler buy).
+      // See blocklist-coverage-2026-05-06 §pickBestCashbackDelivery.
     } catch {
       // A single-radio failure isn't fatal — the cashback gate will
       // catch it downstream. Break out so we don't spin on a
