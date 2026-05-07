@@ -252,9 +252,22 @@ export async function cancelFillerOrderViaOrderDetails(
       detail: err instanceof Error ? err.message : String(err),
     };
   }
-  // Order-details is a heavy page; give it a beat to hydrate before
-  // querying for the cancel-items link.
-  await page.waitForTimeout(1_500);
+  // The cancel-items link + `[data-component="cancelled"]` blocks are
+  // server-side rendered (verified via raw HTTP fetch — 60 data-component
+  // attrs in the SSR HTML, the cancel link is in the static markup). So
+  // both targets are in the DOM the moment `domcontentloaded` settles —
+  // the previous blind `waitForTimeout(1_500)` was pure padding.
+  // Replace with an event-driven selector wait that fires immediately on
+  // cancellable orders and falls through silently on already-shipped
+  // ones (the next page.evaluate then returns `cancelHref: null` and we
+  // report "no cancel link" exactly as before). Saves up to 1,450ms per
+  // cancel-detail nav (× up to 3 phases per filler buy).
+  await page
+    .waitForSelector(
+      '[data-component="cancelled"], a[href*="preship/cancel-items"]',
+      { timeout: 1_500 },
+    )
+    .catch(() => undefined);
 
   // Pull the parser-friendly snapshot of the page and feed it to the
   // pure helper. Keeps detection logic testable from a saved fixture.
@@ -355,7 +368,14 @@ export async function cancelFillerOrderViaOrderDetails(
       detail: err instanceof Error ? err.message : String(err),
     };
   }
-  await page.waitForTimeout(1_500);
+  // The cancel-items form (with its checkboxes) is server-side rendered
+  // — same SSR pattern as order-details above. Replace the blind 1500ms
+  // padding with an event-driven selector wait. Falls through silently
+  // when the page didn't land on /cancel-items (the URL check below
+  // catches that case explicitly).
+  await page
+    .waitForSelector('form input[type="checkbox"]', { timeout: 1_500 })
+    .catch(() => undefined);
 
   // We should now be on the same cancel-items form `openCancelPage`
   // would have given us — verify, then reuse the same submit/confirm
