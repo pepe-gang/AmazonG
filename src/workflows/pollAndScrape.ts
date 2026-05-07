@@ -14,6 +14,10 @@ import {
   cancelFillerOrderViaOrderDetails,
 } from '../actions/cancelFillerOrder.js';
 import { cancelNonTargetItems } from '../actions/cancelNonTargetItems.js';
+import {
+  selectBuyProfiles,
+  selectVerifyTrackingProfile,
+} from './profileFilters.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
 import { fetchTracking } from '../actions/fetchTracking.js';
 import { DEFAULT_CONSTRAINTS, verifyProductDetailed } from '../parsers/productConstraints.js';
@@ -668,15 +672,15 @@ export function startWorker(deps: Deps): WorkerHandle {
     const eligibleAll = await deps.listEligibleProfiles();
     if (eligibleAll.length === 0) return null;
 
-    // Buy phase: use enabled profiles and build per-account overrides.
-    // Verify/tracking phase: use the placedEmail account if it's
-    // signed in (handleVerifyJob/handleFetchTrackingJob accept the
-    // single-element list and select internally).
+    // Per-phase profile selection — see `profileFilters.ts` for the
+    // pure helpers and the unit tests pinning the rules.
+    //
+    // Verify / fetch_tracking: only run on the account that placed
+    // the order (`placedEmail`), and only if that account's `enabled`
+    // is true. `autoBuy` is intentionally ignored here so the user
+    // can pause new buys without losing tracking on existing orders.
     if (job.phase === 'verify' || job.phase === 'fetch_tracking') {
-      const target = (job.placedEmail ?? '').toLowerCase();
-      const profile = eligibleAll.find(
-        (p) => p.email.toLowerCase() === target,
-      );
+      const profile = selectVerifyTrackingProfile(eligibleAll, job.placedEmail);
       return {
         eligible: profile ? [profile] : [],
         fillerByEmail: new Map<string, boolean>(),
@@ -688,7 +692,10 @@ export function startWorker(deps: Deps): WorkerHandle {
     }
 
     // Buy phase preamble:
-    //   1. enabled profiles only (rebuy path scopes to placedEmail)
+    //   1. selectBuyProfiles applies enabled + autoBuy filter (rebuy
+    //      path scopes to placedEmail). Master `enabled` flag drops
+    //      accounts entirely; `autoBuy: false` keeps them live for
+    //      verify/tracking but skips claiming new buy jobs.
     //   2. fillerByEmail from shouldUseFillers (per-profile decision)
     //   3. requireMinByEmail from BG's listAmazonAccounts. On failure
     //      default to gate-enforced so a BG outage can't silently
@@ -696,11 +703,7 @@ export function startWorker(deps: Deps): WorkerHandle {
     //   4. effectiveMinByEmail derived from per-account requireMinCashback
     //      AND-combined with job.requireMinCashback. Either side saying
     //      "skip" means skip.
-    let eligible = eligibleAll.filter((p) => p.enabled);
-    if (job.placedEmail) {
-      const t = job.placedEmail.toLowerCase();
-      eligible = eligible.filter((p) => p.email.toLowerCase() === t);
-    }
+    let eligible = selectBuyProfiles(eligibleAll, job.placedEmail);
     const parallelism = await deps.loadParallelism().catch(() => ({
       maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
       wheyProteinFillerOnly: false,

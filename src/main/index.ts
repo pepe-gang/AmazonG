@@ -1178,6 +1178,15 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(
+    IPC.profilesSetAutoBuy,
+    async (_e, email: string, autoBuy: boolean) => {
+      const list = await updateProfile(email, { autoBuy });
+      await broadcastProfiles(list);
+      return list;
+    },
+  );
+
+  ipcMain.handle(
     IPC.profilesSetHeadless,
     async (_e, email: string, headless: boolean) => {
       const list = await updateProfile(email, { headless });

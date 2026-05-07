@@ -193,7 +193,33 @@ export type IdentityInfo = {
 export type AmazonProfile = {
   email: string;
   displayName: string | null;
+  /**
+   * Master per-account participation flag. When false, the worker
+   * skips this account on EVERY phase (buy, verify, fetch_tracking).
+   * Use this to fully take an account out of the worker pool — e.g.,
+   * the account is signed-out, flagged by Amazon, on a temporary
+   * pause, etc. Defaults to true.
+   *
+   * Distinct from `autoBuy`: `enabled` is "is this account live at
+   * all"; `autoBuy` (when `enabled` is true) is "should it claim new
+   * buy jobs". To pause buys but keep verify/tracking running for
+   * existing orders, set `enabled: true, autoBuy: false`.
+   */
   enabled: boolean;
+  /**
+   * When true (and `enabled` is also true), this account claims new
+   * buy-phase jobs. When false (with `enabled: true`), the worker
+   * SKIPS new buys for this account but still runs verify and
+   * fetch_tracking phases for orders this account already placed.
+   *
+   * Use this to temporarily stop new buys without taking the account
+   * out of the worker pool entirely (e.g., card declined, hit daily
+   * cap, taking a break). Defaults to true.
+   *
+   * Loaded with backfill default `true` for existing profiles whose
+   * stored JSON predates this field — see profiles.ts.
+   */
+  autoBuy: boolean;
   addedAt: string;
   lastLoginAt: string | null;
   loggedIn: boolean;

@@ -34,6 +34,8 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.profilesRefresh, email) as Promise<AmazonProfile | null>,
   profilesSetEnabled: (email, enabled) =>
     ipcRenderer.invoke(IPC.profilesSetEnabled, email, enabled) as Promise<AmazonProfile[]>,
+  profilesSetAutoBuy: (email, autoBuy) =>
+    ipcRenderer.invoke(IPC.profilesSetAutoBuy, email, autoBuy) as Promise<AmazonProfile[]>,
   profilesSetHeadless: (email, headless) =>
     ipcRenderer.invoke(IPC.profilesSetHeadless, email, headless) as Promise<AmazonProfile[]>,
   profilesSetBuyWithFillers: (email, buyWithFillers) =>

@@ -454,6 +454,14 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
     }
   };
 
+  const toggleAutoBuy = async (email: string, autoBuy: boolean) => {
+    try {
+      await window.autog.profilesSetAutoBuy(email, autoBuy);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const refreshAll = async () => {
     setRefreshingAll(true);
     try {
@@ -641,25 +649,48 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                     {(p.displayName || p.email).charAt(0).toUpperCase()}
                   </div>
                   {!isRenaming && (
-                    <label
-                      className="flex items-center gap-2 cursor-pointer"
-                      title={
-                        !p.loggedIn
-                          ? 'Sign in first to enable this account'
-                          : p.enabled
-                            ? 'Enabled — included when the worker fans out a job'
-                            : 'Disabled — worker skips this account'
-                      }
-                    >
-                      <Switch
-                        checked={p.loggedIn && p.enabled}
-                        disabled={!p.loggedIn}
-                        onCheckedChange={(v) => void toggleEnabled(p.email, v)}
-                      />
-                      <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
-                        {p.enabled ? 'Enabled' : 'Disabled'}
-                      </span>
-                    </label>
+                    <div className="flex flex-col gap-1.5">
+                      <label
+                        className="flex items-center gap-2 cursor-pointer"
+                        title={
+                          !p.loggedIn
+                            ? 'Sign in first to enable this account'
+                            : p.enabled
+                              ? 'Enabled — account participates in the worker (buy + verify + tracking)'
+                              : 'Disabled — worker skips this account on EVERY phase (buy, verify, tracking)'
+                        }
+                      >
+                        <Switch
+                          checked={p.loggedIn && p.enabled}
+                          disabled={!p.loggedIn}
+                          onCheckedChange={(v) => void toggleEnabled(p.email, v)}
+                        />
+                        <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
+                          {p.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </label>
+                      <label
+                        className="flex items-center gap-2 cursor-pointer"
+                        title={
+                          !p.loggedIn
+                            ? 'Sign in first to enable this account'
+                            : !p.enabled
+                              ? 'Enable the account first — Auto Buy is ignored when the account is Disabled'
+                              : p.autoBuy
+                                ? 'Auto Buy on — account claims new buy jobs'
+                                : 'Auto Buy off — account skips new buys but still verifies + tracks existing orders'
+                        }
+                      >
+                        <Switch
+                          checked={p.loggedIn && p.enabled && p.autoBuy}
+                          disabled={!p.loggedIn || !p.enabled}
+                          onCheckedChange={(v) => void toggleAutoBuy(p.email, v)}
+                        />
+                        <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
+                          {p.autoBuy ? 'Auto Buy' : 'No Buy'}
+                        </span>
+                      </label>
+                    </div>
                   )}
                 </div>
                 <div className="account-main">
