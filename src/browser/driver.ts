@@ -178,6 +178,12 @@ export async function openSession(profile: string, opts: DriverOptions): Promise
     '*://www.amazon.com/cart/ewc/*',                       // mini-cart preview (~608ms)
     '*://www.amazon.com/cart/add-to-cart/patc-template*',  // added-to-cart animation (~166ms)
     '*://www.amazon.com/cart/add-to-cart/get-cart-items*', // cart-fetch widget (~161ms)
+    // Pickup-At-The-Counter config XHR — fires unconditionally on every
+    // /spc load (~175ms, 6.5KB). PATC is a feature for picking up at a
+    // physical counter; AmazonG always ships to home addresses, so this
+    // config is never read. Pass-7 §3 originally flagged it; spc-deep-
+    // dive-2026-05-06 #2 re-confirmed via live MCP probe.
+    '*://www.amazon.com/cart/add-to-cart/patc-config*',    // PATC config XHR (~175ms)
     // /spc-side widget. Fires unconditionally on every /spc load (~250ms).
     // Bisect-suspected for the filler-mode Place-Order 500: when blocked
     // via CDP, Chromium returns net::ERR_BLOCKED_BY_CLIENT to the page's
