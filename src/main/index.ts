@@ -19,6 +19,10 @@ import {
   readLogs as storeReadLogs,
   updateAttempt as storeUpdateAttempt,
 } from './jobStore.js';
+import {
+  classifyOrphans,
+  STALE_PENDING_REASON,
+} from './jobReconcile.js';
 import { verifyOrder } from '../actions/verifyOrder.js';
 import { fetchTracking } from '../actions/fetchTracking.js';
 import { makeAttemptId } from '../shared/sanitize.js';
@@ -435,29 +439,60 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
     }
   }
 
-  // Auto-prune local terminal-state orphans. When BG's poll succeeded
-  // (serverRows is the result of a successful listPurchases call —
-  // we'd have returned `local` early on failure) and a local row in
-  // failed / cancelled_by_amazon state has no matching BG row, BG
-  // either never persisted it or the user deleted it server-side
-  // (e.g. via the dashboard's "Delete cancelled & failed" button).
-  // Either way the local cache should drop it so the desktop table
-  // stops showing rows BG no longer holds. The 60s grace window
-  // protects against the race where /status hasn't yet synced a
-  // fresh local fail to BG.
+  // Auto-prune local orphans in two passes (see jobReconcile.ts for the
+  // pure classifier + thresholds):
+  //
+  // (a) Terminal orphans (failed | cancelled_by_amazon) with no BG
+  //     match — drop entirely. BG either never persisted them or the
+  //     user deleted them server-side (e.g. via the dashboard's
+  //     "Delete cancelled & failed" button). 60s grace window
+  //     protects against the race where /status hasn't yet synced a
+  //     fresh local fail to BG.
+  //
+  // (b) Pending orphans (queued | in_progress | awaiting_verification)
+  //     with no BG match AND older than 30 min — flip to 'failed'.
+  //     Worker crashed mid-buy / app closed before /status reported /
+  //     BG timed out the claim and another instance finished the work.
+  //     Without this auto-flip the row sits stranded in 'queued' /
+  //     'in_progress' forever (surfacing as "Active jobs" or Pending
+  //     in the purchases table) until the user manually clicks "Sync
+  //     with BG". 30-min window matches `jobsReconcileStuck` and is
+  //     well past any normal buy time. We only mark locally — the
+  //     manual "Sync with BG" button still handles BG-side
+  //     `deletePurchases` cleanup separately, so this auto-path stays
+  //     side-effect-free against BG. On the NEXT broadcast the
+  //     now-failed row enters case (a) above and is pruned for good
+  //     (or matched against BG if the server caught up). The merged
+  //     map also gets bumped here so the row reflects 'failed' in the
+  //     SAME response without waiting for the next broadcast cycle.
   const serverKeys = new Set(serverRows.map((s) => keyOf(s)));
-  const TERMINAL_LOCAL_AGE_MS = 60_000;
-  const cutoff = Date.now() - TERMINAL_LOCAL_AGE_MS;
-  const orphanIds: string[] = [];
-  for (const l of local) {
-    const isTerminal = l.status === 'failed' || l.status === 'cancelled_by_amazon';
-    if (!isTerminal) continue;
-    if (serverKeys.has(keyOf(l))) continue;
-    const lastTouched = Date.parse(l.updatedAt ?? l.createdAt);
-    if (Number.isFinite(lastTouched) && lastTouched > cutoff) continue;
-    orphanIds.push(l.attemptId);
-    merged.delete(keyOf(l));
+  const now = Date.now();
+  const { terminalOrphanIds: orphanIds, stalePendingIds } = classifyOrphans({
+    local,
+    serverKeys,
+    now,
+  });
+
+  for (const id of orphanIds) {
+    // Find the local row by attemptId to delete from the merged map.
+    const row = local.find((l) => l.attemptId === id);
+    if (row) merged.delete(keyOf(row));
   }
+  for (const id of stalePendingIds) {
+    const row = local.find((l) => l.attemptId === id);
+    if (!row) continue;
+    const k = keyOf(row);
+    const existing = merged.get(k);
+    if (existing) {
+      merged.set(k, {
+        ...existing,
+        status: 'failed',
+        error: STALE_PENDING_REASON,
+        updatedAt: new Date(now).toISOString(),
+      });
+    }
+  }
+
   if (orphanIds.length > 0) {
     await storeDeleteAttempts(orphanIds).catch((err) => {
       logger.warn('listMergedAttempts.orphanPrune.error', {
@@ -465,6 +500,29 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
         err: err instanceof Error ? err.message : String(err),
       });
     });
+  }
+
+  if (stalePendingIds.length > 0) {
+    logger.info('listMergedAttempts.stalePendingFlipped', {
+      count: stalePendingIds.length,
+    });
+    // Persist sequentially via storeUpdateAttempt so each write goes
+    // through the same JSON-store flush any normal status update uses.
+    // Failures don't block the merge — the in-memory `merged` map
+    // already reflects the flip, so the user sees the corrected status
+    // this broadcast; on-disk store catches up next time if a write
+    // missed.
+    for (const attemptId of stalePendingIds) {
+      await storeUpdateAttempt(attemptId, {
+        status: 'failed',
+        error: STALE_PENDING_REASON,
+      }).catch((err) => {
+        logger.warn('listMergedAttempts.stalePendingFlip.error', {
+          attemptId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
   }
 
   // Respect the user's local "deleted from view" set. Server rows for
