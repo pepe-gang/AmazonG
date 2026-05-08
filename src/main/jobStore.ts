@@ -1,7 +1,6 @@
 import { app } from 'electron';
 import {
   readFile,
-  writeFile,
   mkdir,
   appendFile,
   readdir,
@@ -9,6 +8,7 @@ import {
   rm,
 } from 'node:fs/promises';
 import { join } from 'node:path';
+import { writeJsonAtomic } from './atomicJson.js';
 import type { JobAttempt, LogEvent } from '../shared/types.js';
 import { snapshotDir, clearAllSnapshots } from '../browser/snapshot.js';
 import { pickIdsToEvict } from './jobStoreRingBuffer.js';
@@ -77,8 +77,7 @@ function migrateLegacyStatuses(store: Stored): void {
 
 async function persist(): Promise<void> {
   if (!cache) return;
-  await mkdir(app.getPath('userData'), { recursive: true });
-  await writeFile(attemptsPath(), JSON.stringify(cache, null, 2), 'utf8');
+  await writeJsonAtomic(attemptsPath(), cache);
 }
 
 function scheduleSave(): void {

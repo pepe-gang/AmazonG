@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { BrowserContext, Locator, Page } from 'playwright';
 import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { logger } from '../shared/logger.js';
+import { formatChaseDollarAmount } from '../shared/chasePayments.js';
 import type { ChaseAccountSnapshot } from '../shared/types.js';
 import { chaseProfileDir, chaseSessionStatePath } from './chaseProfiles.js';
 import { getChaseCredentials } from './chaseCredentials.js';
@@ -12,7 +13,10 @@ import {
   parseInProcessPaymentsFromHtml,
   parsePendingChargesFromHtml,
 } from './chaseScrape.js';
-import { STAGE_C_IN_PAGE_HELPERS_SRC } from './chaseStageCInPageHelpers.js';
+import {
+  STAGE_C_IN_PAGE_HELPERS_SRC,
+  type StageCFetchResult,
+} from './chaseStageCInPageHelpers.js';
 import {
   mapBillpayActivitiesToInProcess,
   mapPaymentDetailToInProcess,
@@ -1370,10 +1374,9 @@ async function runFetch(
     let inProcessPayments: ChasePaymentEntry[] = [];
     let lockStatus: string | undefined;
     let autoPayEnrolled: boolean | undefined;
-    // Source flags drive the Stage B fallback decisions further down:
-    // when Stage C provided the value, the slow DOM-scrape path is
-    // skipped; when Stage C failed, fall through to the legacy nav +
-    // scrape so we don't ship blanks.
+    // Source flags drive the DOM-scrape fallback decisions further
+    // down. Derived from Stage C's result inside the try block; kept
+    // here so they're in scope for the post-try fallback paths.
     let stageCInProcessSourced = false;
     let stageCPendingSourced = false;
 
@@ -1391,80 +1394,65 @@ async function runFetch(
           return { ok: false, reason: recovery.reason };
         }
       }
-      // Wait for both Stage B XHRs to land (typed JSON path) OR for
-      // the recon-bar selector to render (DOM-scrape fallback). The
-      // race resolves on whichever wins. 6s ceiling: empirical capture
-      // showed both XHRs land within ~3-5s on a healthy session; if
-      // they haven't fired by 6s, Chase is most likely rate-limiting
-      // (parallel-fetch failure mode) and we should bail to DOM
-      // fallback fast instead of eating a long wait BEFORE the
-      // selector wait even starts. Bumped down from 15s after a
-      // 4-way parallel fetch on 2026-05-07 stalled 3 of 4 cards
-      // because the long XHR poll compounded on top of rate-limited
-      // hydration.
-      const xhrsLandedDeadline = Date.now() + 6_000;
-      while (
-        (xhrJson.dashboard === null || xhrJson.rewards === null) &&
-        Date.now() < xhrsLandedDeadline
-      ) {
+      // Wait for the dashboard XHR (Stage C sentinel — proves _abck is
+      // post-hydration per pass-7 round-1). 4s ceiling: empirical capture
+      // shows the SPA fires this within ~3s on healthy sessions; longer
+      // waits compounded on top of rate-limited hydration in pass-7.
+      // Rewards XHR is captured by the same listener in the background
+      // and extracted later — no need to block Stage C on it.
+      const dashboardDeadline = Date.now() + 4_000;
+      while (xhrJson.dashboard === null && Date.now() < dashboardDeadline) {
         await page.waitForTimeout(150);
       }
 
-      // Stage B happy path: extract from typed JSON.
+      // Stage B happy path: extract balance + available from the typed
+      // dashboard JSON now; rewards is read after Stage C runs (so the
+      // rewards listener has more time to fire in the background).
       const detailFromCache = extractDashboardDetail(xhrJson.dashboard, cardAccountId);
       if (detailFromCache) {
         creditBalance = formatChaseDollarAmount(detailFromCache.currentBalance);
         availableCredit = formatChaseDollarAmount(detailFromCache.availableCredit);
       }
-      const pointsFromXhr = extractRewardsBalance(xhrJson.rewards, cardAccountId);
-      if (pointsFromXhr !== null) {
-        pointsBalance = formatChasePointsAmount(pointsFromXhr);
-      }
-      logger.info('chase.snapshot.stageB.xhrs', {
-        profileId,
-        cardAccountId: redactCardId(cardAccountId),
-        dashboardArrived: xhrJson.dashboard !== null,
-        rewardsArrived: xhrJson.rewards !== null,
-        detailExtracted: detailFromCache !== null,
-        pointsExtracted: pointsFromXhr !== null,
-      });
 
-      // Stage C — fired EARLY (before any DOM scrape) so its
-      // pendingChargesAmount + paymentDetail + lockStatus +
-      // autoPayEnrolled can short-circuit the slow DOM-scrape paths.
-      // Sentinel: only fires when Stage B's listener already captured
-      // the SPA's first dashboard XHR (proves _abck is post-hydration
-      // per pass-7 round-1).
-      //
-      // Empirically (Playwright MCP, 2026-05-08): overview + etu
-      // parallel batch returns 200 in ~609ms and totalPendingChargeAmount
-      // matches the DOM "Pending charges:" line exactly — replacing the
-      // 5-7s DOM-scrape wait + parse on the happy path.
-      //
+      // Stage C — fired EARLY so its typed JSON values can short-circuit
+      // the slow DOM-scrape fallback paths. Empirically (MCP, 2026-05-08):
+      // overview + etu + billpay parallel batch returns 200 in ~600ms.
       // Disabled by AUTOG_CHASE_DISABLE_STAGE_C=1.
       const stageCEnabled =
         process.env.AUTOG_CHASE_DISABLE_STAGE_C !== '1' && xhrJson.dashboard !== null;
       const stageC = stageCEnabled ? await fetchStageCOverview(page, cardAccountId) : null;
+
+      // Rewards XHR — give the listener a brief grace period if it
+      // hasn't fired yet (rare on healthy sessions; Stage C has been
+      // running so the listener had plenty of wall-clock time). Points
+      // is a soft-fail field — empty string renders as em-dash in the UI.
+      if (xhrJson.rewards === null) {
+        const rewardsDeadline = Date.now() + 2_000;
+        while (xhrJson.rewards === null && Date.now() < rewardsDeadline) {
+          await page.waitForTimeout(150);
+        }
+      }
+      const pointsFromXhr = extractRewardsBalance(xhrJson.rewards, cardAccountId);
+      if (pointsFromXhr !== null) {
+        pointsBalance = formatChasePointsAmount(pointsFromXhr);
+      }
+
       if (stageC && stageC.ok) {
         if (stageC.lockStatus !== null) lockStatus = stageC.lockStatus;
         if (stageC.autoPayEnrolled !== null) autoPayEnrolled = stageC.autoPayEnrolled;
         // Prefer the multi-row billpay/card/payment/list result; fall
         // back to the one-slot paymentDetail summary if billpay failed.
-        // Both are typed JSON; either way we skip the activity-page nav
-        // + DOM scrape Stage B fallback path further down.
         const billpayMapped =
           stageC.billpayActivities !== null
             ? mapBillpayActivitiesToInProcess(stageC.billpayActivities)
             : null;
         inProcessPayments =
           billpayMapped !== null ? billpayMapped : mapPaymentDetailToInProcess(stageC.paymentDetail);
-        stageCInProcessSourced = true;
         if (stageC.pendingChargesAmount !== null) {
           pendingCharges =
             stageC.pendingChargesAmount > 0
               ? formatChaseDollarAmount(stageC.pendingChargesAmount)
               : '';
-          stageCPendingSourced = true;
         }
         logger.info('chase.snapshot.stageC.ok', {
           profileId,
@@ -1475,6 +1463,9 @@ async function runFetch(
           pendingFromStageC: stageC.pendingChargesAmount,
           lockStatus: lockStatus ?? null,
           autoPayEnrolled: autoPayEnrolled ?? null,
+          dashboardArrived: xhrJson.dashboard !== null,
+          rewardsArrived: xhrJson.rewards !== null,
+          pointsExtracted: pointsFromXhr !== null,
         });
       } else if (stageC) {
         logger.info('chase.snapshot.stageC.fallback', {
@@ -1483,6 +1474,16 @@ async function runFetch(
           reason: stageC.reason,
         });
       }
+
+      // Set source flags (declared at function top so they're in scope
+      // for the post-try fallback paths). True exactly when Stage C
+      // contributed the field.
+      stageCInProcessSourced = !!(stageC && stageC.ok);
+      stageCPendingSourced = !!(
+        stageC &&
+        stageC.ok &&
+        stageC.pendingChargesAmount !== null
+      );
 
       // Pending-charges DOM scrape — only runs when Stage C didn't
       // supply totalPendingChargeAmount (kill switch on, sentinel never
@@ -1885,21 +1886,6 @@ function extractRewardsBalance(json: unknown, cardAccountId: string): number | n
 }
 
 /**
- * Format a Chase JSON dollar number to the same string shape the
- * UI used to scrape from the recon bar. Negative values get a "-"
- * prefix before the "$" (Chase's recon bar renders "-$1,105.68"
- * for credit balances). Two decimal places, comma-grouped.
- */
-function formatChaseDollarAmount(num: number): string {
-  const sign = num < 0 ? '-' : '';
-  const abs = Math.abs(num);
-  return `${sign}$${abs.toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
-
-/**
  * Format a Chase JSON points integer to the "<n,nnn> pts" string
  * shape the loyalty page used to render. Matches the prior parser's
  * output so the renderer's display logic doesn't need to change.
@@ -1963,8 +1949,10 @@ type StageCOverviewResult =
  * Anti-bot posture is identical to Stage B's listener path: same
  * Chromium TLS, same cookies, same headers Chase emits naturally on
  * its own SPA-fired XHR. Empirical via Playwright MCP (2026-05-08):
- * 3-fetch parallel batch (overview + rewards + etu) returned 200 in
- * ~609ms from inside an authed page.
+ * 3-fetch parallel batch (overview + etu + billpay) returned 200 in
+ * ~600-720ms from inside an authed page. Rewards is captured by
+ * Stage B's passive XHR listener separately (no Stage C fetch needed
+ * for it — the SPA fires it on the per-card page hydration).
  *
  * Disabled when AUTOG_CHASE_DISABLE_STAGE_C=1 (kill switch).
  */
@@ -1972,16 +1960,12 @@ async function fetchStageCOverview(
   page: Page,
   cardAccountId: string,
 ): Promise<StageCOverviewResult> {
-  const requestId = randomUUID();
-  const etuRequestId = randomUUID();
-  const billpayRequestId = randomUUID();
   // Inline PR1's tested helpers (single source of truth) into the
   // page.evaluate body. String form so we control body/header
   // serialization without Playwright's stringify-and-arg dance.
-  // Three fetches in Promise.allSettled — partial failure still
+  // Three fetches via Promise.allSettled — partial failure still
   // returns useful data; the caller maps each missing piece to its
-  // own fallback (DOM scrape for pending charges, paymentDetail
-  // mapping for in-process, etc).
+  // own fallback.
   const etuUrl =
     `/svc/rr/accounts/secure/gateway/credit-card/transactions/inquiry-maintenance/etu-transactions/v4/accounts/transactions` +
     `?digital-account-identifier=${encodeURIComponent(cardAccountId)}` +
@@ -1989,62 +1973,39 @@ async function fetchStageCOverview(
   // billpay/card/payment/list takes payeeId with a leading '-' (matches
   // the activity-page URL fragment Chase's SPA itself uses).
   const billpayBody = `autoPayPendingEnabled=true&payeeId=-${encodeURIComponent(cardAccountId)}`;
+  const requestIds = {
+    overview: randomUUID(),
+    etu: randomUUID(),
+    billpay: randomUUID(),
+  };
   const evalSrc = `(async () => {
 ${STAGE_C_IN_PAGE_HELPERS_SRC}
-    const formHeaders = {
+    const baseHeaders = {
       'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
       'accept': 'application/json, text/plain, */*',
       'x-jpmc-csrf-token': 'NONE',
       'x-jpmc-channel': 'id=C30',
     };
-    const [ovSettled, etuSettled, billpaySettled] = await Promise.allSettled([
-      (async () => {
-        const f = await fetchWithTimeout(
-          '/svc/rl/accounts/secure/v1/dashboard/module/list?context=WEB_CBO_OVERVIEW_DASHBOARD',
-          {
-            method: 'POST',
-            credentials: 'include',
-            headers: { ...formHeaders, 'x-jpmc-client-request-id': ${JSON.stringify(requestId)} },
-            body: 'context=WEB_CBO_OVERVIEW_DASHBOARD&selectorIdType=CUSTOMER_GROUP',
-          },
-          8000,
-        );
-        if (!f.ok) return f;
-        return await classifyResponse(f.response);
-      })(),
-      (async () => {
-        const f = await fetchWithTimeout(
-          ${JSON.stringify(etuUrl)},
-          {
-            method: 'GET',
-            credentials: 'include',
-            headers: { ...formHeaders, 'x-jpmc-client-request-id': ${JSON.stringify(etuRequestId)} },
-          },
-          8000,
-        );
-        if (!f.ok) return f;
-        return await classifyResponse(f.response);
-      })(),
-      (async () => {
-        const f = await fetchWithTimeout(
-          '/svc/rr/payments/secure/v1/billpay/card/payment/list',
-          {
-            method: 'POST',
-            credentials: 'include',
-            headers: { ...formHeaders, 'x-jpmc-client-request-id': ${JSON.stringify(billpayRequestId)} },
-            body: ${JSON.stringify(billpayBody)},
-          },
-          8000,
-        );
-        if (!f.ok) return f;
-        return await classifyResponse(f.response);
-      })(),
+    const settled = await Promise.allSettled([
+      fetchAndClassify('/svc/rl/accounts/secure/v1/dashboard/module/list?context=WEB_CBO_OVERVIEW_DASHBOARD', {
+        method: 'POST', credentials: 'include',
+        headers: { ...baseHeaders, 'x-jpmc-client-request-id': ${JSON.stringify(requestIds.overview)} },
+        body: 'context=WEB_CBO_OVERVIEW_DASHBOARD&selectorIdType=CUSTOMER_GROUP',
+      }, 8000),
+      fetchAndClassify(${JSON.stringify(etuUrl)}, {
+        method: 'GET', credentials: 'include',
+        headers: { ...baseHeaders, 'x-jpmc-client-request-id': ${JSON.stringify(requestIds.etu)} },
+      }, 8000),
+      fetchAndClassify('/svc/rr/payments/secure/v1/billpay/card/payment/list', {
+        method: 'POST', credentials: 'include',
+        headers: { ...baseHeaders, 'x-jpmc-client-request-id': ${JSON.stringify(requestIds.billpay)} },
+        body: ${JSON.stringify(billpayBody)},
+      }, 8000),
     ]);
-    return {
-      overview: ovSettled.status === 'fulfilled' ? ovSettled.value : { ok: false, kind: 'rejected', error: String(ovSettled.reason) },
-      etu: etuSettled.status === 'fulfilled' ? etuSettled.value : { ok: false, kind: 'rejected', error: String(etuSettled.reason) },
-      billpay: billpaySettled.status === 'fulfilled' ? billpaySettled.value : { ok: false, kind: 'rejected', error: String(billpaySettled.reason) },
-    };
+    const unwrap = (s) => s.status === 'fulfilled'
+      ? s.value
+      : { kind: 'network-error', message: String(s.reason && s.reason.message || s.reason) };
+    return { overview: unwrap(settled[0]), etu: unwrap(settled[1]), billpay: unwrap(settled[2]) };
   })()`;
 
   let raw: unknown;
@@ -2059,21 +2020,16 @@ ${STAGE_C_IN_PAGE_HELPERS_SRC}
   if (!raw || typeof raw !== 'object') {
     return { ok: false, reason: 'evaluate-non-object' };
   }
-  const split = raw as { overview?: unknown; etu?: unknown };
+  const split = raw as { overview?: StageCFetchResult; etu?: StageCFetchResult; billpay?: StageCFetchResult };
 
-  // ---- Overview classifier check (load-bearing — bails Stage C on failure) ----
-  const ov = (split.overview ?? null) as Record<string, unknown> | null;
-  if (!ov) return { ok: false, reason: 'evaluate-missing-overview' };
-  if (ov.ok === false) {
-    return { ok: false, reason: `overview-${String(ov.kind ?? 'unknown')}` };
+  // Overview is load-bearing — bails Stage C on failure.
+  if (!split.overview) return { ok: false, reason: 'evaluate-missing-overview' };
+  if (split.overview.kind !== 'ok') {
+    const o = split.overview;
+    const status = 'status' in o && o.status !== undefined ? `-${o.status}` : '';
+    return { ok: false, reason: `overview-${o.kind}${status}` };
   }
-  if (typeof ov.kind === 'string' && ov.kind !== 'ok') {
-    return {
-      ok: false,
-      reason: `overview-${ov.kind}${ov.status !== undefined ? `-${String(ov.status)}` : ''}`,
-    };
-  }
-  const ovJson = (ov.json ?? null) as unknown;
+  const ovJson = split.overview.json;
   const sentinel = validateStageCOverviewShape(ovJson, new Set([cardAccountId]));
   if (!sentinel.ok) {
     return { ok: false, reason: `sentinel-${sentinel.reason}` };
@@ -2112,27 +2068,21 @@ ${STAGE_C_IN_PAGE_HELPERS_SRC}
       ? (detail.autoPayEnrolled as boolean)
       : null;
 
-  // ---- ETU classifier check (best-effort — null on failure, caller
-  //      falls back to DOM scrape for pending charges only). ----
-  let pendingChargesAmount: number | null = null;
-  const etu = (split.etu ?? null) as Record<string, unknown> | null;
-  if (etu && etu.ok !== false && etu.kind === 'ok') {
-    const etuJson = (etu.json ?? null) as { totalPendingChargeAmount?: unknown } | null;
-    if (etuJson && typeof etuJson.totalPendingChargeAmount === 'number') {
-      pendingChargesAmount = etuJson.totalPendingChargeAmount;
-    }
-  }
-
-  // ---- Billpay classifier check (best-effort — null on failure,
-  //      caller falls back to paymentDetail one-slot mapping). ----
-  let billpayActivities: StageCBillpayActivity[] | null = null;
-  const billpay = (split as { billpay?: unknown }).billpay as Record<string, unknown> | null | undefined;
-  if (billpay && billpay.ok !== false && billpay.kind === 'ok') {
-    const bpJson = (billpay.json ?? null) as { paymentActivities?: unknown } | null;
-    if (bpJson && Array.isArray(bpJson.paymentActivities)) {
-      billpayActivities = bpJson.paymentActivities as StageCBillpayActivity[];
-    }
-  }
+  // ETU + billpay are best-effort — null on failure; caller has its
+  // own fallback for each (DOM scrape for pending charges; one-slot
+  // paymentDetail mapping for in-process payments).
+  const okJson = (r: StageCFetchResult | undefined): unknown =>
+    r && r.kind === 'ok' ? r.json : null;
+  const etuJson = okJson(split.etu) as { totalPendingChargeAmount?: unknown } | null;
+  const pendingChargesAmount =
+    etuJson && typeof etuJson.totalPendingChargeAmount === 'number'
+      ? etuJson.totalPendingChargeAmount
+      : null;
+  const billpayJson = okJson(split.billpay) as { paymentActivities?: unknown } | null;
+  const billpayActivities =
+    billpayJson && Array.isArray(billpayJson.paymentActivities)
+      ? (billpayJson.paymentActivities as StageCBillpayActivity[])
+      : null;
 
   return {
     ok: true,

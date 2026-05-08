@@ -1,6 +1,7 @@
 import { app } from 'electron';
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { writeJsonAtomic } from './atomicJson.js';
 import type { AmazonProfile } from '../shared/types.js';
 import { sanitizeProfileKey } from '../shared/sanitize.js';
 
@@ -39,9 +40,8 @@ export async function loadProfiles(): Promise<AmazonProfile[]> {
 }
 
 export async function saveProfiles(profiles: AmazonProfile[]): Promise<void> {
-  await mkdir(app.getPath('userData'), { recursive: true });
   const body: Stored = { profiles };
-  await writeFile(filePath(), JSON.stringify(body, null, 2), 'utf8');
+  await writeJsonAtomic(filePath(), body);
 }
 
 export async function upsertProfile(p: AmazonProfile): Promise<AmazonProfile[]> {

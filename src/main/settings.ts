@@ -1,6 +1,7 @@
 import { app } from 'electron';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { writeJsonAtomic } from './atomicJson.js';
 import type { Settings } from '../shared/ipc.js';
 
 const DEFAULTS: Settings = {
@@ -85,6 +86,5 @@ export async function loadSettings(): Promise<Settings> {
 }
 
 export async function saveSettings(s: Settings): Promise<void> {
-  await mkdir(app.getPath('userData'), { recursive: true });
-  await writeFile(filePath(), JSON.stringify(s, null, 2), 'utf8');
+  await writeJsonAtomic(filePath(), s);
 }

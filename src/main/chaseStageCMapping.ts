@@ -1,3 +1,4 @@
+import { formatChaseDollarAmount } from '../shared/chasePayments.js';
 import type { ChasePaymentEntry } from '../shared/types.js';
 
 /**
@@ -35,18 +36,6 @@ export function formatChaseYmdDate(ymd: string | undefined): string {
   });
 }
 
-/** Same shape as chaseDriver.ts's formatChaseDollarAmount — duplicated
- *  here to keep this module electron-free for testing. The two stay
- *  in lockstep because they're trivial; if either changes, update both. */
-function formatDollar(num: number): string {
-  const sign = num < 0 ? '-' : '';
-  const abs = Math.abs(num);
-  return `${sign}$${abs.toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
-
 /**
  * Map an overview-response paymentDetail object to a ChasePaymentEntry
  * array. Used as the FALLBACK source for in-process payments — the
@@ -72,7 +61,7 @@ export function mapPaymentDetailToInProcess(
   else return [];
   const date = formatChaseYmdDate(detail.scheduledPaymentDate);
   const amount =
-    typeof detail.paymentAmount === 'number' ? formatDollar(detail.paymentAmount) : '';
+    typeof detail.paymentAmount === 'number' ? formatChaseDollarAmount(detail.paymentAmount) : '';
   if (!date && !amount) return [];
   return [{ date, status, amount }];
 }
@@ -108,7 +97,7 @@ export function mapBillpayActivitiesToInProcess(
   for (const a of activities) {
     if (a?.activityStatus !== 'IN_PROCESS') continue;
     const date = formatChaseYmdDate(a.dueDate);
-    const amount = typeof a.amount === 'number' ? formatDollar(a.amount) : '';
+    const amount = typeof a.amount === 'number' ? formatChaseDollarAmount(a.amount) : '';
     if (!date && !amount) continue;
     const status = a.autoPayPayment ? 'Auto-pay in process' : 'In process';
     out.push({ date, status, amount });

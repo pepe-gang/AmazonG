@@ -16,7 +16,7 @@
  * deadline, and the response classifier returns the correct kind for
  * each documented status / content-type combination.
  *
- * Two helpers are bundled:
+ * Three helpers are bundled:
  *   - `fetchWithTimeout(url, options, timeoutMs)` — `fetch` with an
  *     AbortSignal-based deadline. Fixes the production gap that
  *     `page.evaluate` itself has no timeout option (verified in
@@ -29,7 +29,25 @@
  *     Reads `content-type` BEFORE `r.json()` so an Akamai HTML 403
  *     doesn't throw `SyntaxError: Unexpected token <` and nuke the
  *     entire `Promise.allSettled` batch.
+ *   - `fetchAndClassify(url, init, timeoutMs)` — sugar over the two
+ *     above. Handles the empty-result-on-timeout case so callers
+ *     have a single uniform shape to switch on.
  */
+
+/** Shape of `fetchAndClassify`'s return value. Mirrors the runtime
+ *  contract of the in-page helpers — kept in lockstep with the
+ *  source string below. */
+export type StageCFetchResult =
+  | { kind: 'ok'; status: 200; json: unknown }
+  | { kind: 'auth'; status: number; code?: string }
+  | { kind: 'rate-limit'; status: 429; code?: string }
+  | { kind: 'transient-5xx'; status: number; code?: string }
+  | { kind: 'akamai-403'; status: 403; bodyHead: string }
+  | { kind: 'non-json'; status: number; contentType: string; bodyHead: string }
+  | { kind: 'json-parse-error'; status: number; error: string }
+  | { kind: 'other'; status: number; code?: string }
+  | { kind: 'timeout'; timeoutMs: number }
+  | { kind: 'network-error'; message: string };
 
 export const STAGE_C_IN_PAGE_HELPERS_SRC = String.raw`
 async function fetchWithTimeout(url, options, timeoutMs) {
@@ -82,5 +100,14 @@ async function classifyResponse(r) {
     return { kind: 'transient-5xx', status, code: json && json.code };
   }
   return { kind: 'other', status, code: json && json.code };
+}
+
+// Combined helper: fires the request, returns a single uniform
+// { kind, ...} object whether the failure came from fetch (timeout /
+// network-error) or from the classifier (auth / akamai-403 / etc).
+async function fetchAndClassify(url, init, timeoutMs) {
+  const f = await fetchWithTimeout(url, init, timeoutMs);
+  if (!f.ok) return f;
+  return await classifyResponse(f.response);
 }
 `;
