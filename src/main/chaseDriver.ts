@@ -1365,6 +1365,15 @@ async function runFetch(
     let pendingCharges = '';
     let availableCredit = '';
     let pointsBalance = '';
+    let inProcessPayments: ChasePaymentEntry[] = [];
+    let lockStatus: string | undefined;
+    let autoPayEnrolled: boolean | undefined;
+    // Source flags drive the Stage B fallback decisions further down:
+    // when Stage C provided the value, the slow DOM-scrape path is
+    // skipped; when Stage C failed, fall through to the legacy nav +
+    // scrape so we don't ship blanks.
+    let stageCInProcessSourced = false;
+    let stageCPendingSourced = false;
 
     // 1) Card summary page — fires both Stage B XHRs during hydration.
     try {
@@ -1399,17 +1408,7 @@ async function runFetch(
         await page.waitForTimeout(150);
       }
 
-      // Stage B happy path: extract from typed JSON for the fields
-      // the JSON shape covers reliably. NOTE: we deliberately do NOT
-      // pull pendingCharges from the JSON's `pendingChargesAmount`
-      // field — empirical capture (Cuong card 2026-05-07) showed
-      // that field reads `0` even when Chase's UI displays a
-      // non-zero "Pending charges:" line, so it's clearly tracking
-      // a different concept (probably pending balance transfers, not
-      // pending authorization transactions which is what the recon-
-      // bar UI sums and shows). Pending-charges always goes through
-      // the DOM scrape below until we capture the etu-transactions
-      // XHR shape and learn which field actually mirrors the UI.
+      // Stage B happy path: extract from typed JSON.
       const detailFromCache = extractDashboardDetail(xhrJson.dashboard, cardAccountId);
       if (detailFromCache) {
         creditBalance = formatChaseDollarAmount(detailFromCache.currentBalance);
@@ -1428,50 +1427,81 @@ async function runFetch(
         pointsExtracted: pointsFromXhr !== null,
       });
 
-      // Pending-charges DOM scrape — always runs (the JSON field is
-      // unreliable as noted above). Two-stage wait so we don't read
-      // the page before the "Pending charges:" row has actually
-      // hydrated:
+      // Stage C — fired EARLY (before any DOM scrape) so its
+      // pendingChargesAmount + paymentDetail + lockStatus +
+      // autoPayEnrolled can short-circuit the slow DOM-scrape paths.
+      // Sentinel: only fires when Stage B's listener already captured
+      // the SPA's first dashboard XHR (proves _abck is post-hydration
+      // per pass-7 round-1).
       //
-      //   1. Wait for the recon bar balance — proves the activity
-      //      tile *started* rendering.
-      //   2. Try to wait for the literal "Pending charges:" text
-      //      with a short timeout. The pending-charges sub-element
-      //      hydrates a few React ticks AFTER the recon bar; reading
-      //      page.content() right after step 1 can miss it on slower
-      //      renders (user-observed bug 2026-05-07: cards consistently
-      //      came back with pending=empty because the next nav fired
-      //      before that sub-element was in the DOM). A 5s ceiling
-      //      covers typical hydration lag, and on cards that genuinely
-      //      have zero pending the wait times out (the line isn't
-      //      rendered at all when amount is $0) and we proceed — the
-      //      parser correctly returns "" for no-match.
+      // Empirically (Playwright MCP, 2026-05-08): overview + etu
+      // parallel batch returns 200 in ~609ms and totalPendingChargeAmount
+      // matches the DOM "Pending charges:" line exactly — replacing the
+      // 5-7s DOM-scrape wait + parse on the happy path.
       //
-      // Reverted earlier from Tier A's locator-scoped approach which
-      // was buggy: `:has-text("Pending charges:").last()` selected
-      // the deepest match (the label <span>), and innerHTML on the
-      // label gives just "Pending charges:&nbsp;" — no sibling <span>
-      // with the dollar amount for the regex to find.
-      try {
-        await page
-          .locator('.activity-tile__recon-bar-balance')
-          .first()
-          .waitFor({ state: 'visible', timeout: 30_000 })
-          .catch(() => undefined);
-        // Wait for the pending-charges line specifically — the user-
-        // visible bug was reading page.content() before this sub-element
-        // hydrated. 5s ceiling: enough for a normal hydration lag, short
-        // enough that no-pending cards (where the line never renders)
-        // don't murder Fetch All wall-clock.
-        await page
-          .locator('text=/Pending charges:/i')
-          .first()
-          .waitFor({ state: 'visible', timeout: 5_000 })
-          .catch(() => undefined);
-        const fullHtml = await page.content();
-        pendingCharges = parsePendingChargesFromHtml(fullHtml);
-      } catch {
-        // page closed mid-read — pendingCharges stays empty
+      // Disabled by AUTOG_CHASE_DISABLE_STAGE_C=1.
+      const stageCEnabled =
+        process.env.AUTOG_CHASE_DISABLE_STAGE_C !== '1' && xhrJson.dashboard !== null;
+      const stageC = stageCEnabled ? await fetchStageCOverview(page, cardAccountId) : null;
+      if (stageC && stageC.ok) {
+        if (stageC.lockStatus !== null) lockStatus = stageC.lockStatus;
+        if (stageC.autoPayEnrolled !== null) autoPayEnrolled = stageC.autoPayEnrolled;
+        inProcessPayments = mapPaymentDetailToInProcess(stageC.paymentDetail);
+        stageCInProcessSourced = true;
+        if (stageC.pendingChargesAmount !== null) {
+          pendingCharges =
+            stageC.pendingChargesAmount > 0
+              ? formatChaseDollarAmount(stageC.pendingChargesAmount)
+              : '';
+          stageCPendingSourced = true;
+        }
+        logger.info('chase.snapshot.stageC.ok', {
+          profileId,
+          cardAccountId: redactCardId(cardAccountId),
+          hasPaymentDetail: stageC.paymentDetail !== null,
+          inProcessFromStageC: inProcessPayments.length,
+          pendingFromStageC: stageC.pendingChargesAmount,
+          lockStatus: lockStatus ?? null,
+          autoPayEnrolled: autoPayEnrolled ?? null,
+        });
+      } else if (stageC) {
+        logger.info('chase.snapshot.stageC.fallback', {
+          profileId,
+          cardAccountId: redactCardId(cardAccountId),
+          reason: stageC.reason,
+        });
+      }
+
+      // Pending-charges DOM scrape — only runs when Stage C didn't
+      // supply totalPendingChargeAmount (kill switch on, sentinel never
+      // fired, etu fetch failed). The 5s "Pending charges:" wait used
+      // to fire on EVERY refresh; with Stage C it's a rare fallback.
+      //
+      // Two-stage wait pattern preserved for the fallback path:
+      //   1. Wait for the recon bar balance — proves activity tile
+      //      started rendering.
+      //   2. Wait for the literal "Pending charges:" text — that
+      //      sub-element hydrates a few React ticks AFTER the recon
+      //      bar.
+      // Cards with zero pending charges don't render the line at all,
+      // so the wait times out and we proceed.
+      if (!stageCPendingSourced) {
+        try {
+          await page
+            .locator('.activity-tile__recon-bar-balance')
+            .first()
+            .waitFor({ state: 'visible', timeout: 30_000 })
+            .catch(() => undefined);
+          await page
+            .locator('text=/Pending charges:/i')
+            .first()
+            .waitFor({ state: 'visible', timeout: 5_000 })
+            .catch(() => undefined);
+          const fullHtml = await page.content();
+          pendingCharges = parsePendingChargesFromHtml(fullHtml);
+        } catch {
+          // page closed mid-read — pendingCharges stays empty
+        }
       }
 
       // Stage B fallback: if the JSON path didn't yield balance or
@@ -1523,51 +1553,12 @@ async function runFetch(
       });
     }
 
-    // 2) Stage C: direct-fetch the overview endpoint to pull
-    //    paymentDetail (replaces the activity-page nav for in-process
-    //    payments) + lockStatus + autoPayEnrolled (new renderer fields).
-    //    Sentinel: only fires when Stage B's listener already captured
-    //    the SPA's first dashboard XHR (proves _abck is post-hydration).
-    //    Falls through silently to the activity-page DOM scrape on any
-    //    failure (timeout, drift, Akamai 403, etc).
-    //
-    //    Disabled by AUTOG_CHASE_DISABLE_STAGE_C=1 kill switch.
-    let inProcessPayments: ChasePaymentEntry[] = [];
-    let lockStatus: string | undefined;
-    let autoPayEnrolled: boolean | undefined;
-    let stageCInProcessSourced = false;
-    const stageCEnabled =
-      process.env.AUTOG_CHASE_DISABLE_STAGE_C !== '1' && xhrJson.dashboard !== null;
-    if (stageCEnabled) {
-      const stageC = await fetchStageCOverview(page, cardAccountId);
-      if (stageC.ok) {
-        lockStatus = stageC.lockStatus ?? undefined;
-        autoPayEnrolled = stageC.autoPayEnrolled ?? undefined;
-        inProcessPayments = mapPaymentDetailToInProcess(stageC.paymentDetail);
-        stageCInProcessSourced = true;
-        logger.info('chase.snapshot.stageC.ok', {
-          profileId,
-          cardAccountId: redactCardId(cardAccountId),
-          hasPaymentDetail: stageC.paymentDetail !== null,
-          inProcessFromStageC: inProcessPayments.length,
-          lockStatus: lockStatus ?? null,
-          autoPayEnrolled: autoPayEnrolled ?? null,
-        });
-      } else {
-        logger.info('chase.snapshot.stageC.fallback', {
-          profileId,
-          cardAccountId: redactCardId(cardAccountId),
-          reason: stageC.reason,
-        });
-      }
-    }
-
-    // Stage B fallback for in-process payments — runs when Stage C
-    // didn't source them (kill-switch on, sentinel never fired, fetch
-    // failed, JSON shape drift). Same activity-page nav + DOM scrape
-    // as before. The kept-alive Stage B path means Stage C can be
-    // turned off in the field without losing in-process-payment
-    // coverage.
+    // 2) Stage B fallback for in-process payments — runs when Stage C
+    //    (above, fired right after the XHR poll) didn't source them
+    //    (kill-switch on, sentinel never fired, fetch failed, JSON
+    //    shape drift). Same activity-page nav + DOM scrape as before.
+    //    The kept-alive Stage B path means Stage C can be turned off
+    //    in the field without losing in-process-payment coverage.
     if (!stageCInProcessSourced) {
       try {
         await page.goto(
@@ -1911,35 +1902,50 @@ type StageCOverviewResult =
       paymentDetail: StageCPaymentDetail | null;
       lockStatus: string | null;
       autoPayEnrolled: boolean | null;
+      /** Pending-charges sum from the etu-transactions endpoint's
+       *  totalPendingChargeAmount field. Empirically verified
+       *  2026-05-08 to match Chase's own "Pending charges:" recon-bar
+       *  line exactly. NULL when the etu fetch failed (caller falls
+       *  back to DOM scrape). */
+      pendingChargesAmount: number | null;
     }
   | { ok: false; reason: string };
 
 /**
  * Stage C: direct-fetch hybrid for the snapshot path.
  *
- * Fires the overview endpoint (/svc/rl/.../dashboard/module/list with
- * context=WEB_CBO_OVERVIEW_DASHBOARD) directly via page.evaluate AFTER
- * Stage B's listener has captured the SPA's natural first dashboard
- * XHR. Per pass-7 round-1 (chase-deep-pass7-round1-akamai-2026-05-08.md),
- * waiting for the SPA's first XHR to land proves _abck is in its
- * post-hydration valid state — Stage C is then safe to fire.
+ * Fires TWO endpoints in parallel via page.evaluate AFTER Stage B's
+ * listener has captured the SPA's natural first dashboard XHR (per
+ * pass-7 round-1, that's our sentinel that _abck is post-hydration
+ * and Stage C is safe to fire):
  *
- * Returns a distilled subset of the overview response — only what's
- * needed to populate the per-card fields Stage B doesn't already
- * provide:
- *   - paymentDetail: replaces today's separate activity-page nav for
- *     in-process payments. Round-2 audit confirmed
- *     paymentMessageStatusCode + scheduledPaymentDate + paymentAmount
- *     cover ≥95% of users (anyone with ≤1 in-flight payment per card).
- *   - lockStatus + autoPayEnrolled: new fields surfaced in Bank.tsx.
+ *   1. /svc/rl/.../dashboard/module/list?context=WEB_CBO_OVERVIEW_DASHBOARD
+ *      → balance, available credit, paymentDetail (in-process payments),
+ *        creditCardLockStatus, autoPayEnrolled
  *
- * Falls through silently to Stage B path on any failure (sentinel
- * timeout, JSON shape drift, Akamai 403, network error, fetch timeout).
+ *   2. /svc/rr/.../etu-transactions/v4/accounts/transactions?digital-account-identifier=N&record-count=50
+ *      → totalPendingChargeAmount (replaces today's "Pending charges:"
+ *        DOM scrape — empirically verified 2026-05-08 to match Chase's
+ *        recon-bar line exactly, where the dashboard JSON's
+ *        pendingChargesAmount field reads 0 even when DOM shows
+ *        non-zero — see `docs/research/chase-pending-charges-empirical-2026-05-08.md`)
+ *
+ * Promise.allSettled inside the evaluate body so a partial failure
+ * still returns useful data: if etu fails but overview succeeded,
+ * we return overview data + pendingChargesAmount=null and the caller
+ * falls back to DOM scrape for pending charges only. If overview
+ * fails entirely, we return ok:false and the caller falls all the
+ * way through to Stage B today's path.
+ *
+ * Falls through silently to Stage B path on overview failure
+ * (sentinel timeout, JSON shape drift, Akamai 403, network error,
+ * fetch timeout).
  *
  * Anti-bot posture is identical to Stage B's listener path: same
  * Chromium TLS, same cookies, same headers Chase emits naturally on
  * its own SPA-fired XHR. Empirical via Playwright MCP (2026-05-08):
- * direct fetch returned 200 in ~218ms from inside an authed page.
+ * 3-fetch parallel batch (overview + rewards + etu) returned 200 in
+ * ~609ms from inside an authed page.
  *
  * Disabled when AUTOG_CHASE_DISABLE_STAGE_C=1 (kill switch).
  */
@@ -1948,29 +1954,57 @@ async function fetchStageCOverview(
   cardAccountId: string,
 ): Promise<StageCOverviewResult> {
   const requestId = randomUUID();
+  const etuRequestId = randomUUID();
   // Inline PR1's tested helpers (single source of truth) into the
   // page.evaluate body. String form so we control body/header
   // serialization without Playwright's stringify-and-arg dance.
+  // Two fetches in Promise.allSettled — partial failure still returns
+  // useful data.
+  const etuUrl =
+    `/svc/rr/accounts/secure/gateway/credit-card/transactions/inquiry-maintenance/etu-transactions/v4/accounts/transactions` +
+    `?digital-account-identifier=${encodeURIComponent(cardAccountId)}` +
+    `&record-count=50&sort-order-code=D&sort-key-code=T`;
   const evalSrc = `(async () => {
 ${STAGE_C_IN_PAGE_HELPERS_SRC}
-    const f = await fetchWithTimeout(
-      '/svc/rl/accounts/secure/v1/dashboard/module/list?context=WEB_CBO_OVERVIEW_DASHBOARD',
-      {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'accept': 'application/json, text/plain, */*',
-          'x-jpmc-csrf-token': 'NONE',
-          'x-jpmc-channel': 'id=C30',
-          'x-jpmc-client-request-id': ${JSON.stringify(requestId)},
-        },
-        body: 'context=WEB_CBO_OVERVIEW_DASHBOARD&selectorIdType=CUSTOMER_GROUP',
-      },
-      8000,
-    );
-    if (!f.ok) return f;
-    return await classifyResponse(f.response);
+    const formHeaders = {
+      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'accept': 'application/json, text/plain, */*',
+      'x-jpmc-csrf-token': 'NONE',
+      'x-jpmc-channel': 'id=C30',
+    };
+    const [ovSettled, etuSettled] = await Promise.allSettled([
+      (async () => {
+        const f = await fetchWithTimeout(
+          '/svc/rl/accounts/secure/v1/dashboard/module/list?context=WEB_CBO_OVERVIEW_DASHBOARD',
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: { ...formHeaders, 'x-jpmc-client-request-id': ${JSON.stringify(requestId)} },
+            body: 'context=WEB_CBO_OVERVIEW_DASHBOARD&selectorIdType=CUSTOMER_GROUP',
+          },
+          8000,
+        );
+        if (!f.ok) return f;
+        return await classifyResponse(f.response);
+      })(),
+      (async () => {
+        const f = await fetchWithTimeout(
+          ${JSON.stringify(etuUrl)},
+          {
+            method: 'GET',
+            credentials: 'include',
+            headers: { ...formHeaders, 'x-jpmc-client-request-id': ${JSON.stringify(etuRequestId)} },
+          },
+          8000,
+        );
+        if (!f.ok) return f;
+        return await classifyResponse(f.response);
+      })(),
+    ]);
+    return {
+      overview: ovSettled.status === 'fulfilled' ? ovSettled.value : { ok: false, kind: 'rejected', error: String(ovSettled.reason) },
+      etu: etuSettled.status === 'fulfilled' ? etuSettled.value : { ok: false, kind: 'rejected', error: String(etuSettled.reason) },
+    };
   })()`;
 
   let raw: unknown;
@@ -1982,31 +2016,31 @@ ${STAGE_C_IN_PAGE_HELPERS_SRC}
       reason: `evaluate-error: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-
-  // Classifier returns either:
-  //   { kind: 'ok', json } — happy path
-  //   { kind: 'auth' | 'akamai-403' | 'rate-limit' | ... } — bail
-  //   { ok: false, kind: 'timeout' | 'network-error', ... } — fetch failed
   if (!raw || typeof raw !== 'object') {
     return { ok: false, reason: 'evaluate-non-object' };
   }
-  const r = raw as Record<string, unknown>;
-  if (r.ok === false) {
-    return { ok: false, reason: `${String(r.kind ?? 'unknown')}` };
+  const split = raw as { overview?: unknown; etu?: unknown };
+
+  // ---- Overview classifier check (load-bearing — bails Stage C on failure) ----
+  const ov = (split.overview ?? null) as Record<string, unknown> | null;
+  if (!ov) return { ok: false, reason: 'evaluate-missing-overview' };
+  if (ov.ok === false) {
+    return { ok: false, reason: `overview-${String(ov.kind ?? 'unknown')}` };
   }
-  if (typeof r.kind === 'string' && r.kind !== 'ok') {
+  if (typeof ov.kind === 'string' && ov.kind !== 'ok') {
     return {
       ok: false,
-      reason: `${r.kind}${r.status !== undefined ? `-${String(r.status)}` : ''}`,
+      reason: `overview-${ov.kind}${ov.status !== undefined ? `-${String(ov.status)}` : ''}`,
     };
   }
-  const json = (r.json ?? null) as unknown;
-  const sentinel = validateStageCOverviewShape(json, new Set([cardAccountId]));
+  const ovJson = (ov.json ?? null) as unknown;
+  const sentinel = validateStageCOverviewShape(ovJson, new Set([cardAccountId]));
   if (!sentinel.ok) {
     return { ok: false, reason: `sentinel-${sentinel.reason}` };
   }
+
   // Pull this card's row out of cardAccountOverviews.
-  const cache = (json as { cache?: Array<{ url?: string; response?: unknown }> }).cache ?? [];
+  const cache = (ovJson as { cache?: Array<{ url?: string; response?: unknown }> }).cache ?? [];
   const overviewEntry = cache.find(
     (c) => typeof c?.url === 'string' && c.url.includes('/overview/card/v2/list'),
   );
@@ -2037,12 +2071,25 @@ ${STAGE_C_IN_PAGE_HELPERS_SRC}
     typeof detail?.autoPayEnrolled === 'boolean'
       ? (detail.autoPayEnrolled as boolean)
       : null;
+
+  // ---- ETU classifier check (best-effort — null on failure, caller
+  //      falls back to DOM scrape for pending charges only). ----
+  let pendingChargesAmount: number | null = null;
+  const etu = (split.etu ?? null) as Record<string, unknown> | null;
+  if (etu && etu.ok !== false && etu.kind === 'ok') {
+    const etuJson = (etu.json ?? null) as { totalPendingChargeAmount?: unknown } | null;
+    if (etuJson && typeof etuJson.totalPendingChargeAmount === 'number') {
+      pendingChargesAmount = etuJson.totalPendingChargeAmount;
+    }
+  }
+
   return {
     ok: true,
     paymentDetail:
       pd && (pd.paymentMessageStatusCode || pd.paymentAmount !== undefined) ? pd : null,
     lockStatus,
     autoPayEnrolled,
+    pendingChargesAmount,
   };
 }
 
