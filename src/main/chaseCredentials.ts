@@ -1,6 +1,8 @@
 import { app, safeStorage } from 'electron';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { logger } from '../shared/logger.js';
+import { writeJsonAtomic } from './atomicJson.js';
 
 /**
  * Encrypted-at-rest local store for Chase username + password,
@@ -54,8 +56,7 @@ async function loadAll(): Promise<StoreFile> {
 }
 
 async function saveAll(data: StoreFile): Promise<void> {
-  await mkdir(dirname(storePath()), { recursive: true });
-  await writeFile(storePath(), JSON.stringify(data, null, 2), 'utf8');
+  await writeJsonAtomic(storePath(), data);
 }
 
 /**
@@ -108,11 +109,20 @@ export async function getChaseCredentials(
       username: decrypt(row.u),
       password: decrypt(row.p),
     };
-  } catch {
+  } catch (err) {
     // Decryption failure usually means the OS user changed or the
     // keychain item was removed externally. Nothing we can do —
     // surface as "no credentials" so the caller falls back to
-    // manual login.
+    // manual login. Log a diagnostic so operators can distinguish
+    // "no creds saved" (no log line) from "creds saved but
+    // unreadable" — the latter often means a locked keychain or
+    // a fresh OS install reading creds saved by a prior install,
+    // and the user can re-save instead of relogging in repeatedly.
+    logger.warn('chase.credentials.decryptFailed', {
+      profileId,
+      keychainAvailable: safeStorage.isEncryptionAvailable(),
+      error: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 }

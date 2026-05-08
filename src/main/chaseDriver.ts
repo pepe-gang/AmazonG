@@ -26,6 +26,18 @@ export type ChaseSession = {
   close: () => Promise<void>;
 };
 
+/**
+ * Redact a Chase cardAccountId for log payloads. Combined with a
+ * user-chosen profile label, the full 9-digit account id is identifying
+ * — not the card number per se, but enough to pin a record to a person
+ * in any leaked debug log. Pass-4 audit #9. Last 4 digits is the
+ * standard banking redaction.
+ */
+function redactCardId(id: string): string {
+  if (!id) return '';
+  return id.length <= 4 ? id : `…${id.slice(-4)}`;
+}
+
 export type ChaseRedeemResult =
   | {
       ok: true;
@@ -630,7 +642,7 @@ export async function redeemAllToStatementCredit(
   if (result.ok) {
     logger.info('chase.redeem.ok', {
       profileId,
-      cardAccountId,
+      cardAccountId: redactCardId(cardAccountId),
       pointsRedeemed: result.pointsRedeemed,
       amount: result.amount,
       orderNumber: result.orderNumber,
@@ -638,7 +650,7 @@ export async function redeemAllToStatementCredit(
   } else {
     logger.warn('chase.redeem.failed', {
       profileId,
-      cardAccountId,
+      cardAccountId: redactCardId(cardAccountId),
       reason: result.reason,
     });
   }
@@ -1409,7 +1421,7 @@ async function runFetch(
       }
       logger.info('chase.snapshot.stageB.xhrs', {
         profileId,
-        cardAccountId,
+        cardAccountId: redactCardId(cardAccountId),
         dashboardArrived: xhrJson.dashboard !== null,
         rewardsArrived: xhrJson.rewards !== null,
         detailExtracted: detailFromCache !== null,
@@ -1470,7 +1482,7 @@ async function runFetch(
       if (needDomFallback) {
         logger.info('chase.snapshot.stageB.domFallback', {
           profileId,
-          cardAccountId,
+          cardAccountId: redactCardId(cardAccountId),
           missingBalance: !creditBalance,
           missingAvailable: !availableCredit,
         });
@@ -1498,7 +1510,7 @@ async function runFetch(
         // Both XHR + DOM fallback missed — diagnostic log + screenshot.
         logger.warn('chase.snapshot.summaryNoBalance', {
           profileId,
-          cardAccountId,
+          cardAccountId: redactCardId(cardAccountId),
           url: page.url(),
         });
         await captureSummaryDebugSnapshot(page, profileId).catch(() => undefined);
@@ -1506,7 +1518,7 @@ async function runFetch(
     } catch (err) {
       logger.warn('chase.snapshot.summaryError', {
         profileId,
-        cardAccountId,
+        cardAccountId: redactCardId(cardAccountId),
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1535,7 +1547,7 @@ async function runFetch(
         stageCInProcessSourced = true;
         logger.info('chase.snapshot.stageC.ok', {
           profileId,
-          cardAccountId,
+          cardAccountId: redactCardId(cardAccountId),
           hasPaymentDetail: stageC.paymentDetail !== null,
           inProcessFromStageC: inProcessPayments.length,
           lockStatus: lockStatus ?? null,
@@ -1544,7 +1556,7 @@ async function runFetch(
       } else {
         logger.info('chase.snapshot.stageC.fallback', {
           profileId,
-          cardAccountId,
+          cardAccountId: redactCardId(cardAccountId),
           reason: stageC.reason,
         });
       }
@@ -1573,7 +1585,7 @@ async function runFetch(
       } catch (err) {
         logger.warn('chase.snapshot.activityError', {
           profileId,
-          cardAccountId,
+          cardAccountId: redactCardId(cardAccountId),
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -1602,7 +1614,7 @@ async function runFetch(
     if (!creditBalance) {
       logger.warn('chase.snapshot.balanceMissing', {
         profileId,
-        cardAccountId,
+        cardAccountId: redactCardId(cardAccountId),
         url: page.url(),
         hasPoints: !!pointsBalance,
         hasPending: !!pendingCharges,
@@ -1616,7 +1628,7 @@ async function runFetch(
     }
     logger.info('chase.snapshot.ok', {
       profileId,
-      cardAccountId,
+      cardAccountId: redactCardId(cardAccountId),
       pointsBalance,
       creditBalance,
       pendingCharges,
@@ -2172,7 +2184,10 @@ export async function openChasePayPage(
         timeout: 30_000,
       });
     }
-    logger.info('chase.pay.windowOpened', { profileId, cardAccountId });
+    logger.info('chase.pay.windowOpened', {
+      profileId,
+      cardAccountId: redactCardId(cardAccountId),
+    });
     return { ok: true, session };
   } catch (err) {
     await session.close().catch(() => undefined);

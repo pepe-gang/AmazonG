@@ -138,7 +138,18 @@ const chaseLoginAborts = new Map<string, () => void>();
 // instead of trying to open another persistent context against the
 // same userDataDir (Chromium refuses, throws). Cleared when the
 // context's `close` event fires (user shut the window).
-const chaseActionSessions = new Map<string, ChaseSession>();
+//
+// Split into two maps by purpose so the wrong window doesn't get
+// brought to front when the user clicks the other action (pass-4
+// audit #7): a Pay click while a Rewards window is open used to
+// surface the Rewards window because both shared one map. Each
+// handler now checks its own map first (= bringToFront) and the
+// other map second (= refuse with "another Chase window is open
+// for this profile"). The userDataDir lock is still respected
+// because both maps key on profileId and only one window can hold
+// the lock at a time.
+const chaseRewardsActionSessions = new Map<string, ChaseSession>();
+const chasePayActionSessions = new Map<string, ChaseSession>();
 
 // Coalesced log fan-out. Workers emit 50–200 events per buy phase; a naive
 // sink would do that many IPCs and that many appendFile syscalls per profile
@@ -1556,16 +1567,26 @@ function registerIpcHandlers(): void {
       // its focused page back to front so a duplicate click feels
       // like "raise the existing window" rather than spawn a new
       // one (Chromium would refuse the new one anyway).
-      const existing = chaseActionSessions.get(id);
-      if (existing) {
+      const existingRewards = chaseRewardsActionSessions.get(id);
+      if (existingRewards) {
         try {
-          await existing.page.bringToFront();
+          await existingRewards.page.bringToFront();
           return { ok: true };
         } catch {
           // The page is gone (user closed it); fall through and
           // open a fresh session.
-          chaseActionSessions.delete(id);
+          chaseRewardsActionSessions.delete(id);
         }
+      }
+      // Pay window holds the userDataDir lock — refuse cleanly so
+      // the user closes Pay first instead of hitting an obscure
+      // Chromium-launch error (pass-4 audit #7).
+      if (chasePayActionSessions.has(id)) {
+        return {
+          ok: false,
+          reason:
+            'a Pay-my-Balance window is already open for this profile — close it first',
+        };
       }
 
       let session: ChaseSession;
@@ -1577,13 +1598,13 @@ function registerIpcHandlers(): void {
           reason: `failed to open browser: ${err instanceof Error ? err.message : String(err)}`,
         };
       }
-      chaseActionSessions.set(id, session);
+      chaseRewardsActionSessions.set(id, session);
       const stopAutoSave = attachSessionAutoSave(session, id);
       const stopKeepalive = attachChaseKeepalive(session, id);
       session.context.on('close', () => {
         stopAutoSave();
         stopKeepalive();
-        chaseActionSessions.delete(id);
+        chaseRewardsActionSessions.delete(id);
       });
 
       const url = `https://chaseloyalty.chase.com/home?AI=${encodeURIComponent(
@@ -1635,7 +1656,12 @@ function registerIpcHandlers(): void {
   // the Chase window in a way that confused close(), Chrome crashed,
   // etc.) doesn't permanently lock the user out of automation. Every
   // automation hard-caps at ~2min anyway between SSO + page loads.
-  const STALE_INFLIGHT_MS = 3 * 60_000;
+  // Bumped from 3:00 to 3:30 to give a jitter buffer (pass-4 audit
+  // #10): a fetch that takes exactly 3:00 on a slow Chase response
+  // could otherwise race the eviction with its own finally-close,
+  // briefly leaving the userDataDir lock available to a concurrent
+  // redeem.
+  const STALE_INFLIGHT_MS = 3.5 * 60_000;
   const chaseRedeemInFlight = new Map<string, number>();
   const chaseSnapshotInFlight = new Map<string, number>();
   const chasePayInFlight = new Map<string, number>();
@@ -1704,7 +1730,7 @@ function registerIpcHandlers(): void {
         reason: 'login is still in progress for this profile',
       };
     }
-    if (chaseActionSessions.has(id)) {
+    if (chaseRewardsActionSessions.has(id) || chasePayActionSessions.has(id)) {
       return {
         ok: false,
         kind: 'error',
@@ -1841,7 +1867,7 @@ function registerIpcHandlers(): void {
           kind: 'unknown' as const,
         };
       }
-      if (chaseActionSessions.has(id)) {
+      if (chaseRewardsActionSessions.has(id) || chasePayActionSessions.has(id)) {
         return {
           ok: false,
           reason: 'another Chase window is already open for this profile — close it first',
@@ -1918,15 +1944,24 @@ function registerIpcHandlers(): void {
     if (chaseLoginAborts.has(id)) {
       return { ok: false, reason: 'login is still in progress for this profile' };
     }
-    const existing = chaseActionSessions.get(id);
-    if (existing) {
+    const existingPay = chasePayActionSessions.get(id);
+    if (existingPay) {
       try {
-        await existing.page.bringToFront();
+        await existingPay.page.bringToFront();
         return { ok: true };
       } catch {
         // page is gone (user closed it); fall through to a fresh open
-        chaseActionSessions.delete(id);
+        chasePayActionSessions.delete(id);
       }
+    }
+    // Rewards window holds the userDataDir lock — refuse cleanly
+    // (pass-4 audit #7).
+    if (chaseRewardsActionSessions.has(id)) {
+      return {
+        ok: false,
+        reason:
+          'an Open Rewards window is already open for this profile — close it first',
+      };
     }
     if (
       isInFlight(chaseRedeemInFlight, id) ||
@@ -1939,77 +1974,95 @@ function registerIpcHandlers(): void {
       };
     }
 
-    const result = await openChasePayPage(id, profile.cardAccountId);
-    if (!result.ok) {
-      if (/session expired/i.test(result.reason)) {
-        await updateChaseProfile(id, { loggedIn: false }).catch(() => undefined);
+    // Mark in-flight BEFORE openChasePayPage to close the TOCTOU
+    // window pass-4 audit #6 flagged: two concurrent Pay clicks
+    // could both pass the bringToFront check (no session) and both
+    // call openChasePayPage, racing for the userDataDir lock. The
+    // marker is cleared in finally if we don't end up registering
+    // a session (= we threw or returned an error).
+    chasePayInFlight.set(id, Date.now());
+    let registered = false;
+    try {
+      const result = await openChasePayPage(id, profile.cardAccountId);
+      if (!result.ok) {
+        if (/session expired/i.test(result.reason)) {
+          await updateChaseProfile(id, { loggedIn: false }).catch(() => undefined);
+        }
+        return result;
       }
-      return result;
+      // Hand the session off — register so other handlers refuse to
+      // open a parallel session against the same userDataDir, and
+      // clean up when the user closes the window.
+      chasePayActionSessions.set(id, result.session);
+      registered = true;
+      const stopAutoSave = attachSessionAutoSave(result.session, id);
+      const stopKeepalive = attachChaseKeepalive(result.session, id);
+      result.session.context.on('close', () => {
+        stopAutoSave();
+        stopKeepalive();
+        chasePayActionSessions.delete(id);
+        chasePayInFlight.delete(id);
+      });
+
+      // Background watcher: poll the page for Chase's success-text
+      // (the "You've scheduled a …" header that shows up on the
+      // confirmation screen). When it appears, give the user a few
+      // seconds to read it, then close the window automatically.
+      // Doesn't block this IPC return — the watcher races the user's
+      // own close + a 15-minute hard timeout.
+      void (async () => {
+        try {
+          await result.session.page.waitForFunction(
+            () => {
+              const body = document.body?.textContent || '';
+              // Matches "You've scheduled a $X payment to ..." and
+              // related variants Chase has shown across layouts.
+              return /you'?ve\s+scheduled\s+a/i.test(body);
+            },
+            { timeout: 15 * 60_000, polling: 1_000 },
+          );
+          // Brief read window before we whisk the page away.
+          await new Promise((r) => setTimeout(r, 3_000));
+          logger.info('chase.pay.autoClose', { id });
+          // Notify the renderer so it can refresh this profile's
+          // snapshot — pending charges + balance shift after the
+          // payment posts to Chase's intake queue. Sent BEFORE close
+          // so the event isn't dropped if the close+cleanup races
+          // the renderer's listener registration.
+          mainWindow?.webContents.send(IPC.evtChasePaySuccess, id);
+          await result.session.close();
+        } catch {
+          // Three legitimate ways to land here:
+          //   - user closed the window manually (page already gone)
+          //   - 15-min timeout (user wandered off, payment never
+          //     submitted)
+          //   - waitForFunction errored on a navigation race
+          // In all three the on('close') handler above already (or
+          // will) clear the action-session map. Nothing to do here.
+        }
+      })();
+
+      return { ok: true };
+    } finally {
+      // TOCTOU close: if we threw or returned early without registering
+      // a session, drop the in-flight marker so a retry can proceed.
+      // The success path leaves it set; on('close') clears it when the
+      // user closes the window.
+      if (!registered) chasePayInFlight.delete(id);
     }
-    // Hand the session off — register so other handlers refuse to
-    // open a parallel session against the same userDataDir, and
-    // clean up when the user closes the window.
-    chaseActionSessions.set(id, result.session);
-    const stopAutoSave = attachSessionAutoSave(result.session, id);
-    const stopKeepalive = attachChaseKeepalive(result.session, id);
-    result.session.context.on('close', () => {
-      stopAutoSave();
-      stopKeepalive();
-      chaseActionSessions.delete(id);
-    });
-
-    // Background watcher: poll the page for Chase's success-text
-    // (the "You've scheduled a …" header that shows up on the
-    // confirmation screen). When it appears, give the user a few
-    // seconds to read it, then close the window automatically.
-    // Doesn't block this IPC return — the watcher races the user's
-    // own close + a 15-minute hard timeout.
-    void (async () => {
-      try {
-        await result.session.page.waitForFunction(
-          () => {
-            const body = document.body?.textContent || '';
-            // Matches "You've scheduled a $X payment to ..." and
-            // related variants Chase has shown across layouts.
-            return /you'?ve\s+scheduled\s+a/i.test(body);
-          },
-          { timeout: 15 * 60_000, polling: 1_000 },
-        );
-        // Brief read window before we whisk the page away.
-        await new Promise((r) => setTimeout(r, 3_000));
-        logger.info('chase.pay.autoClose', { id });
-        // Notify the renderer so it can refresh this profile's
-        // snapshot — pending charges + balance shift after the
-        // payment posts to Chase's intake queue. Sent BEFORE close
-        // so the event isn't dropped if the close+cleanup races
-        // the renderer's listener registration.
-        mainWindow?.webContents.send(IPC.evtChasePaySuccess, id);
-        await result.session.close();
-      } catch {
-        // Three legitimate ways to land here:
-        //   - user closed the window manually (page already gone)
-        //   - 15-min timeout (user wandered off, payment never
-        //     submitted)
-        //   - waitForFunction errored on a navigation race
-        // In all three the on('close') handler above already (or
-        // will) clear the action-session map. Nothing to do here.
-      }
-    })();
-
-    return { ok: true };
   });
 
   // Force-close the Pay-my-Balance browser. The renderer's "Close
   // browser" button calls this when the user wants to bail out
   // without completing the payment. session.close() flushes
   // cookies/localStorage to disk and tears the context down; the
-  // on('close') hook above clears chaseActionSessions[id], which
+  // on('close') hook above clears chasePayActionSessions[id], which
   // also unsticks the success-text watcher (its waitForFunction
   // throws once the page is gone).
   ipcMain.handle(IPC.chasePayCancel, async (_e, id: string) => {
-    const session = chaseActionSessions.get(id);
+    const session = chasePayActionSessions.get(id);
     if (!session) return;
-    chaseActionSessions.delete(id);
+    chasePayActionSessions.delete(id);
     try {
       await session.close();
     } catch {
