@@ -49,14 +49,15 @@ function formatDollar(num: number): string {
 
 /**
  * Map an overview-response paymentDetail object to a ChasePaymentEntry
- * array compatible with what the activity-page DOM scrape produced.
- * Returns an empty array when there's no in-flight payment encoded.
+ * array. Used as the FALLBACK source for in-process payments — the
+ * primary source is `mapBillpayActivitiesToInProcess` (multi-row)
+ * which is preferred whenever the billpay/card/payment/list endpoint
+ * succeeds. Returns an empty array when there's no in-flight payment
+ * encoded.
  *
- * Round-2 audit (pass-7) note: paymentDetail is a one-slot summary.
- * Users with multiple simultaneous in-flight payments per card will
- * only see the most-imminent one here. Stage C v2 (deferred) will use
- * /svc/rr/payments/secure/v1/billpay/card/payment/list for multi-row
- * coverage; v1 covers the ≥95% case.
+ * Round-2 audit (pass-7) note: paymentDetail is a one-slot summary —
+ * users with multiple simultaneous in-flight payments per card see
+ * only the most-imminent one. The billpay endpoint covers all rows.
  */
 export function mapPaymentDetailToInProcess(
   detail: StageCPaymentDetail | null,
@@ -74,4 +75,43 @@ export function mapPaymentDetailToInProcess(
     typeof detail.paymentAmount === 'number' ? formatDollar(detail.paymentAmount) : '';
   if (!date && !amount) return [];
   return [{ date, status, amount }];
+}
+
+/** Subset of /svc/rr/payments/secure/v1/billpay/card/payment/list's
+ *  paymentActivities[] entry shape that mapBillpayActivitiesToInProcess
+ *  reads. Empirically captured 2026-05-08 — see
+ *  docs/research/chase-billpay-payment-list-empirical-2026-05-08.md.
+ *  Other fields (paymentId, fundingAccountNickname, confirmationNumber,
+ *  description, autoPayPayment, etc.) exist but aren't surfaced today. */
+export type StageCBillpayActivity = {
+  amount?: number;
+  dueDate?: string;
+  activityStatus?: string;
+  autoPayPayment?: boolean;
+};
+
+/**
+ * Map billpay/card/payment/list paymentActivities[] to ChasePaymentEntry[].
+ * Filters to activityStatus === 'IN_PROCESS' (the SPA's own filter for
+ * the activity-page "In process" tab). Multi-row — replaces the one-slot
+ * paymentDetail summary.
+ *
+ * Empirically (2026-05-08): the user's Amazon card has 64 total
+ * paymentActivities with statuses {IN_PROCESS, COMPLETED, RETURNED,
+ * CANCELED}. Only IN_PROCESS rows count as in-flight.
+ */
+export function mapBillpayActivitiesToInProcess(
+  activities: StageCBillpayActivity[] | null,
+): ChasePaymentEntry[] {
+  if (!Array.isArray(activities)) return [];
+  const out: ChasePaymentEntry[] = [];
+  for (const a of activities) {
+    if (a?.activityStatus !== 'IN_PROCESS') continue;
+    const date = formatChaseYmdDate(a.dueDate);
+    const amount = typeof a.amount === 'number' ? formatDollar(a.amount) : '';
+    if (!date && !amount) continue;
+    const status = a.autoPayPayment ? 'Auto-pay in process' : 'In process';
+    out.push({ date, status, amount });
+  }
+  return out;
 }

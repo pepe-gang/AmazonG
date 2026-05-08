@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   formatChaseYmdDate,
+  mapBillpayActivitiesToInProcess,
   mapPaymentDetailToInProcess,
 } from '../../src/main/chaseStageCMapping.js';
 
@@ -147,5 +148,83 @@ describe('mapPaymentDetailToInProcess', () => {
         paymentAmount: 100,
       }),
     ).toEqual([]);
+  });
+});
+
+describe('mapBillpayActivitiesToInProcess', () => {
+  it('returns [] for null', () => {
+    expect(mapBillpayActivitiesToInProcess(null)).toEqual([]);
+  });
+
+  it('returns [] for empty array', () => {
+    expect(mapBillpayActivitiesToInProcess([])).toEqual([]);
+  });
+
+  it('filters to IN_PROCESS only and ignores COMPLETED / CANCELED / RETURNED', () => {
+    const out = mapBillpayActivitiesToInProcess([
+      { amount: 100, dueDate: '20260507', activityStatus: 'IN_PROCESS' },
+      { amount: 50, dueDate: '20260501', activityStatus: 'COMPLETED' },
+      { amount: 25, dueDate: '20260430', activityStatus: 'CANCELED' },
+      { amount: 75, dueDate: '20260425', activityStatus: 'RETURNED' },
+    ]);
+    expect(out).toEqual([{ date: 'May 7, 2026', status: 'In process', amount: '$100.00' }]);
+  });
+
+  it('preserves multi-row coverage when several payments are IN_PROCESS simultaneously', () => {
+    const out = mapBillpayActivitiesToInProcess([
+      { amount: 6883.4, dueDate: '20260507', activityStatus: 'IN_PROCESS' },
+      { amount: 3744.81, dueDate: '20260507', activityStatus: 'IN_PROCESS' },
+      { amount: 250, dueDate: '20260601', activityStatus: 'IN_PROCESS' },
+    ]);
+    expect(out).toEqual([
+      { date: 'May 7, 2026', status: 'In process', amount: '$6,883.40' },
+      { date: 'May 7, 2026', status: 'In process', amount: '$3,744.81' },
+      { date: 'Jun 1, 2026', status: 'In process', amount: '$250.00' },
+    ]);
+  });
+
+  it('marks autoPayPayment IN_PROCESS rows distinctly so the renderer can show the auto-pay tag', () => {
+    const out = mapBillpayActivitiesToInProcess([
+      { amount: 100, dueDate: '20260507', activityStatus: 'IN_PROCESS', autoPayPayment: true },
+      { amount: 50, dueDate: '20260601', activityStatus: 'IN_PROCESS', autoPayPayment: false },
+    ]);
+    expect(out).toEqual([
+      { date: 'May 7, 2026', status: 'Auto-pay in process', amount: '$100.00' },
+      { date: 'Jun 1, 2026', status: 'In process', amount: '$50.00' },
+    ]);
+  });
+
+  it('handles missing date or amount gracefully (still maps if either is present)', () => {
+    const out = mapBillpayActivitiesToInProcess([
+      { amount: 100, activityStatus: 'IN_PROCESS' },
+      { dueDate: '20260507', activityStatus: 'IN_PROCESS' },
+    ]);
+    expect(out).toEqual([
+      { date: '', status: 'In process', amount: '$100.00' },
+      { date: 'May 7, 2026', status: 'In process', amount: '' },
+    ]);
+  });
+
+  it('drops entirely-empty IN_PROCESS rows (no date AND no amount — degenerate)', () => {
+    const out = mapBillpayActivitiesToInProcess([
+      { activityStatus: 'IN_PROCESS' },
+      { amount: 100, dueDate: '20260507', activityStatus: 'IN_PROCESS' },
+    ]);
+    expect(out).toEqual([{ date: 'May 7, 2026', status: 'In process', amount: '$100.00' }]);
+  });
+
+  it('handles a non-array input by returning [] (defensive against shape drift)', () => {
+    // simulate "Chase ships a refactor renaming paymentActivities to something else"
+    expect(mapBillpayActivitiesToInProcess(undefined as unknown as null)).toEqual([]);
+    expect(mapBillpayActivitiesToInProcess('oops' as unknown as null)).toEqual([]);
+  });
+
+  it('formats negative amounts with a leading minus (refund-style refunds remain rare but handled)', () => {
+    const out = mapBillpayActivitiesToInProcess([
+      { amount: -50.25, dueDate: '20260507', activityStatus: 'IN_PROCESS' },
+    ]);
+    expect(out).toEqual([
+      { date: 'May 7, 2026', status: 'In process', amount: '-$50.25' },
+    ]);
   });
 });

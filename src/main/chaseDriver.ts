@@ -14,7 +14,9 @@ import {
 } from './chaseScrape.js';
 import { STAGE_C_IN_PAGE_HELPERS_SRC } from './chaseStageCInPageHelpers.js';
 import {
+  mapBillpayActivitiesToInProcess,
   mapPaymentDetailToInProcess,
+  type StageCBillpayActivity,
   type StageCPaymentDetail,
 } from './chaseStageCMapping.js';
 import { validateStageCOverviewShape } from './chaseStageCSentinel.js';
@@ -1446,7 +1448,16 @@ async function runFetch(
       if (stageC && stageC.ok) {
         if (stageC.lockStatus !== null) lockStatus = stageC.lockStatus;
         if (stageC.autoPayEnrolled !== null) autoPayEnrolled = stageC.autoPayEnrolled;
-        inProcessPayments = mapPaymentDetailToInProcess(stageC.paymentDetail);
+        // Prefer the multi-row billpay/card/payment/list result; fall
+        // back to the one-slot paymentDetail summary if billpay failed.
+        // Both are typed JSON; either way we skip the activity-page nav
+        // + DOM scrape Stage B fallback path further down.
+        const billpayMapped =
+          stageC.billpayActivities !== null
+            ? mapBillpayActivitiesToInProcess(stageC.billpayActivities)
+            : null;
+        inProcessPayments =
+          billpayMapped !== null ? billpayMapped : mapPaymentDetailToInProcess(stageC.paymentDetail);
         stageCInProcessSourced = true;
         if (stageC.pendingChargesAmount !== null) {
           pendingCharges =
@@ -1459,6 +1470,7 @@ async function runFetch(
           profileId,
           cardAccountId: redactCardId(cardAccountId),
           hasPaymentDetail: stageC.paymentDetail !== null,
+          inProcessFromBillpay: billpayMapped !== null,
           inProcessFromStageC: inProcessPayments.length,
           pendingFromStageC: stageC.pendingChargesAmount,
           lockStatus: lockStatus ?? null,
@@ -1908,6 +1920,13 @@ type StageCOverviewResult =
        *  line exactly. NULL when the etu fetch failed (caller falls
        *  back to DOM scrape). */
       pendingChargesAmount: number | null;
+      /** Multi-row in-process payments from the billpay/card/payment/list
+       *  endpoint's paymentActivities[]. Primary source for in-process
+       *  payments; supersedes the one-slot paymentDetail summary above.
+       *  NULL when the billpay fetch failed (caller falls back to
+       *  paymentDetail mapping). Empirically verified 2026-05-08 —
+       *  see docs/research/chase-billpay-payment-list-empirical-2026-05-08.md. */
+      billpayActivities: StageCBillpayActivity[] | null;
     }
   | { ok: false; reason: string };
 
@@ -1955,15 +1974,21 @@ async function fetchStageCOverview(
 ): Promise<StageCOverviewResult> {
   const requestId = randomUUID();
   const etuRequestId = randomUUID();
+  const billpayRequestId = randomUUID();
   // Inline PR1's tested helpers (single source of truth) into the
   // page.evaluate body. String form so we control body/header
   // serialization without Playwright's stringify-and-arg dance.
-  // Two fetches in Promise.allSettled — partial failure still returns
-  // useful data.
+  // Three fetches in Promise.allSettled — partial failure still
+  // returns useful data; the caller maps each missing piece to its
+  // own fallback (DOM scrape for pending charges, paymentDetail
+  // mapping for in-process, etc).
   const etuUrl =
     `/svc/rr/accounts/secure/gateway/credit-card/transactions/inquiry-maintenance/etu-transactions/v4/accounts/transactions` +
     `?digital-account-identifier=${encodeURIComponent(cardAccountId)}` +
     `&record-count=50&sort-order-code=D&sort-key-code=T`;
+  // billpay/card/payment/list takes payeeId with a leading '-' (matches
+  // the activity-page URL fragment Chase's SPA itself uses).
+  const billpayBody = `autoPayPendingEnabled=true&payeeId=-${encodeURIComponent(cardAccountId)}`;
   const evalSrc = `(async () => {
 ${STAGE_C_IN_PAGE_HELPERS_SRC}
     const formHeaders = {
@@ -1972,7 +1997,7 @@ ${STAGE_C_IN_PAGE_HELPERS_SRC}
       'x-jpmc-csrf-token': 'NONE',
       'x-jpmc-channel': 'id=C30',
     };
-    const [ovSettled, etuSettled] = await Promise.allSettled([
+    const [ovSettled, etuSettled, billpaySettled] = await Promise.allSettled([
       (async () => {
         const f = await fetchWithTimeout(
           '/svc/rl/accounts/secure/v1/dashboard/module/list?context=WEB_CBO_OVERVIEW_DASHBOARD',
@@ -2000,10 +2025,25 @@ ${STAGE_C_IN_PAGE_HELPERS_SRC}
         if (!f.ok) return f;
         return await classifyResponse(f.response);
       })(),
+      (async () => {
+        const f = await fetchWithTimeout(
+          '/svc/rr/payments/secure/v1/billpay/card/payment/list',
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: { ...formHeaders, 'x-jpmc-client-request-id': ${JSON.stringify(billpayRequestId)} },
+            body: ${JSON.stringify(billpayBody)},
+          },
+          8000,
+        );
+        if (!f.ok) return f;
+        return await classifyResponse(f.response);
+      })(),
     ]);
     return {
       overview: ovSettled.status === 'fulfilled' ? ovSettled.value : { ok: false, kind: 'rejected', error: String(ovSettled.reason) },
       etu: etuSettled.status === 'fulfilled' ? etuSettled.value : { ok: false, kind: 'rejected', error: String(etuSettled.reason) },
+      billpay: billpaySettled.status === 'fulfilled' ? billpaySettled.value : { ok: false, kind: 'rejected', error: String(billpaySettled.reason) },
     };
   })()`;
 
@@ -2083,6 +2123,17 @@ ${STAGE_C_IN_PAGE_HELPERS_SRC}
     }
   }
 
+  // ---- Billpay classifier check (best-effort — null on failure,
+  //      caller falls back to paymentDetail one-slot mapping). ----
+  let billpayActivities: StageCBillpayActivity[] | null = null;
+  const billpay = (split as { billpay?: unknown }).billpay as Record<string, unknown> | null | undefined;
+  if (billpay && billpay.ok !== false && billpay.kind === 'ok') {
+    const bpJson = (billpay.json ?? null) as { paymentActivities?: unknown } | null;
+    if (bpJson && Array.isArray(bpJson.paymentActivities)) {
+      billpayActivities = bpJson.paymentActivities as StageCBillpayActivity[];
+    }
+  }
+
   return {
     ok: true,
     paymentDetail:
@@ -2090,6 +2141,7 @@ ${STAGE_C_IN_PAGE_HELPERS_SRC}
     lockStatus,
     autoPayEnrolled,
     pendingChargesAmount,
+    billpayActivities,
   };
 }
 
