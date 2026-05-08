@@ -17,3 +17,13 @@ deals.csv
 screenshots/
 step1-product.png
 step2-spc.png
+
+# Research scratch — captured XHR JSONLs / response bodies / HTML dumps
+# can carry auth tokens, account IDs, balances. Keep local only.
+.research/
+research-logs/
+
+# Ad-hoc screenshots saved to repo root during MCP / debug sessions
+/cash-back-form.png
+/chase-dashboard-mcp.png
+/orders-page.png

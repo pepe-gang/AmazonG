@@ -192,6 +192,14 @@ function ChaseAccountsPanel() {
   // expired session). Without this the fetch fails silently and
   // the card just stops refreshing without explanation.
   const [snapshotError, setSnapshotError] = useState<Record<string, string | undefined>>({});
+  // Typed kind for the error, classified by main from the reason
+  // string. 'session-expired' triggers an inline "Sign in to Chase"
+  // button on the error banner — biggest UX win on the worst-case
+  // path. Other kinds get the bare error text. See chaseSnapshotRefresh
+  // handler in main/index.ts for the classifier.
+  const [snapshotErrorKind, setSnapshotErrorKind] = useState<
+    Record<string, 'session-expired' | 'rate-limit' | 'unknown' | undefined>
+  >({});
 
   // Per-profile "pay window is currently open" flag. Set when the
   // user clicks Pay my Balance and the main process opens the Chase
@@ -211,39 +219,56 @@ function ChaseAccountsPanel() {
     });
   };
 
-  const refreshSnapshotFor = useCallback(async (profileId: string) => {
-    setSnapshotPending((s) => ({ ...s, [profileId]: true }));
-    setSnapshotError((s) => {
-      const { [profileId]: _, ...rest } = s;
-      return rest;
-    });
-    try {
-      const r = await window.autog.chaseSnapshotRefresh(profileId);
-      if (r.ok) {
-        setSnapshotState((s) => ({ ...s, [profileId]: r.snapshot }));
-      } else {
-        setSnapshotError((s) => ({ ...s, [profileId]: r.reason }));
-        // Server-side session-expired path also flips the
-        // profile's loggedIn flag (see chaseSnapshotRefresh
-        // handler in main). Re-fetch the profile list so the
-        // card's "Logged in" pill flips to "Not logged in" and
-        // the Login button reappears.
-        if (/session expired/i.test(r.reason)) {
-          void refresh();
-        }
-      }
-    } catch (err) {
-      setSnapshotError((s) => ({
-        ...s,
-        [profileId]: err instanceof Error ? err.message : String(err),
-      }));
-    } finally {
-      setSnapshotPending((s) => {
+  const refreshSnapshotFor = useCallback(
+    async (profileId: string, options?: { force?: boolean }) => {
+      // Default force=true: every caller in the current renderer
+      // is a user-explicit action (clicked Refresh, clicked Fetch
+      // All, completed a Pay, completed a Redeem) where the user
+      // is actively expecting fresh data and the TTL freshness gate
+      // would feel broken if we returned cached values. Future
+      // programmatic callers can pass {force:false} to opt into
+      // the gate's protection.
+      const force = options?.force ?? true;
+      setSnapshotPending((s) => ({ ...s, [profileId]: true }));
+      setSnapshotError((s) => {
         const { [profileId]: _, ...rest } = s;
         return rest;
       });
-    }
-  }, [refresh]);
+      setSnapshotErrorKind((s) => {
+        const { [profileId]: _, ...rest } = s;
+        return rest;
+      });
+      try {
+        const r = await window.autog.chaseSnapshotRefresh(profileId, { force });
+        if (r.ok) {
+          setSnapshotState((s) => ({ ...s, [profileId]: r.snapshot }));
+        } else {
+          setSnapshotError((s) => ({ ...s, [profileId]: r.reason }));
+          if (r.kind) {
+            setSnapshotErrorKind((s) => ({ ...s, [profileId]: r.kind! }));
+          }
+          // Session-expired: the IPC handler already flipped
+          // loggedIn=false on the profile row. Re-fetch the
+          // profile list so the card's "Logged in" pill flips
+          // and the inline Sign-in affordance renders.
+          if (r.kind === 'session-expired') {
+            void refresh();
+          }
+        }
+      } catch (err) {
+        setSnapshotError((s) => ({
+          ...s,
+          [profileId]: err instanceof Error ? err.message : String(err),
+        }));
+      } finally {
+        setSnapshotPending((s) => {
+          const { [profileId]: _, ...rest } = s;
+          return rest;
+        });
+      }
+    },
+    [refresh],
+  );
 
   // Listen for the pay-window auto-close event. When the user
   // finishes a payment, the main process detects Chase's
@@ -292,10 +317,13 @@ function ChaseAccountsPanel() {
   // with a captured card id. We can't fan out fully — Chase's anti-bot
   // rate-limits / stalls dashboard requests when N parallel sessions
   // hit secure.chase.com simultaneously, which makes the recon-bar
-  // selector wait silently time out and leaves credit balance blank
-  // on most cards. Worker-pool of 2 gives us some throughput without
-  // tripping the rate limit. (Bulk redeem deliberately fans out fully
-  // because the user opted into "all windows at once" there.)
+  // hydration silently stall and leaves credit balance blank on most
+  // cards. We tried 4 workers (2026-05-07) and it tripped this exact
+  // failure mode: 1 of 4 cards completed, the other 3 got stuck on
+  // the summary URL even after a successful auto-login. 2 is the
+  // empirically safe ceiling. (Bulk redeem deliberately fans out fully
+  // because the user opted into "all windows at once" there — different
+  // anti-bot envelope, the redeem flow has explicit pacingPause breaks.)
   const FETCH_ALL_CONCURRENCY = 2;
   const onFetchAll = () => {
     const eligible = profiles.filter((p) => !!p.cardAccountId);
@@ -718,17 +746,28 @@ function ChaseAccountsPanel() {
               snapshot={snapshotState[p.id] ?? null}
               snapshotLoading={!!snapshotPending[p.id]}
               snapshotError={snapshotError[p.id] ?? null}
+              snapshotErrorKind={snapshotErrorKind[p.id] ?? null}
               lastRedeemed={history?.entries[0] ?? null}
               bulkLocked={bulkLocked}
               isBulkActive={bulkRunningIds.has(p.id)}
-              onLogin={() => void onLogin(p.id)}
-              onAbort={() => void onAbort(p.id)}
+              onLogin={() => {
+                void onLogin(p.id);
+              }}
+              onAbort={() => {
+                void onAbort(p.id);
+              }}
               onRemove={() => onRemove(p)}
               onRedeemAll={() => onRedeemAll(p)}
-              onPayBalance={() => void onPayBalance(p)}
+              onPayBalance={() => {
+                void onPayBalance(p);
+              }}
               isPaying={payingProfiles.has(p.id)}
-              onPayCancel={() => void onPayCancel(p.id)}
-              onRefreshSnapshot={() => void refreshSnapshotFor(p.id)}
+              onPayCancel={() => {
+                void onPayCancel(p.id);
+              }}
+              onRefreshSnapshot={() => {
+                void refreshSnapshotFor(p.id);
+              }}
             />
           );
         })}
@@ -756,6 +795,7 @@ function ChaseBankCard({
   snapshot,
   snapshotLoading,
   snapshotError,
+  snapshotErrorKind,
   lastRedeemed,
   bulkLocked,
   isBulkActive,
@@ -781,6 +821,7 @@ function ChaseBankCard({
   snapshot: ChaseAccountSnapshot | null;
   snapshotLoading: boolean;
   snapshotError: string | null;
+  snapshotErrorKind: 'session-expired' | 'rate-limit' | 'unknown' | null;
   lastRedeemed: ChaseRedeemEntry | null;
   bulkLocked: boolean;
   isBulkActive: boolean;
@@ -1080,8 +1121,26 @@ function ChaseBankCard({
         <div className="text-[11px] text-red-300 break-all">{redeemError}</div>
       )}
       {snapshotError && (
-        <div className="text-[11px] text-red-300 break-all">
-          Couldn&apos;t fetch balance: {snapshotError}
+        <div className="flex flex-col gap-1.5">
+          <div className="text-[11px] text-red-300 break-all">
+            Couldn&apos;t fetch balance: {snapshotError}
+          </div>
+          {/* Inline recovery affordance for the session-expired path —
+              shortest cognitive distance to the fix the user needs. The
+              underlying handler is the same `onLogin` that powers the
+              card's bare "Login" button below; we just surface it here
+              so the user doesn't have to find it. Other error kinds
+              fall through to the bare error text — no inline button,
+              since the right action depends on the kind. */}
+          {snapshotErrorKind === 'session-expired' && !isPending && (
+            <button
+              type="button"
+              className="self-start text-[11px] underline text-blue-300/90 hover:text-blue-200"
+              onClick={onLogin}
+            >
+              Sign in to Chase →
+            </button>
+          )}
         </div>
       )}
 

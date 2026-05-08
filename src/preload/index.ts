@@ -106,8 +106,8 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.chaseSnapshotGet, id) as ReturnType<
       AutoGBridge['chaseSnapshotGet']
     >,
-  chaseSnapshotRefresh: (id) =>
-    ipcRenderer.invoke(IPC.chaseSnapshotRefresh, id) as ReturnType<
+  chaseSnapshotRefresh: (id, options) =>
+    ipcRenderer.invoke(IPC.chaseSnapshotRefresh, id, options) as ReturnType<
       AutoGBridge['chaseSnapshotRefresh']
     >,
   chasePayBalance: (id) =>

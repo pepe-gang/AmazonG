@@ -8,11 +8,8 @@ import { chaseProfileDir, chaseSessionStatePath } from './chaseProfiles.js';
 import { getChaseCredentials } from './chaseCredentials.js';
 import {
   isChaseAuthPromptUrl,
-  parseAvailableCreditFromHtml,
-  parseCreditBalanceFromHtml,
   parseInProcessPaymentsFromHtml,
   parsePendingChargesFromHtml,
-  parsePointsBalanceFromHtml,
 } from './chaseScrape.js';
 import type { ChasePaymentEntry } from '../shared/types.js';
 
@@ -115,6 +112,121 @@ export async function openChaseSession(
     }
   });
 
+  // CDP URL blocklist for Chase. Mirrors the Amazon driver's pattern
+  // (src/browser/driver.ts:140-263). Pass-4 + pass-7 research +
+  // empirical capture (2026-05-08) vetted every entry as safe — none
+  // touch Akamai Bot Manager's sensor pipeline (which lives at
+  // secure.chase.com/auth/fcc/adaptive + _abck/bm_* cookies) or any
+  // load-bearing SPA JS/CSS bundles.
+  //
+  // Total estimated saving: ~250KB bandwidth + 30+ XHRs eliminated
+  // from hydration contention window per fetch + ~100-300ms wall-clock.
+  //
+  // DO NOT add to this list:
+  //   secure.chase.com/svc/wl/auth/*  Akamai sensor lifeline
+  //   secure.chase.com/auth/fcc/*     Akamai sensor lifeline
+  //   asset.chase.com/*               JS bundles (SPA won't render)
+  //   static.chase.com/content/pq/*   CMS page fragments
+  //   static.chasecdn.com/splitio/*   Feature-flag SDK (SPA throws on miss)
+  //   chaseloyalty.chase.com/public/* Loyalty SPA bundles
+  //   chaseloyalty.chase.com/rest/common/*  Loyalty config
+  //   chaseloyalty.chase.com/rest/cash-back/*  Redemption form data
+  //   secure.chase.com/svc/rl/.../dashboard/module/list  Stage B
+  //   secure.chase.com/svc/rr/.../rewards/v2/summary/list  Stage B
+  //   secure.chase.com/svc/rr/.../menu/list  keepalive ping target
+  const BLOCKED_URL_PATTERNS_CHASE = [
+    // ────── Already shipped, verified blocked via empirical capture ──────
+    // Akamai mPulse RUM config endpoint. Separate product from Akamai
+    // Bot Manager. Fires at +53ms (early hydration).
+    '*://c.go-mpulse.net/*',
+    // Companion mPulse host serving the actual boomerang.js library
+    // (~60KB × 2 fires = ~120KB). The c.go-mpulse block above kills
+    // the config init but boomerang.js itself loads from s2.go-mpulse;
+    // blocking both completes the mPulse uninstall.
+    '*://s2.go-mpulse.net/*',
+    // Chase self-hosted Adobe Analytics ingestion. 16+ fire-and-forget
+    // beacons per fetch, all 0-byte responses, fires throughout the
+    // +157-3063ms contention window.
+    '*://analytics.chase.com/*',
+    // Recommendations beacons. Fires post-data XHRs, so blocking
+    // has near-zero wall-clock cost, just cleans the tail.
+    '*://reco.chase.com/*',
+
+    // ────── Tier 1 — analytics/RUM/decoration (zero risk) ──────
+    // Google Fonts (Open Sans woff2). Decorative typography only;
+    // Chase has system-font fallbacks that look fine. ~85KB saved
+    // (14KB × 6 fires).
+    '*://fonts.gstatic.com/*',
+    // Chase Offers ad images. ~10KB; AmazonG never displays.
+    '*://chaseoffers.chase.com/*',
+    // Adobe Tag Manager extensions library.
+    '*://www.chase.com/apps/chase/clientlibs/foundation/tagmanagerextensions.js',
+    // Adobe Analytics reporting library.
+    '*://www.chase.com/apps/chase/clientlibs/foundation/scripts/Reporting.js',
+    // CCPA reporting percentage config.
+    '*://www.chase.com/etc/chase/appsconfig/clientconfig.ccpa*',
+    // Feedback survey widget (UI Voice of Customer).
+    '*://www.chase.com/etc/designs/chase-ux/clientlibs/chase-ux/js/survey/*',
+    // NOT blocking `/apps/services/tagmanager/*` — empirical 2026-05-08
+    // user report after I shipped that block: 2/4 parallel cards
+    // failed to fetch in-process payments. The activity page fires
+    // `/apps/services/tagmanager/cpo/payBills/creditCardPayment/
+    // creditCardPaymentActivity`, and despite the response being just
+    // a 42-byte tag-manager ID, blocking it appears to gate the
+    // SPA's payments-module init on some race-condition path.
+    // Removed pre-emptively until we can isolate exactly which
+    // tagmanager subpath is safe (probably none on the activity
+    // page; possibly safe on /summary). Saves nearly nothing
+    // anyway — these responses are 42-byte beacons.
+    // 1×1 analytics tracking pixel.
+    '*://secure.chase.com/events/analytics/public/v1/cc.gif',
+    // chaseloyalty-side analytics wrapper.
+    '*://chaseloyalty.chase.com/web-analytics/*',
+
+    // ────── Tier 2 — decorative imagery (zero render risk) ──────
+    // Credit-card-art renderings (PNG previews of the Chase card face).
+    '*://*.chasecdn.com/content/services/rendition/image.*/unified-assets/digital-cards/*',
+    // Marketing illustrations + DAM (Digital Asset Management) graphics.
+    '*://sites.chase.com/content/dam/*',
+    // Marketing image renditions on sites.chase.com.
+    '*://sites.chase.com/content/services/rendition/*',
+    // Chase brand logos (decorative, multiple variants).
+    '*://*.chasecdn.com/content/dam/unified-assets/logo/*',
+    // Cookie consent banner config (we never display the banner).
+    '*://www.chase.com/content/dam/consent-banner/*',
+  ];
+  const attachCdpBlocking = async (p: Page): Promise<void> => {
+    try {
+      const cdp = await context.newCDPSession(p);
+      await cdp.send('Network.enable');
+      await cdp.send('Network.setBlockedURLs', { urls: BLOCKED_URL_PATTERNS_CHASE });
+    } catch (err) {
+      // CDP attach failed — page loads normally without blocking.
+      // Worst case: more bandwidth used, no functional break.
+      logger.warn('chase.cdp.block.attach.failed', {
+        profileId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+  for (const existingPage of context.pages()) {
+    void attachCdpBlocking(existingPage);
+  }
+  context.on('page', (newPage) => {
+    void attachCdpBlocking(newPage);
+  });
+
+  // Full-capture mode: when AUTOG_CHASE_FULL_CAPTURE=1, log every
+  // request + response (ALL resource types — xhr, fetch, image, font,
+  // script, stylesheet, document, etc.) across the entire context.
+  // Used to audit blocklist candidates: tells us exactly what fires on
+  // each Chase page so we can identify load-bearing vs noise URLs.
+  // Different from AUTOG_CHASE_XHR_CAPTURE (which only logs xhr/fetch
+  // and only on the snapshot fetch path).
+  if (process.env.AUTOG_CHASE_FULL_CAPTURE === '1') {
+    void attachChaseFullCapture(context, profileId);
+  }
+
   // Restore cookies + origin storage from the previous session, if
   // any. launchPersistentContext's SQLite store drops session
   // cookies on close — but Chase issues auth as session cookies —
@@ -140,6 +252,30 @@ export async function openChaseSession(
         localStorage?: Array<{ name: string; value: string }>;
       }>;
     };
+    // Restore EVERY cookie from the snapshot, including Akamai's
+    // bot-management cookies (_abck, bm_sz, ak_bmsc, bm_sv).
+    //
+    // History: pass-3 research hypothesized that filtering out the
+    // Akamai cookies would help — the theory was that the embedded
+    // sensor digest in _abck might mismatch a new Chromium process's
+    // TLS state and cause invalidation. We shipped a filter on
+    // 2026-05-07 to test the hypothesis. **Empirically it made
+    // sessions WORSE** — the user reported re-auth within ~20 min
+    // of session start (vs. previously next-day). Reverted.
+    //
+    // The likely real story: Akamai's cookies rotate continuously
+    // during a live session and our auto-save persists the most
+    // recent values. Restoring them on the next launch keeps the
+    // device-trust signal intact even if the embedded digest is a
+    // few minutes stale — Chase/Akamai accept the staleness for a
+    // window. Removing the cookies forced Akamai to mint fresh on
+    // every launch, which appears to mark the session as "new
+    // device" and shortens its TTL.
+    //
+    // The "session works yesterday, dead today" issue we were
+    // trying to fix is probably just normal Chase server-side
+    // session expiry, not anything we control client-side. Live
+    // with it.
     if (Array.isArray(state.cookies) && state.cookies.length > 0) {
       await context.addCookies(state.cookies);
     }
@@ -306,6 +442,12 @@ export async function openChaseSession(
       try {
         await context.storageState({
           path: chaseSessionStatePath(profileId),
+          // Capture IndexedDB too — Playwright defaults to cookies +
+          // localStorage only and silently drops IDB. If Chase persists
+          // ANY device-trust JWT or auth state in IDB, the missing
+          // capture would force a re-mint on every relaunch. Cheap
+          // insurance even if unused.
+          indexedDB: true,
         });
       } catch (err) {
         logger.warn('chase.session.stateSave.error', {
@@ -360,7 +502,12 @@ async function captureSummaryDebugSnapshot(
   await mkdir(dir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const file = join(dir, `${profileId}-${ts}.png`);
-  await page.screenshot({ path: file, fullPage: true });
+  // Viewport-only screenshot. Full-page would re-render off-screen
+  // content (which on Chase's heavy SPA can scroll for thousands of
+  // pixels of marketing modules) and cost an extra 100-300ms. The
+  // recon-bar + any auth-prompt overlay we're trying to diagnose are
+  // both above the fold; viewport is enough.
+  await page.screenshot({ path: file });
   logger.info('chase.snapshot.debugCaptured', { profileId, file });
 }
 
@@ -396,6 +543,11 @@ export function attachSessionAutoSave(
     try {
       await session.context.storageState({
         path: chaseSessionStatePath(profileId),
+        // Same IDB-capture rationale as openChaseSession's close-time
+        // dump above — Playwright's default storageState skips IDB,
+        // which would silently drop any device-trust state Chase keeps
+        // there. Capture it so the next session restore is complete.
+        indexedDB: true,
       });
     } catch {
       // Context closed mid-save — fine, the teardown will fire
@@ -540,11 +692,31 @@ export async function attemptChaseAutoLogin(
     locator: (sel: string) => ReturnType<Page['locator']>;
     waitForLogonGone: () => Promise<void>;
   };
-  let scope: Scope | null = null;
+  // Race the two layouts instead of probing sequentially — Chase
+  // serves the full-page /logon variant on cold loads where no
+  // iframe will ever appear, so a sequential probe wastes the full
+  // iframe-timeout before trying the direct selector. Promise.any
+  // resolves with the first FULFILLED probe (rejections are
+  // ignored), and only throws if both reject — exactly the
+  // semantics we want. 10s upper bound covers Chase's slowest
+  // observed cold-render.
+  let winner: 'iframe' | 'direct';
   try {
-    await page
-      .locator('iframe#logonbox')
-      .waitFor({ state: 'attached', timeout: 6_000 });
+    winner = await Promise.any([
+      page
+        .locator('iframe#logonbox')
+        .waitFor({ state: 'attached', timeout: 10_000 })
+        .then(() => 'iframe' as const),
+      page
+        .locator('#userId-input-field-input')
+        .waitFor({ state: 'visible', timeout: 10_000 })
+        .then(() => 'direct' as const),
+    ]);
+  } catch {
+    return { kind: 'no_login_form' };
+  }
+  let scope: Scope;
+  if (winner === 'iframe') {
     const frame = page.frameLocator('iframe#logonbox');
     scope = {
       locator: (sel) => frame.locator(sel) as unknown as ReturnType<Page['locator']>,
@@ -554,25 +726,16 @@ export async function attemptChaseAutoLogin(
           .locator('iframe#logonbox')
           .waitFor({ state: 'detached', timeout: 30_000 }),
     };
-  } catch {
-    // No iframe — try the parent document. Wait for the username
-    // input to show up directly.
-    try {
-      await page
-        .locator('#userId-input-field-input')
-        .waitFor({ state: 'visible', timeout: 6_000 });
-      scope = {
-        locator: (sel) => page.locator(sel),
-        // Full-page layout — success = URL leaves /logon.
-        waitForLogonGone: () =>
-          page.waitForURL(
-            (url) => !/\/logon/i.test(url.toString()),
-            { timeout: 30_000 },
-          ),
-      };
-    } catch {
-      return { kind: 'no_login_form' };
-    }
+  } else {
+    scope = {
+      locator: (sel) => page.locator(sel),
+      // Full-page layout — success = URL leaves /logon.
+      waitForLogonGone: () =>
+        page.waitForURL(
+          (url) => !/\/logon/i.test(url.toString()),
+          { timeout: 30_000 },
+        ),
+    };
   }
 
   const userField = scope.locator('#userId-input-field-input');
@@ -586,32 +749,46 @@ export async function attemptChaseAutoLogin(
 
   // Clear + type per-character. Typing instead of fill() because
   // Chase has anti-paste handlers, and per-character delays make
-  // bot-detection scoring more lenient. Skip the clear when Chase
-  // has already pre-filled the right username via "Remember
-  // username" — touching the field with fill('') can trigger
-  // re-population by Chase's autofill listener and waste keystrokes.
+  // bot-detection scoring more lenient. Skip the clear when:
+  //   - Chase has already pre-filled the right username (via
+  //     "Remember username") — fill('') can re-populate via
+  //     autofill listener and waste keystrokes
+  //   - The field is already empty (typical on a fresh /logon nav)
+  //     — CMD+A + Backspace on an empty field is two CDP round-trips
+  //     of pure overhead, ~100ms
   try {
     const currentUser = await userField.inputValue({ timeout: 2_000 }).catch(() => '');
     if (currentUser !== creds.username) {
       await userField.click({ force: true, timeout: 5_000 });
-      // Keyboard-clear: select-all + backspace. More tolerant of
-      // Chase's input handlers than fill('').
-      await userField.press('ControlOrMeta+a').catch(() => undefined);
-      await userField.press('Backspace').catch(() => undefined);
+      // Only clear when there's actually something to clear —
+      // saves ~100ms on the typical fresh-nav case where the
+      // field is empty.
+      if (currentUser.length > 0) {
+        await userField.press('ControlOrMeta+a').catch(() => undefined);
+        await userField.press('Backspace').catch(() => undefined);
+      }
       await userField.type(creds.username, { delay: 35 });
       logger.info('chase.autoLogin.typedUsername', {
         usernameLen: creds.username.length,
+        clearSkipped: currentUser.length === 0,
       });
     } else {
       logger.info('chase.autoLogin.usernamePrefilled');
     }
     await passField.waitFor({ state: 'visible', timeout: 5_000 });
     await passField.click({ force: true, timeout: 5_000 });
-    await passField.press('ControlOrMeta+a').catch(() => undefined);
-    await passField.press('Backspace').catch(() => undefined);
+    // Same empty-field-skip optimization for password. Password
+    // fields are almost always empty on a fresh /logon nav, so
+    // this saves ~100ms in the typical case.
+    const currentPass = await passField.inputValue({ timeout: 1_500 }).catch(() => '');
+    if (currentPass.length > 0) {
+      await passField.press('ControlOrMeta+a').catch(() => undefined);
+      await passField.press('Backspace').catch(() => undefined);
+    }
     await passField.type(creds.password, { delay: 35 });
     logger.info('chase.autoLogin.typedPassword', {
       passwordLen: creds.password.length,
+      clearSkipped: currentPass.length === 0,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -624,13 +801,27 @@ export async function attemptChaseAutoLogin(
 
   // Tick "Remember username". Best-effort — keeps the username
   // pre-filled on the next /logon bounce.
+  //
+  // Tight timeouts: this whole block is best-effort decoration on
+  // the auto-login path. If Chase ships a UI variant without the
+  // checkbox (or it takes >300ms to attach), bailing fast is much
+  // better than burning seconds. Was 1500ms (probe) + 3000ms × 2
+  // (check + click fallback) = up to 7.5s of auto-login time on
+  // checkbox-absent variants. Now: 300ms attach probe + 800ms
+  // check, only ~1s upper bound.
   try {
     const rememberMe = scope.locator('#rememberMe');
-    const already = await rememberMe.isChecked({ timeout: 1_500 }).catch(() => false);
-    if (!already) {
-      await rememberMe.check({ force: true, timeout: 3_000 }).catch(() =>
-        rememberMe.click({ force: true, timeout: 3_000 }),
-      );
+    const attached = await rememberMe
+      .waitFor({ state: 'attached', timeout: 300 })
+      .then(() => true)
+      .catch(() => false);
+    if (attached) {
+      const already = await rememberMe.isChecked({ timeout: 500 }).catch(() => false);
+      if (!already) {
+        await rememberMe.check({ force: true, timeout: 800 }).catch(() =>
+          rememberMe.click({ force: true, timeout: 800 }).catch(() => undefined),
+        );
+      }
     }
   } catch {
     // best-effort — proceed even if the checkbox isn't there
@@ -720,6 +911,13 @@ export async function maybeAutoLoginAndContinue(
     overlayPresent:
       (await page.locator('iframe#logonbox').count().catch(() => 0)) > 0,
   });
+  // Pre-fetch creds in parallel with the auth-signal probe. Keychain
+  // access on macOS can take 50-200ms; doing it during the 1.5s
+  // settle window means by the time we know we need creds, they're
+  // already in hand. On the hot path (no auth signal), the cred read
+  // is wasted work — but it's a single keychain read, not network,
+  // and it's overlapped with a wall-clock wait we'd be doing anyway.
+  const credsPromise = getChaseCredentials(profileId).catch(() => null);
   let { urlIndicatesAuth, overlayPresent } = await detectAuthSignal();
   if (!urlIndicatesAuth && !overlayPresent) {
     // Brief poll — Chase's logon overlay can take a second to attach
@@ -744,7 +942,7 @@ export async function maybeAutoLoginAndContinue(
     overlayPresent,
     url: page.url(),
   });
-  const creds = await getChaseCredentials(profileId).catch(() => null);
+  const creds = await credsPromise;
   if (!creds) {
     return {
       recovered: false,
@@ -924,17 +1122,20 @@ async function runRedeemFlow(
     page.locator('input.selectable-tile__input').first(),
     page.getByRole('checkbox', { name: /CREDIT CARD/i }).first(),
   ];
-  let checkbox: Locator | null = null;
-  for (const cand of candidates) {
-    try {
-      await cand.waitFor({ state: 'attached', timeout: 5_000 });
-      checkbox = cand;
-      break;
-    } catch {
-      // try next
-    }
-  }
-  if (!checkbox) {
+  // Race the candidates instead of trying them one-by-one. Sequential
+  // probes pay 5s per miss, so a markup drift that only matches
+  // candidate #3 cost 10s of dead wait. Promise.any resolves with the
+  // first FULFILLED probe (rejections are ignored). 10s upper bound
+  // covers the same total wall-clock as the old sequential 3×5s but
+  // resolves much earlier on the common path.
+  let checkbox: Locator;
+  try {
+    checkbox = await Promise.any(
+      candidates.map((c) =>
+        c.waitFor({ state: 'attached', timeout: 10_000 }).then(() => c),
+      ),
+    );
+  } catch {
     return {
       ok: false,
       kind: 'error',
@@ -1091,6 +1292,66 @@ async function runFetch(
   // finally block writes one more time, but that only fires on graceful
   // exits; this catches the kill case.
   const stopAutoSave = attachSessionAutoSave(session, profileId);
+  // Research-mode XHR logger. When AUTOG_CHASE_XHR_CAPTURE=1, write every
+  // request + response (URL, status, content-type, headers, JSON body)
+  // to research-logs/chase-xhr-<profileId>-<ts>.jsonl. Used to identify
+  // new endpoints (e.g., the in-process payments endpoint we haven't
+  // captured yet) when planning future Stage B+ extensions.
+  const stopXhrCapture =
+    process.env.AUTOG_CHASE_XHR_CAPTURE === '1'
+      ? await attachChaseXhrCapture(session.page, profileId)
+      : null;
+  // Stage B: passive XHR interception. Empirical capture (see
+  // docs/research/chase-xhr-capture-findings-2026-05-07.md) confirmed
+  // four of the five fields the snapshot fetch reads come from two
+  // JSON XHRs Chase's SPA fires on the summary page hydration:
+  //
+  //   /svc/rl/accounts/secure/v1/dashboard/module/list   →
+  //     .cache[*].response.detail.{currentBalance, availableCredit,
+  //                                 pendingChargesAmount}
+  //   /svc/rr/accounts/secure/card/rewards/v2/summary/list →
+  //     .cardRewardsSummary[*].currentRewardsBalance
+  //
+  // Listening for these instead of waiting for SPA hydration to paint
+  // selectors (a) gets typed numeric values instead of regex-parsed
+  // dollar strings, (b) lets us drop the chaseloyalty.chase.com
+  // cross-domain SSO bounce entirely (rewards now ride the same
+  // secure.chase.com session as everything else), and (c) returns a
+  // few seconds earlier per fetch because we resolve as soon as JSON
+  // arrives instead of after the DOM is fully painted.
+  //
+  // Listener attaches BEFORE any nav so the early hydration XHRs are
+  // never missed. Detach in the finally to avoid leaking handlers
+  // when the same context is reused (it isn't currently, but the
+  // pattern keeps future context-pool work safe).
+  const xhrJson: { dashboard: unknown; rewards: unknown } = {
+    dashboard: null,
+    rewards: null,
+  };
+  const onResponse = async (resp: import('playwright').Response): Promise<void> => {
+    const url = resp.url();
+    if (xhrJson.dashboard === null && url.includes('/svc/rl/accounts/secure/v1/dashboard/module/list')) {
+      try {
+        xhrJson.dashboard = await resp.json();
+      } catch {
+        // body unreadable / malformed JSON — fall back to DOM scrape
+      }
+    } else if (
+      xhrJson.rewards === null &&
+      url.includes('/svc/rr/accounts/secure/card/rewards/v2/summary/list')
+    ) {
+      try {
+        xhrJson.rewards = await resp.json();
+      } catch {
+        // ditto
+      }
+    }
+  };
+  const responseListener = (r: import('playwright').Response): void => {
+    void onResponse(r);
+  };
+  session.page.on('response', responseListener);
+
   try {
     const { page } = session;
     let creditBalance = '';
@@ -1098,7 +1359,7 @@ async function runFetch(
     let availableCredit = '';
     let pointsBalance = '';
 
-    // 1) Card summary page — credit balance + pending charges.
+    // 1) Card summary page — fires both Stage B XHRs during hydration.
     try {
       await page.goto(
         `https://secure.chase.com/web/auth/dashboard#/dashboard/summary/${encodeURIComponent(
@@ -1112,37 +1373,138 @@ async function runFetch(
           return { ok: false, reason: recovery.reason };
         }
       }
-      // Wait for the recon bar VALUE element (the label class ends
-      // with "-text"; the value class is the bare prefix). The SPA
-      // hash-routes after domcontentloaded so the bar takes a few
-      // seconds to hydrate even after the document is "loaded."
-      // 30s gives a cold persistent-context start enough room to
-      // SSO, route, and render. Selector-based wait is more
-      // reliable than text-based since "Current balance" can also
-      // appear in unrelated tooltips / aria-labels during loading.
-      await page
-        .locator('.activity-tile__recon-bar-balance')
-        .first()
-        .waitFor({ state: 'visible', timeout: 30_000 })
-        .catch(() => undefined);
-      const summaryHtml = await page.content();
-      creditBalance = parseCreditBalanceFromHtml(summaryHtml);
-      // Same page hosts the "Pending charges" line in the activity
-      // accordion above the recon bar. Pull it out of the same
-      // page.content() so we don't pay for a second navigation.
-      pendingCharges = parsePendingChargesFromHtml(summaryHtml);
-      availableCredit = parseAvailableCreditFromHtml(summaryHtml);
+      // Wait for both Stage B XHRs to land (typed JSON path) OR for
+      // the recon-bar selector to render (DOM-scrape fallback). The
+      // race resolves on whichever wins. 6s ceiling: empirical capture
+      // showed both XHRs land within ~3-5s on a healthy session; if
+      // they haven't fired by 6s, Chase is most likely rate-limiting
+      // (parallel-fetch failure mode) and we should bail to DOM
+      // fallback fast instead of eating a long wait BEFORE the
+      // selector wait even starts. Bumped down from 15s after a
+      // 4-way parallel fetch on 2026-05-07 stalled 3 of 4 cards
+      // because the long XHR poll compounded on top of rate-limited
+      // hydration.
+      const xhrsLandedDeadline = Date.now() + 6_000;
+      while (
+        (xhrJson.dashboard === null || xhrJson.rewards === null) &&
+        Date.now() < xhrsLandedDeadline
+      ) {
+        await page.waitForTimeout(150);
+      }
+
+      // Stage B happy path: extract from typed JSON for the fields
+      // the JSON shape covers reliably. NOTE: we deliberately do NOT
+      // pull pendingCharges from the JSON's `pendingChargesAmount`
+      // field — empirical capture (Cuong card 2026-05-07) showed
+      // that field reads `0` even when Chase's UI displays a
+      // non-zero "Pending charges:" line, so it's clearly tracking
+      // a different concept (probably pending balance transfers, not
+      // pending authorization transactions which is what the recon-
+      // bar UI sums and shows). Pending-charges always goes through
+      // the DOM scrape below until we capture the etu-transactions
+      // XHR shape and learn which field actually mirrors the UI.
+      const detailFromCache = extractDashboardDetail(xhrJson.dashboard, cardAccountId);
+      if (detailFromCache) {
+        creditBalance = formatChaseDollarAmount(detailFromCache.currentBalance);
+        availableCredit = formatChaseDollarAmount(detailFromCache.availableCredit);
+      }
+      const pointsFromXhr = extractRewardsBalance(xhrJson.rewards, cardAccountId);
+      if (pointsFromXhr !== null) {
+        pointsBalance = formatChasePointsAmount(pointsFromXhr);
+      }
+      logger.info('chase.snapshot.stageB.xhrs', {
+        profileId,
+        cardAccountId,
+        dashboardArrived: xhrJson.dashboard !== null,
+        rewardsArrived: xhrJson.rewards !== null,
+        detailExtracted: detailFromCache !== null,
+        pointsExtracted: pointsFromXhr !== null,
+      });
+
+      // Pending-charges DOM scrape — always runs (the JSON field is
+      // unreliable as noted above). Two-stage wait so we don't read
+      // the page before the "Pending charges:" row has actually
+      // hydrated:
+      //
+      //   1. Wait for the recon bar balance — proves the activity
+      //      tile *started* rendering.
+      //   2. Try to wait for the literal "Pending charges:" text
+      //      with a short timeout. The pending-charges sub-element
+      //      hydrates a few React ticks AFTER the recon bar; reading
+      //      page.content() right after step 1 can miss it on slower
+      //      renders (user-observed bug 2026-05-07: cards consistently
+      //      came back with pending=empty because the next nav fired
+      //      before that sub-element was in the DOM). A 5s ceiling
+      //      covers typical hydration lag, and on cards that genuinely
+      //      have zero pending the wait times out (the line isn't
+      //      rendered at all when amount is $0) and we proceed — the
+      //      parser correctly returns "" for no-match.
+      //
+      // Reverted earlier from Tier A's locator-scoped approach which
+      // was buggy: `:has-text("Pending charges:").last()` selected
+      // the deepest match (the label <span>), and innerHTML on the
+      // label gives just "Pending charges:&nbsp;" — no sibling <span>
+      // with the dollar amount for the regex to find.
+      try {
+        await page
+          .locator('.activity-tile__recon-bar-balance')
+          .first()
+          .waitFor({ state: 'visible', timeout: 30_000 })
+          .catch(() => undefined);
+        // Wait for the pending-charges line specifically — the user-
+        // visible bug was reading page.content() before this sub-element
+        // hydrated. 5s ceiling: enough for a normal hydration lag, short
+        // enough that no-pending cards (where the line never renders)
+        // don't murder Fetch All wall-clock.
+        await page
+          .locator('text=/Pending charges:/i')
+          .first()
+          .waitFor({ state: 'visible', timeout: 5_000 })
+          .catch(() => undefined);
+        const fullHtml = await page.content();
+        pendingCharges = parsePendingChargesFromHtml(fullHtml);
+      } catch {
+        // page closed mid-read — pendingCharges stays empty
+      }
+
+      // Stage B fallback: if the JSON path didn't yield balance or
+      // available, fall back to locator-direct DOM scrape for those
+      // two fields. Zero-risk insurance against Chase shipping a new
+      // SPA that breaks the JSON shape.
+      const needDomFallback = !creditBalance || !availableCredit;
+      if (needDomFallback) {
+        logger.info('chase.snapshot.stageB.domFallback', {
+          profileId,
+          cardAccountId,
+          missingBalance: !creditBalance,
+          missingAvailable: !availableCredit,
+        });
+        const reconBar = page.locator('.activity-tile__recon-bar-balance').first();
+        await reconBar
+          .waitFor({ state: 'visible', timeout: 30_000 })
+          .catch(() => undefined);
+        const [balanceText, availableText] = await Promise.all([
+          reconBar.textContent({ timeout: 5_000 }).catch(() => null),
+          page
+            .locator('[data-testid="availableCreditWithTransferBalance"]')
+            .first()
+            .textContent({ timeout: 5_000 })
+            .catch(() => null),
+        ]);
+        if (!creditBalance) {
+          creditBalance = balanceText?.trim().match(/-?\$[\d,]+\.\d{2}/)?.[0] ?? '';
+        }
+        if (!availableCredit) {
+          availableCredit = availableText?.trim().match(/\$[\d,]+\.\d{2}/)?.[0] ?? '';
+        }
+      }
+
       if (!creditBalance) {
-        // Diagnostic log + screenshot so we can tell whether the
-        // page hadn't rendered, the SPA bounced us elsewhere, or
-        // the regex anchor stopped matching. Screenshot lands at
-        // userData/chase-snapshot-debug/{profileId}-{ts}.png — the
-        // user can dig it out next time we triage a missing balance.
+        // Both XHR + DOM fallback missed — diagnostic log + screenshot.
         logger.warn('chase.snapshot.summaryNoBalance', {
           profileId,
           cardAccountId,
           url: page.url(),
-          htmlSize: summaryHtml.length,
         });
         await captureSummaryDebugSnapshot(page, profileId).catch(() => undefined);
       }
@@ -1154,34 +1516,12 @@ async function runFetch(
       });
     }
 
-    // 2) Loyalty home — rewards points header.
-    try {
-      await page.goto(
-        `https://chaseloyalty.chase.com/home?AI=${encodeURIComponent(cardAccountId)}`,
-        { waitUntil: 'domcontentloaded', timeout: 30_000 },
-      );
-      // Same selector-anchor approach as the summary page. The
-      // ".points" class is what wraps "70,473 pts" / "0 pts" in
-      // the page-header card-info block.
-      await page
-        .locator('.card-info .points')
-        .first()
-        .waitFor({ state: 'visible', timeout: 30_000 })
-        .catch(() => undefined);
-      const loyaltyHtml = await page.content();
-      pointsBalance = parsePointsBalanceFromHtml(loyaltyHtml);
-    } catch (err) {
-      logger.warn('chase.snapshot.loyaltyError', {
-        profileId,
-        cardAccountId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    // 3) Payment-activity page — in-process payments only.
-    // Note the leading minus on payeeId — it's how Chase
-    // distinguishes credit-card payees from other types
-    // internally. We pass it through verbatim.
+    // 2) Payment-activity page — in-process payments. Kept as DOM
+    // scrape for now: the empirical capture didn't catch a payments-
+    // specific JSON endpoint (likely because the user had no in-process
+    // payments at capture time). Once we capture that endpoint we can
+    // make this a passive listener too. Same secure.chase.com session
+    // as step 1 — no cross-domain bounce.
     let inProcessPayments: ChasePaymentEntry[] = [];
     try {
       await page.goto(
@@ -1190,16 +1530,11 @@ async function runFetch(
         )};payeeType=CREDIT_CARD`,
         { waitUntil: 'domcontentloaded', timeout: 30_000 },
       );
-      // The activity table renders inside an `activityRow` tbody.
-      // Wait for it to populate; if the user has no activity at
-      // all the wait will time out and we just return an empty
-      // list, which is the right answer.
-      await page
-        .locator('tbody.activityRow')
-        .first()
+      const activityTbody = page.locator('tbody.activityRow').first();
+      await activityTbody
         .waitFor({ state: 'visible', timeout: 30_000 })
         .catch(() => undefined);
-      const activityHtml = await page.content();
+      const activityHtml = await activityTbody.innerHTML({ timeout: 5_000 }).catch(() => '');
       inProcessPayments = parseInProcessPaymentsFromHtml(activityHtml);
     } catch (err) {
       logger.warn('chase.snapshot.activityError', {
@@ -1208,6 +1543,16 @@ async function runFetch(
         error: err instanceof Error ? err.message : String(err),
       });
     }
+
+    // The chaseloyalty.chase.com nav that used to live here is GONE —
+    // points balance now comes from /svc/rr/accounts/secure/card/rewards/v2/summary/list
+    // on the same secure.chase.com summary-page hydration as everything
+    // else (see Stage B XHR listener above). Saves the cross-domain
+    // SSO bounce (~4-9s per fetch). The DOM-fallback path above only
+    // fills the recon-bar fields; points has no DOM fallback because
+    // we no longer visit the loyalty page. If the rewards XHR ever
+    // stops firing, pointsBalance will be empty and the renderer will
+    // show an em-dash — annoying but not silent corruption.
 
     // Credit balance is the load-bearing field — Chase shows it on
     // every card-summary page (even fully-paid-off cards display
@@ -1255,9 +1600,334 @@ async function runFetch(
       },
     };
   } finally {
+    try {
+      session.page.off('response', responseListener);
+    } catch {
+      // page may already be gone
+    }
     stopAutoSave();
+    if (stopXhrCapture) await stopXhrCapture();
     await session.close();
   }
+}
+
+/**
+ * Keep a Chase user-facing window's session warm by firing a small
+ * authenticated XHR on a jittered 4-6 minute cadence. Chase's idle
+ * timer (~10-11 min on consumer banking, per public sources) is reset
+ * by any successful authenticated `/svc/` POST — so periodically firing
+ * the smallest one available extends the session as long as the
+ * window is open.
+ *
+ * Endpoint: `POST /svc/rr/accounts/secure/v1/menu/list` — returns the
+ * side-nav menu (small payload, idempotent, fired by the SPA naturally
+ * on dashboard view). Same TLS + connection pool + cookies as a real
+ * SPA XHR (transport-indistinguishable, per pass-2 round-2 research).
+ *
+ * Skips firing when `document.visibilityState !== 'visible'` so a
+ * minimized / backgrounded tab doesn't keep beating without the
+ * visibility signal Akamai's sensor cross-references.
+ *
+ * Returns a teardown function that the caller MUST invoke when the
+ * window is being closed (mirrors attachSessionAutoSave). Safe to
+ * call multiple times.
+ */
+export function attachChaseKeepalive(
+  session: ChaseSession,
+  profileId: string,
+): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const tick = async (): Promise<void> => {
+    if (stopped) return;
+    try {
+      const skip = await session.page
+        .evaluate(() => document.visibilityState !== 'visible')
+        .catch(() => true);
+      if (!skip) {
+        const status = await session.page
+          .evaluate(async () => {
+            try {
+              const r = await fetch('/svc/rr/accounts/secure/v1/menu/list', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                  // Confirmed required headers from MaxxRK chaseinvest-api +
+                  // empirical AmazonG capture: x-jpmc-csrf-token is the
+                  // literal string "NONE" for same-origin SPA XHRs.
+                  'x-jpmc-csrf-token': 'NONE',
+                  'x-jpmc-channel': 'id=C30',
+                  'content-type':
+                    'application/x-www-form-urlencoded; charset=UTF-8',
+                  accept: 'application/json, text/plain, */*',
+                },
+              });
+              return r.status;
+            } catch {
+              return null;
+            }
+          })
+          .catch(() => null);
+        logger.info('chase.keepalive.fired', { profileId, status });
+      }
+    } catch {
+      // page closed or context torn down — teardown will fire shortly
+    }
+    schedule();
+  };
+
+  const schedule = (): void => {
+    if (stopped) return;
+    // 4-6 min jittered: under Chase's reported ~10 min idle ceiling
+    // with margin, but not so frequent that periodic-tick cadence
+    // becomes a bot-shape signal on its own.
+    const ms = (4 + Math.random() * 2) * 60_000;
+    timer = setTimeout(() => void tick(), ms);
+  };
+
+  schedule();
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
+}
+
+/**
+ * Comprehensive network capture across the entire Chase context.
+ * Logs every request + response with full metadata (resource type,
+ * URL, status, content-type, body length, mime, page-URL it fired
+ * from). Output: research-logs/chase-full-<profileId>-<ts>.jsonl.
+ *
+ * Used for blocklist auditing — tells us which URLs are noise (could
+ * be blocked) vs load-bearing (would break the SPA if blocked). The
+ * smaller AUTOG_CHASE_XHR_CAPTURE mode only logs xhr/fetch on the
+ * snapshot fetch's main page; full capture covers EVERY page in the
+ * context (Pay flyout, Open Rewards window, redemption flow) and
+ * EVERY resource type so we see the complete traffic profile.
+ *
+ * Anti-bot impact: zero — passive observation only, no requests
+ * issued by us.
+ */
+async function attachChaseFullCapture(
+  context: BrowserContext,
+  profileId: string,
+): Promise<void> {
+  const { mkdir, appendFile, writeFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const dir = join(process.cwd(), 'research-logs');
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, `chase-full-${profileId}-${ts}.jsonl`);
+  await writeFile(file, '');
+  logger.info('chase.fullCapture.start', { profileId, file });
+
+  const append = (ev: unknown): void => {
+    void appendFile(file, JSON.stringify(ev) + '\n').catch(() => undefined);
+  };
+
+  const attachToPage = (page: Page): void => {
+    page.on('request', (req) => {
+      append({
+        ts: Date.now(),
+        event: 'request',
+        url: req.url(),
+        method: req.method(),
+        resourceType: req.resourceType(),
+        pageUrl: page.url(),
+      });
+    });
+    page.on('response', (resp) => {
+      const req = resp.request();
+      const headers = resp.headers();
+      append({
+        ts: Date.now(),
+        event: 'response',
+        url: resp.url(),
+        status: resp.status(),
+        resourceType: req.resourceType(),
+        contentType: headers['content-type'] ?? '',
+        contentLength: headers['content-length'] ?? '',
+        pageUrl: page.url(),
+      });
+    });
+    page.on('requestfailed', (req) => {
+      append({
+        ts: Date.now(),
+        event: 'requestfailed',
+        url: req.url(),
+        resourceType: req.resourceType(),
+        failure: req.failure()?.errorText ?? null,
+        pageUrl: page.url(),
+      });
+    });
+  };
+
+  for (const existing of context.pages()) attachToPage(existing);
+  context.on('page', attachToPage);
+}
+
+/**
+ * Pull the per-card detail object out of the dashboard/module/list
+ * JSON response. Chase's SPA caches the per-card detail call inside
+ * the module-list response under a top-level `cache` array — each
+ * entry is a `{url, request, response}` triple matching what the
+ * downstream module would have fetched. We look for the entry whose
+ * request.selectorId matches our cardAccountId. Returns null when
+ * the JSON shape doesn't match (Chase shipped a new SPA, or the
+ * card has no detail entry yet).
+ */
+type ChaseCardDetail = {
+  currentBalance: number;
+  availableCredit: number;
+  pendingChargesAmount?: number;
+};
+
+function extractDashboardDetail(json: unknown, cardAccountId: string): ChaseCardDetail | null {
+  if (!json || typeof json !== 'object') return null;
+  const cache = (json as { cache?: unknown }).cache;
+  if (!Array.isArray(cache)) return null;
+  for (const entry of cache) {
+    if (!entry || typeof entry !== 'object') continue;
+    const request = (entry as { request?: { selectorId?: unknown } }).request;
+    if (!request || String(request.selectorId) !== cardAccountId) continue;
+    const response = (entry as { response?: { detail?: unknown } }).response;
+    const detail = response?.detail;
+    if (!detail || typeof detail !== 'object') continue;
+    const d = detail as Record<string, unknown>;
+    if (typeof d.currentBalance !== 'number') continue;
+    if (typeof d.availableCredit !== 'number') continue;
+    return {
+      currentBalance: d.currentBalance,
+      availableCredit: d.availableCredit,
+      pendingChargesAmount:
+        typeof d.pendingChargesAmount === 'number' ? d.pendingChargesAmount : undefined,
+    };
+  }
+  return null;
+}
+
+/**
+ * Pull the rewards points balance for the card from the
+ * /svc/rr/accounts/secure/card/rewards/v2/summary/list response.
+ * Chase returns one entry per card under cardRewardsSummary; we
+ * pick the entry matching our cardAccountId. Returns null on shape
+ * mismatch.
+ */
+function extractRewardsBalance(json: unknown, cardAccountId: string): number | null {
+  if (!json || typeof json !== 'object') return null;
+  const summary = (json as { cardRewardsSummary?: unknown }).cardRewardsSummary;
+  if (!Array.isArray(summary)) return null;
+  const idNum = Number(cardAccountId);
+  for (const row of summary) {
+    if (!row || typeof row !== 'object') continue;
+    const r = row as { accountId?: unknown; currentRewardsBalance?: unknown; balance?: unknown };
+    if (Number(r.accountId) !== idNum) continue;
+    if (typeof r.currentRewardsBalance === 'number') return r.currentRewardsBalance;
+    if (typeof r.balance === 'number') return r.balance;
+  }
+  return null;
+}
+
+/**
+ * Format a Chase JSON dollar number to the same string shape the
+ * UI used to scrape from the recon bar. Negative values get a "-"
+ * prefix before the "$" (Chase's recon bar renders "-$1,105.68"
+ * for credit balances). Two decimal places, comma-grouped.
+ */
+function formatChaseDollarAmount(num: number): string {
+  const sign = num < 0 ? '-' : '';
+  const abs = Math.abs(num);
+  return `${sign}$${abs.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+/**
+ * Format a Chase JSON points integer to the "<n,nnn> pts" string
+ * shape the loyalty page used to render. Matches the prior parser's
+ * output so the renderer's display logic doesn't need to change.
+ */
+function formatChasePointsAmount(num: number): string {
+  return `${num.toLocaleString('en-US')} pts`;
+}
+
+/**
+ * Tap into a session's page-level network events and stream every XHR
+ * (and fetch) request + response to a JSONL file under research-logs/.
+ * Used during Stage B research to identify which JSON endpoints serve
+ * the data we currently scrape from the rendered DOM. Enabled only
+ * when AUTOG_CHASE_XHR_CAPTURE=1 is set in the env — production runs
+ * skip the listener entirely.
+ *
+ * Returns a teardown function that flushes the file. JSON bodies are
+ * inlined when small enough to be useful for grep; non-JSON gets a
+ * length stamp.
+ */
+async function attachChaseXhrCapture(
+  page: Page,
+  profileId: string,
+): Promise<() => Promise<void>> {
+  const { mkdir, appendFile, writeFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const dir = join(process.cwd(), 'research-logs');
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, `chase-xhr-${profileId}-${ts}.jsonl`);
+  await writeFile(file, '');
+  logger.info('chase.xhrCapture.start', { profileId, file });
+
+  const append = (ev: unknown): void => {
+    void appendFile(file, JSON.stringify(ev) + '\n').catch(() => undefined);
+  };
+  const onRequest = (req: import('playwright').Request): void => {
+    const rt = req.resourceType();
+    if (rt !== 'xhr' && rt !== 'fetch') return;
+    append({
+      ts: Date.now(),
+      event: 'request',
+      url: req.url(),
+      method: req.method(),
+      reqHeaders: req.headers(),
+    });
+  };
+  const onResponse = async (resp: import('playwright').Response): Promise<void> => {
+    const req = resp.request();
+    const rt = req.resourceType();
+    if (rt !== 'xhr' && rt !== 'fetch') return;
+    const contentType = resp.headers()['content-type'] ?? '';
+    let body: unknown;
+    let bodyLen = 0;
+    try {
+      const buf = await resp.body();
+      bodyLen = buf.length;
+      if (contentType.includes('application/json') && bodyLen < 2_000_000) {
+        try {
+          body = JSON.parse(buf.toString('utf8'));
+        } catch {
+          body = buf.toString('utf8').slice(0, 4000);
+        }
+      }
+    } catch {
+      // body unreadable — redirect, blocked, or context closed mid-read
+    }
+    append({
+      ts: Date.now(),
+      event: 'response',
+      url: resp.url(),
+      status: resp.status(),
+      contentType,
+      bodyLen,
+      body,
+    });
+  };
+  page.on('request', onRequest);
+  page.on('response', (r) => void onResponse(r));
+  return async () => {
+    page.off('request', onRequest);
+    logger.info('chase.xhrCapture.stop', { profileId, file });
+  };
 }
 
 /**
@@ -1282,8 +1952,21 @@ export async function openChasePayPage(
   // Always visible — the user is doing the pay action themselves.
   // No headless option here.
   const session = await openChaseSession(profileId);
+  const flyoutUrl =
+    `https://secure.chase.com/web/auth/dashboard#/dashboard/summary/${encodeURIComponent(
+      cardAccountId,
+    )}/CARD/BAC/index;flyout=payCard,-${encodeURIComponent(
+      cardAccountId,
+    )},BAC,microApp`;
   try {
-    await session.page.goto('https://secure.chase.com/web/auth/dashboard', {
+    // Direct-to-flyout nav. On a warm session (cookies present) Chase
+    // serves the flyout immediately — saves the ~500-800ms dashboard
+    // hop the previous dual-nav flow paid every time. On a cold/expired
+    // session Chase 302s us to /logon, which the recovery step below
+    // picks up; we then re-navigate to the flyout once we're authed,
+    // landing in the same end state as the old code with one extra nav
+    // only on the rare cold path.
+    await session.page.goto(flyoutUrl, {
       waitUntil: 'load',
       timeout: 30_000,
     });
@@ -1292,15 +1975,17 @@ export async function openChasePayPage(
       await session.close().catch(() => undefined);
       return { ok: false, reason: recovery.reason };
     }
-    await pacingPause();
-    await session.page.goto(
-      `https://secure.chase.com/web/auth/dashboard#/dashboard/summary/${encodeURIComponent(
-        cardAccountId,
-      )}/CARD/BAC/index;flyout=payCard,-${encodeURIComponent(
-        cardAccountId,
-      )},BAC,microApp`,
-      { waitUntil: 'load', timeout: 30_000 },
-    );
+    // Recovery may have moved the URL off the flyout (Chase redirects
+    // post-login to the dashboard summary page, not the flyout). Re-nav
+    // when that happens. On the warm path the URL still contains the
+    // flyout fragment and we skip the second goto entirely.
+    if (!session.page.url().includes('flyout=payCard')) {
+      await pacingPause();
+      await session.page.goto(flyoutUrl, {
+        waitUntil: 'load',
+        timeout: 30_000,
+      });
+    }
     logger.info('chase.pay.windowOpened', { profileId, cardAccountId });
     return { ok: true, session };
   } catch (err) {

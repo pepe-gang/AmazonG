@@ -408,9 +408,22 @@ export type AutoGBridge = {
   chaseRedeemAll(id: string): Promise<ChaseRedeemResult>;
   chaseRedeemHistory(id: string): Promise<ChaseRedeemEntry[]>;
   chaseSnapshotGet(id: string): Promise<ChaseAccountSnapshot | null>;
+  /**
+   * Trigger a snapshot fetch for one Chase profile. When `force` is
+   * absent or false, calls within ~90s of the last successful fetch
+   * are short-circuited and the cached snapshot is returned without
+   * spawning Chromium — protects against double-clicks, StrictMode
+   * double-fires, and panic-clicks during the 5-13s fetch window.
+   * Pass `force: true` to bypass the TTL gate (the explicit
+   * "Refresh" / "Refresh All" buttons do this).
+   */
   chaseSnapshotRefresh(
     id: string,
-  ): Promise<{ ok: true; snapshot: ChaseAccountSnapshot } | { ok: false; reason: string }>;
+    options?: { force?: boolean },
+  ): Promise<
+    | { ok: true; snapshot: ChaseAccountSnapshot; fromCache?: boolean }
+    | { ok: false; reason: string; kind?: 'session-expired' | 'rate-limit' | 'unknown' }
+  >;
   chasePayBalance(id: string): Promise<{ ok: true } | { ok: false; reason: string }>;
   chasePayCancel(id: string): Promise<void>;
   jobsList(): Promise<JobAttempt[]>;

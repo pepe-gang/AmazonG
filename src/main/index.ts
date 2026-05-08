@@ -45,6 +45,7 @@ import {
   updateChaseProfile,
 } from './chaseProfiles.js';
 import {
+  attachChaseKeepalive,
   attachSessionAutoSave,
   attemptChaseAutoLogin,
   fetchChaseAccountSnapshot,
@@ -1578,8 +1579,10 @@ function registerIpcHandlers(): void {
       }
       chaseActionSessions.set(id, session);
       const stopAutoSave = attachSessionAutoSave(session, id);
+      const stopKeepalive = attachChaseKeepalive(session, id);
       session.context.on('close', () => {
         stopAutoSave();
+        stopKeepalive();
         chaseActionSessions.delete(id);
       });
 
@@ -1773,67 +1776,129 @@ function registerIpcHandlers(): void {
     return getAccountSnapshot(id);
   });
 
+  // Classify a fetch failure reason into a typed kind the renderer
+  // can render distinct UX for. The reason strings come from
+  // chaseDriver.ts's various warn paths; this is a small classifier
+  // over the user-facing messages we already emit. Kind drives the
+  // Bank tab's per-card error affordance — "session-expired" gets
+  // an inline "Sign in to Chase" button, "rate-limit" gets a "Try
+  // again in a moment" hint, "unknown" gets the bare error text.
+  const classifySnapshotErrorKind = (reason: string): 'session-expired' | 'rate-limit' | 'unknown' => {
+    if (/session expired|2fa|sign in again|otp|identity verification/i.test(reason)) {
+      return 'session-expired';
+    }
+    if (/rate.?limit|parallel.?fetch|too many|throttle/i.test(reason)) {
+      return 'rate-limit';
+    }
+    return 'unknown';
+  };
+
+  // TTL for the freshness gate below. Within this window, snapshot
+  // refreshes return cached data without spawning Chromium — covers
+  // double-clicks, StrictMode double-fires, the renderer's
+  // useEffect re-running on a profile-list mutation that landed
+  // mid-fetch, etc. The explicit "Refresh" / "Refresh All" buttons
+  // pass {force:true} to bypass.
+  const SNAPSHOT_FRESHNESS_TTL_MS = 90_000;
+
   // Same family of guards as the redeem handler — Chase's persistent
   // userDataDir can only host one session at a time, and a parallel
   // login + snapshot would deadlock.
-  ipcMain.handle(IPC.chaseSnapshotRefresh, async (_e, id: string) => {
-    const profiles = await loadChaseProfiles();
-    const profile = profiles.find((p) => p.id === id);
-    if (!profile) return { ok: false, reason: 'profile not found' };
-    if (!profile.cardAccountId) {
-      return {
-        ok: false,
-        reason: 'no card linked yet — finish login first so the card account id is captured',
-      };
-    }
-    if (chaseLoginAborts.has(id)) {
-      return { ok: false, reason: 'login is still in progress for this profile' };
-    }
-    if (chaseActionSessions.has(id)) {
-      return {
-        ok: false,
-        reason: 'another Chase window is already open for this profile — close it first',
-      };
-    }
-    if (isInFlight(chaseRedeemInFlight, id)) {
-      return { ok: false, reason: 'a redemption is already running for this profile' };
-    }
-    if (isInFlight(chasePayInFlight, id)) {
-      // A pay window is holding the userDataDir lock — running a
-      // second Chromium against the same dir would fail with
-      // ProcessSingleton. Defer this snapshot fetch.
-      return { ok: false, reason: 'a payment is already running for this profile' };
-    }
-    // Coalesce concurrent snapshot calls (StrictMode double-fires
-    // the renderer's useEffect) so duplicates wait on the same
-    // underlying work instead of hitting the in-flight guard.
-    return runCoalesced(coalesceSnapshot, id, async () => {
-      chaseSnapshotInFlight.set(id, Date.now());
-      try {
-      const result = await fetchChaseAccountSnapshot(id, profile.cardAccountId);
-      if (result.ok) {
-        await setAccountSnapshot(id, result.snapshot).catch((err) => {
-          logger.warn('chase.snapshot.persistError', {
-            id,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-      } else if (/session expired/i.test(result.reason)) {
-        // Server-side session is gone. Flip our local loggedIn flag
-        // so the Bank-tab UI re-shows the Login button on this card
-        // and stops hiding it behind a "logged in" pill that's a lie.
-        await updateChaseProfile(id, { loggedIn: false }).catch(() => undefined);
+  ipcMain.handle(
+    IPC.chaseSnapshotRefresh,
+    async (_e, id: string, options?: { force?: boolean }) => {
+      const force = options?.force === true;
+      const profiles = await loadChaseProfiles();
+      const profile = profiles.find((p) => p.id === id);
+      if (!profile) return { ok: false, reason: 'profile not found', kind: 'unknown' as const };
+      if (!profile.cardAccountId) {
+        return {
+          ok: false,
+          reason: 'no card linked yet — finish login first so the card account id is captured',
+          kind: 'unknown' as const,
+        };
       }
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.warn('chase.snapshot.unexpected', { id, error: msg });
-      return { ok: false, reason: msg } as const;
-    } finally {
-      chaseSnapshotInFlight.delete(id);
-    }
-    });
-  });
+
+      // Freshness short-circuit — return cached snapshot without
+      // spawning Chromium when the last successful fetch was within
+      // SNAPSHOT_FRESHNESS_TTL_MS. This is the killshot for the
+      // "why is it opening a window AGAIN" double-click class.
+      if (!force) {
+        const cached = await getAccountSnapshot(id);
+        if (cached) {
+          const ageMs = Date.now() - new Date(cached.fetchedAt).getTime();
+          if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < SNAPSHOT_FRESHNESS_TTL_MS) {
+            logger.info('chase.snapshot.freshHit', { id, ageMs });
+            return { ok: true, snapshot: cached, fromCache: true } as const;
+          }
+        }
+      }
+
+      if (chaseLoginAborts.has(id)) {
+        return {
+          ok: false,
+          reason: 'login is still in progress for this profile',
+          kind: 'unknown' as const,
+        };
+      }
+      if (chaseActionSessions.has(id)) {
+        return {
+          ok: false,
+          reason: 'another Chase window is already open for this profile — close it first',
+          kind: 'unknown' as const,
+        };
+      }
+      if (isInFlight(chaseRedeemInFlight, id)) {
+        return {
+          ok: false,
+          reason: 'a redemption is already running for this profile',
+          kind: 'unknown' as const,
+        };
+      }
+      if (isInFlight(chasePayInFlight, id)) {
+        // A pay window is holding the userDataDir lock — running a
+        // second Chromium against the same dir would fail with
+        // ProcessSingleton. Defer this snapshot fetch.
+        return {
+          ok: false,
+          reason: 'a payment is already running for this profile',
+          kind: 'unknown' as const,
+        };
+      }
+      // Coalesce concurrent snapshot calls (StrictMode double-fires
+      // the renderer's useEffect) so duplicates wait on the same
+      // underlying work instead of hitting the in-flight guard.
+      return runCoalesced(coalesceSnapshot, id, async () => {
+        chaseSnapshotInFlight.set(id, Date.now());
+        try {
+          const result = await fetchChaseAccountSnapshot(id, profile.cardAccountId!);
+          if (result.ok) {
+            await setAccountSnapshot(id, result.snapshot).catch((err) => {
+              logger.warn('chase.snapshot.persistError', {
+                id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+            return result;
+          }
+          // Failure path: classify reason for the renderer + flip
+          // loggedIn flag on session-expired so the UI re-shows
+          // the Login button.
+          const kind = classifySnapshotErrorKind(result.reason);
+          if (kind === 'session-expired') {
+            await updateChaseProfile(id, { loggedIn: false }).catch(() => undefined);
+          }
+          return { ok: false, reason: result.reason, kind } as const;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn('chase.snapshot.unexpected', { id, error: msg });
+          return { ok: false, reason: msg, kind: 'unknown' as const };
+        } finally {
+          chaseSnapshotInFlight.delete(id);
+        }
+      });
+    },
+  );
 
   // Pay my Balance — open the Chase pay window, hand off to user.
   // No auto-fill, no submit. The window stays open until the user
@@ -1886,8 +1951,10 @@ function registerIpcHandlers(): void {
     // clean up when the user closes the window.
     chaseActionSessions.set(id, result.session);
     const stopAutoSave = attachSessionAutoSave(result.session, id);
+    const stopKeepalive = attachChaseKeepalive(result.session, id);
     result.session.context.on('close', () => {
       stopAutoSave();
+      stopKeepalive();
       chaseActionSessions.delete(id);
     });
 
