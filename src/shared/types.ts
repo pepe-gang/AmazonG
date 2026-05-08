@@ -356,6 +356,31 @@ export type ChaseProfile = {
    * user re-pick.
    */
   cardAccountId: string | null;
+  /**
+   * Auto-redeem schedule. When `enabled` is true, the main-process
+   * scheduler triggers redeemAllToStatementCredit at `time` daily.
+   * Defaults to disabled with time "15:00" (3 PM local) — set when
+   * the user toggles the switch in the Bank tab.
+   *
+   * Skip-today-on-enable semantics: when a user flips `enabled` from
+   * false → true and today's scheduled time has already passed, the
+   * scheduler waits until tomorrow's window instead of firing
+   * immediately. Implemented by stamping `lastRunAt` to start-of-today
+   * on the enable transition. Prevents the "I enabled it at 11 PM and
+   * it ran my whole points balance immediately" surprise.
+   *
+   * Optional on the type so older profiles persisted before this
+   * field shipped parse cleanly — loader backfills with disabled
+   * defaults.
+   */
+  autoRedeem?: {
+    enabled: boolean;
+    /** "HH:MM" 24h, local timezone. */
+    time: string;
+    lastRunAt: string | null;
+    lastRunResult: 'ok' | 'no_points' | 'error' | null;
+    lastRunError: string | null;
+  };
   createdAt: string;
 };
 

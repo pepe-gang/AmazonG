@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { IPC, type AutoGBridge, type Settings } from '../shared/ipc.js';
 import type {
   AmazonProfile,
+  ChaseProfile,
   IdentityInfo,
   JobAttempt,
   LogEvent,
@@ -98,6 +99,10 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.chaseOpenRewards, id) as ReturnType<AutoGBridge['chaseOpenRewards']>,
   chaseRedeemAll: (id) =>
     ipcRenderer.invoke(IPC.chaseRedeemAll, id) as ReturnType<AutoGBridge['chaseRedeemAll']>,
+  chaseSetAutoRedeem: (id, patch) =>
+    ipcRenderer.invoke(IPC.chaseSetAutoRedeem, id, patch) as ReturnType<
+      AutoGBridge['chaseSetAutoRedeem']
+    >,
   chaseRedeemHistory: (id) =>
     ipcRenderer.invoke(IPC.chaseRedeemHistory, id) as ReturnType<
       AutoGBridge['chaseRedeemHistory']
@@ -177,6 +182,11 @@ const bridge: AutoGBridge = {
     const listener = (_: unknown, profileId: string) => cb(profileId);
     ipcRenderer.on(IPC.evtChasePaySuccess, listener);
     return () => ipcRenderer.off(IPC.evtChasePaySuccess, listener);
+  },
+  onChaseProfiles(cb) {
+    const listener = (_: unknown, list: ChaseProfile[]) => cb(list);
+    ipcRenderer.on(IPC.evtChaseProfiles, listener);
+    return () => ipcRenderer.off(IPC.evtChaseProfiles, listener);
   },
 };
 

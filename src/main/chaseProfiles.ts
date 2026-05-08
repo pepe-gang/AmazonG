@@ -73,11 +73,28 @@ export function chaseSessionStatePath(id: string): string {
   );
 }
 
+/** Default state for the auto-redeem field, applied as a backfill to
+ *  profiles persisted before the field shipped. Disabled, default time
+ *  3:00 PM local. */
+export const DEFAULT_AUTO_REDEEM: NonNullable<ChaseProfile['autoRedeem']> = {
+  enabled: false,
+  time: '15:00',
+  lastRunAt: null,
+  lastRunResult: null,
+  lastRunError: null,
+};
+
 export async function loadChaseProfiles(): Promise<ChaseProfile[]> {
   try {
     const raw = await readFile(metadataPath(), 'utf8');
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? (parsed as ChaseProfile[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    // Backfill autoRedeem on read so consumers always see a populated
+    // shape regardless of when the profile was first written.
+    return (parsed as ChaseProfile[]).map((p) => ({
+      ...p,
+      autoRedeem: p.autoRedeem ?? { ...DEFAULT_AUTO_REDEEM },
+    }));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;

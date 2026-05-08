@@ -92,6 +92,12 @@ export const IPC = {
    *  card. Window opens visibly so the user can watch / 2FA, then
    *  closes itself once /cash-back/success loads. */
   chaseRedeemAll: 'chase:redeem-all',
+  /** Toggle / configure the per-profile auto-redeem schedule. The
+   *  main-process scheduler ticks once a minute and fires
+   *  redeemAllToStatementCredit when the configured time has elapsed
+   *  for an enabled profile. Returns the updated profile list so the
+   *  renderer can reconcile optimistic state. */
+  chaseSetAutoRedeem: 'chase:set-auto-redeem',
   /** Per-profile history of successful automated redemptions. Reads
    *  userData/chase-redeem-history.json. Returned newest-first. */
   chaseRedeemHistory: 'chase:redeem-history',
@@ -140,6 +146,10 @@ export const IPC = {
    *  snapshot (pending charges + balance shift after the payment
    *  posts to Chase's intake queue). */
   evtChasePaySuccess: 'evt:chase-pay-success',
+  /** Fired when the auto-redeem scheduler updates one or more
+   *  ChaseProfile rows (post-tick lastRunAt persistence). Renderer
+   *  reconciles the Bank tab without a manual refresh. */
+  evtChaseProfiles: 'evt:chase-profiles',
 } as const;
 
 export type Settings = {
@@ -406,6 +416,16 @@ export type AutoGBridge = {
   chaseAbortLogin(id: string): Promise<void>;
   chaseOpenRewards(id: string): Promise<{ ok: true } | { ok: false; reason: string }>;
   chaseRedeemAll(id: string): Promise<ChaseRedeemResult>;
+  /**
+   * Update the per-profile auto-redeem schedule. Pass `enabled: true`
+   * with an HH:MM `time` to turn on; pass `enabled: false` to turn
+   * off. Time field uses 24h local clock (e.g. "15:00" for 3 PM).
+   * Returns the full profile list for renderer-side reconcile.
+   */
+  chaseSetAutoRedeem(
+    id: string,
+    patch: { enabled: boolean; time?: string },
+  ): Promise<ChaseProfile[]>;
   chaseRedeemHistory(id: string): Promise<ChaseRedeemEntry[]>;
   chaseSnapshotGet(id: string): Promise<ChaseAccountSnapshot | null>;
   /**
@@ -465,6 +485,11 @@ export type AutoGBridge = {
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;
   onJobs(cb: (attempts: JobAttempt[]) => void): () => void;
   onChasePaySuccess(cb: (profileId: string) => void): () => void;
+  /** Subscribe to ChaseProfile list updates pushed by the
+   *  auto-redeem scheduler after each tick (lastRunAt + outcome
+   *  persistence). Renderer reconciles the Bank tab without a
+   *  manual refetch. */
+  onChaseProfiles(cb: (profiles: ChaseProfile[]) => void): () => void;
 };
 
 declare global {

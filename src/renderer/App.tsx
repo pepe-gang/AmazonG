@@ -21,6 +21,7 @@ import { AppSidebar } from '@/components/app-sidebar';
 import { Deals } from '@/pages/Deals';
 import type {
   AmazonProfile,
+  ChaseProfile,
   JobAttempt,
   LogEvent,
   RendererStatus,
@@ -222,6 +223,10 @@ function MainShell({ status }: { status: RendererStatus }) {
   const [logsAttempt, setLogsAttempt] = useState<JobAttempt | null>(null);
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [profiles, setProfiles] = useState<AmazonProfile[]>([]);
+  // Chase profiles — needed for the auto-redeem header indicator.
+  // Loaded on mount + reconciled via onChaseProfiles event whenever
+  // the main-process scheduler ticks.
+  const [chaseProfiles, setChaseProfiles] = useState<ChaseProfile[]>([]);
   const [attempts, setAttempts] = useState<JobAttempt[]>([]);
   const [busy, setBusy] = useState(false);
   const [appVersion, setAppVersion] = useState<string>('');
@@ -289,6 +294,9 @@ function MainShell({ status }: { status: RendererStatus }) {
     });
     const offProfiles = window.autog.onProfiles(setProfiles);
     void window.autog.profilesList().then(setProfiles);
+    // Chase profiles for the auto-redeem header indicator.
+    const offChaseProfiles = window.autog.onChaseProfiles(setChaseProfiles);
+    void window.autog.chaseList().then(setChaseProfiles);
     const offJobs = window.autog.onJobs(setAttempts);
     void window.autog.jobsList().then(setAttempts);
     // Pause perpetual CSS animations (aurora drift + animate-ping
@@ -310,6 +318,7 @@ function MainShell({ status }: { status: RendererStatus }) {
     return () => {
       off();
       offProfiles();
+      offChaseProfiles();
       offJobs();
       document.removeEventListener('visibilitychange', onVisibility);
       document.body.classList.remove('bg-paused');
@@ -386,6 +395,7 @@ function MainShell({ status }: { status: RendererStatus }) {
           className="ml-auto flex items-center gap-2"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
+          <AutoRedeemHeaderIndicator profiles={chaseProfiles} />
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border border-white/10 bg-white/[0.04]">
             <span className="relative inline-flex items-center justify-center size-3">
               {/* Running = expanding ring behind a solid dot. Idle = flat
@@ -732,6 +742,64 @@ function DashboardView(props: {
  * label. Bumps once on resume so the visible label catches up before
  * the next tick fires.
  */
+/**
+ * Header indicator shown when at least one Chase profile has the
+ * auto-redeem schedule enabled. Sits left of the Start/Stop button
+ * so it's visible from anywhere in the app without navigating to
+ * the Bank tab. Hidden completely when no profile has it on so it
+ * doesn't take up header real-estate users won't recognize.
+ *
+ * Tooltip shows per-profile next-fire times so the user can see at
+ * a glance "personal at 3 PM, business at 4 PM" etc.
+ */
+function AutoRedeemHeaderIndicator({ profiles }: { profiles: ChaseProfile[] }) {
+  const enabledProfiles = profiles.filter(
+    (p) => p.autoRedeem?.enabled && p.cardAccountId,
+  );
+  if (enabledProfiles.length === 0) return null;
+
+  // Build the tooltip — list each enabled profile with its time.
+  const tooltipLines = enabledProfiles.map((p) => {
+    const time = p.autoRedeem?.time ?? '15:00';
+    const formatted = formatTime12h(time);
+    return `${p.label}: ${formatted}`;
+  });
+  const tooltip =
+    `Auto-redeem on for ${enabledProfiles.length} ${enabledProfiles.length === 1 ? 'profile' : 'profiles'}\n` +
+    tooltipLines.join('\n');
+
+  // Single-profile case shows the time inline; multi-profile case
+  // shows a count to keep the chip compact.
+  const inline =
+    enabledProfiles.length === 1
+      ? `Auto-redeem ${formatTime12h(enabledProfiles[0]!.autoRedeem!.time)}`
+      : `Auto-redeem ${enabledProfiles.length} cards`;
+
+  return (
+    <div
+      className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border border-emerald-400/30 bg-emerald-500/[0.08] text-emerald-200"
+      title={tooltip}
+    >
+      <span className="size-2 rounded-full bg-emerald-400 shadow-[0_0_4px_0_oklch(0.75_0.18_150_/_0.7)]" />
+      <span>{inline}</span>
+    </div>
+  );
+}
+
+/** Render an "HH:MM" 24h string as 12h with AM/PM. Mirrors the
+ *  helper in Bank.tsx — duplicated rather than imported to keep App
+ *  free of cross-page dependencies. */
+function formatTime12h(s: string): string {
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return s;
+  const h = Number(m[1]);
+  const min = m[2];
+  if (!Number.isFinite(h) || h < 0 || h > 23) return s;
+  const period = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${min} ${period}`;
+}
+
 function UptimeText({ startedAt }: { startedAt: number | null }) {
   const [, force] = useState(0);
   useEffect(() => {

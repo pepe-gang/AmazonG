@@ -286,6 +286,17 @@ function ChaseAccountsPanel() {
     return off;
   }, [refreshSnapshotFor]);
 
+  // Reconcile when the auto-redeem scheduler ticks. The main process
+  // pushes the updated ChaseProfile list after every fired tick so
+  // the Bank tab's "last redeemed" timestamps update without the user
+  // having to refresh.
+  useEffect(() => {
+    const off = window.autog.onChaseProfiles((list) => {
+      setProfiles(list);
+    });
+    return off;
+  }, []);
+
   // Disk-cache load only. Auto-fetch on Bank tab entry was removed —
   // every visit was kicking off N visible Chase windows, which the
   // user found intrusive. The user now triggers fetches explicitly:
@@ -768,6 +779,21 @@ function ChaseAccountsPanel() {
               onRefreshSnapshot={() => {
                 void refreshSnapshotFor(p.id);
               }}
+              onSetAutoRedeem={async (patch) => {
+                try {
+                  const list = await window.autog.chaseSetAutoRedeem(
+                    p.id,
+                    patch,
+                  );
+                  setProfiles(list);
+                } catch (err) {
+                  setErrMsg((m) => ({
+                    ...m,
+                    [p.id]:
+                      err instanceof Error ? err.message : String(err),
+                  }));
+                }
+              }}
             />
           );
         })}
@@ -807,6 +833,7 @@ function ChaseBankCard({
   isPaying,
   onPayCancel,
   onRefreshSnapshot,
+  onSetAutoRedeem,
 }: {
   profile: ChaseProfile;
   isPending: boolean;
@@ -833,6 +860,7 @@ function ChaseBankCard({
   isPaying: boolean;
   onPayCancel: () => void;
   onRefreshSnapshot: () => void;
+  onSetAutoRedeem: (patch: { enabled: boolean; time?: string }) => void;
 }) {
   const isRedeeming = redeem === 'pending';
   const redeemSuccess =
@@ -1174,6 +1202,15 @@ function ChaseBankCard({
         </div>
       )}
 
+      {/* Auto-redeem toggle row. Daily-on-schedule redemption — flips
+          on the per-profile autoRedeem.enabled flag and fires
+          performChaseRedeem at the configured time. Visible only
+          when a card is linked (auto-redeem is meaningless without
+          a captured cardAccountId). */}
+      {p.cardAccountId && (
+        <AutoRedeemRow profile={p} onChange={onSetAutoRedeem} />
+      )}
+
       {/* Action row. Keep the surface small: Pay-balance is the
           primary call-to-action (when there's a balance to pay),
           Redeem Rewards is the second-most-common, Login appears
@@ -1229,6 +1266,104 @@ function ChaseBankCard({
       </div>
     </div>
   );
+}
+
+/**
+ * Per-profile auto-redeem schedule control. Three pieces in a
+ * single row so the card stays compact:
+ *
+ *   [toggle]  at  [HH:MM input]   ↳ status text
+ *
+ * Status reads as one of:
+ *   - "Off"
+ *   - "On — next run today at 3:00 PM"
+ *   - "On — next run tomorrow at 3:00 PM"
+ *   - "On — last run failed (reason)" (after a recent error)
+ *
+ * Time input is a native <input type="time"> so the user gets the
+ * platform's standard time picker (24h on Linux, 12h with AM/PM on
+ * macOS — Chase's UI is 12h so this is consistent for the user).
+ */
+function AutoRedeemRow({
+  profile,
+  onChange,
+}: {
+  profile: ChaseProfile;
+  onChange: (patch: { enabled: boolean; time?: string }) => void;
+}) {
+  const ar = profile.autoRedeem ?? {
+    enabled: false,
+    time: '15:00',
+    lastRunAt: null,
+    lastRunResult: null,
+    lastRunError: null,
+  };
+
+  const statusText = (() => {
+    if (!ar.enabled) return 'Off';
+    if (ar.lastRunResult === 'error' && ar.lastRunError) {
+      return `On — last run failed: ${ar.lastRunError}`;
+    }
+    if (ar.lastRunResult === 'no_points') {
+      return 'On — last run found no points to redeem';
+    }
+    if (ar.lastRunResult === 'ok' && ar.lastRunAt) {
+      return `On — last redeemed ${relDate(ar.lastRunAt)}`;
+    }
+    return `On — fires daily at ${formatTimeForDisplay(ar.time)}`;
+  })();
+
+  const statusClass = !ar.enabled
+    ? 'text-white/40'
+    : ar.lastRunResult === 'error'
+      ? 'text-red-300/90'
+      : ar.lastRunResult === 'no_points'
+        ? 'text-amber-200/80'
+        : 'text-emerald-300/80';
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap text-[11px]">
+      <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          className="accent-emerald-400 size-3.5"
+          checked={ar.enabled}
+          onChange={(e) => onChange({ enabled: e.target.checked })}
+        />
+        <span className="text-white/85">Auto redeem</span>
+      </label>
+      <span className="text-white/40">at</span>
+      <input
+        type="time"
+        value={ar.time}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (/^\d{1,2}:\d{2}$/.test(v)) {
+            onChange({ enabled: ar.enabled, time: v });
+          }
+        }}
+        className="bg-white/[0.05] border border-white/10 rounded px-1.5 py-0.5 text-[11px] tabular-nums text-white/90 focus:outline-none focus:border-blue-400/40 [color-scheme:dark]"
+      />
+      <span className={`${statusClass} truncate min-w-0 flex-1`} title={statusText}>
+        {statusText}
+      </span>
+    </div>
+  );
+}
+
+/** Render an "HH:MM" 24h time string in 12h with AM/PM for the
+ *  profile-card status line — matches the system locale convention
+ *  most users see in Chase's own UI. Falls back to the raw string
+ *  on malformed input. */
+function formatTimeForDisplay(s: string): string {
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return s;
+  const h = Number(m[1]);
+  const min = m[2];
+  if (!Number.isFinite(h) || h < 0 || h > 23) return s;
+  const period = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${min} ${period}`;
 }
 
 /** Color-themed outcome group inside the bulk-run summary. Pulled

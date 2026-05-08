@@ -117,6 +117,87 @@ let identity: IdentityInfo | null = null;
 let apiKey: string | null = null;
 let lastError: string | null = null;
 
+/**
+ * Reference to the IPC handler's redeem function, captured during
+ * registerIpcHandlers so the auto-redeem scheduler can invoke it
+ * directly (without round-tripping through ipcRenderer.invoke).
+ * Null until the IPC handlers register; the scheduler's tick checks
+ * for null defensively.
+ */
+let triggerChaseRedeem:
+  | ((id: string) => Promise<import('../shared/types.js').ChaseRedeemResult>)
+  | null = null;
+
+/** Interval handle for the auto-redeem scheduler tick, cleared on quit. */
+let chaseAutoRedeemTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Tick once a minute through the Chase profile list, firing
+ * performChaseRedeem on any profile whose schedule is due. Stamps
+ * `autoRedeem.lastRunAt` regardless of outcome so a single attempt
+ * counts as today's run (preventing retry-loop hammering even if the
+ * redeem itself errored). Records the outcome on
+ * `autoRedeem.lastRunResult` for the UI.
+ *
+ * Sequential, not concurrent — multiple Chase profiles all due at
+ * the same minute fire one after another so they don't race the
+ * userDataDir lock or BG SSO redirect handling.
+ */
+async function chaseAutoRedeemTick(): Promise<void> {
+  if (!triggerChaseRedeem) return;
+  const { selectDueProfiles } = await import('./chaseRedeemScheduler.js');
+  const profiles = await loadChaseProfiles().catch(() => []);
+  const due = selectDueProfiles(profiles);
+  if (due.length === 0) return;
+  logger.info('chase.autoRedeem.tick', {
+    count: due.length,
+    ids: due.map((p) => p.id),
+  });
+  for (const p of due) {
+    try {
+      const result = await triggerChaseRedeem(p.id);
+      const kind: 'ok' | 'no_points' | 'error' = result.ok
+        ? 'ok'
+        : result.kind === 'no_points'
+          ? 'no_points'
+          : 'error';
+      const error = result.ok ? null : result.reason ?? null;
+      // Re-read the profile in case it mutated mid-run (user
+      // toggled the switch off, etc.) so the patch doesn't clobber
+      // a fresh enabled-state change.
+      const fresh = (await loadChaseProfiles()).find((x) => x.id === p.id);
+      if (!fresh) continue;
+      await updateChaseProfile(p.id, {
+        autoRedeem: {
+          enabled: fresh.autoRedeem?.enabled ?? false,
+          time: fresh.autoRedeem?.time ?? '15:00',
+          lastRunAt: new Date().toISOString(),
+          lastRunResult: kind,
+          lastRunError: error,
+        },
+      });
+      logger.info('chase.autoRedeem.fired', {
+        id: p.id,
+        result: kind,
+        ...(error ? { error } : {}),
+      });
+    } catch (err) {
+      logger.warn('chase.autoRedeem.tick.error', {
+        id: p.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  // Push the updated profile list to the renderer so the Bank tab
+  // reflects the new lastRunAt without a manual refresh.
+  await broadcastChaseProfiles().catch(() => undefined);
+}
+
+async function broadcastChaseProfiles(): Promise<void> {
+  const list = await loadChaseProfiles().catch(() => []);
+  mainWindow?.webContents.send(IPC.evtChaseProfiles, list);
+}
+
 // User-driven Playwright sessions kept open for "Your Orders" windows. Keyed
 // by Amazon profile email. We track these so repeated clicks focus the
 // existing window instead of trying to launch another persistent context
@@ -962,6 +1043,20 @@ app.whenReady().then(async () => {
     await bulkSyncDisplayNamesToBG();
   })();
 
+  // Auto-redeem scheduler — ticks every 60s, fires
+  // performChaseRedeem on profiles whose schedule is due. Cheap loop:
+  // single profiles.json read + an in-memory filter when nothing's
+  // due (most ticks). Cleared in before-quit.
+  // Run an immediate first tick after a small delay so a user who
+  // launches the app right at their scheduled time doesn't wait up
+  // to a full minute for the scheduler's first sweep.
+  setTimeout(() => {
+    void chaseAutoRedeemTick();
+  }, 5_000);
+  chaseAutoRedeemTimer = setInterval(() => {
+    void chaseAutoRedeemTick();
+  }, 60_000);
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -1021,6 +1116,12 @@ let quittingCleanly = false;
 app.on('before-quit', async (e) => {
   if (quittingCleanly) return;
   e.preventDefault();
+  // Stop the auto-redeem scheduler so a tick mid-shutdown can't fire
+  // an Amazon-style retry against a context we're about to tear down.
+  if (chaseAutoRedeemTimer) {
+    clearInterval(chaseAutoRedeemTimer);
+    chaseAutoRedeemTimer = null;
+  }
   try {
     await closeAllChromiumSessions();
   } catch (err) {
@@ -1728,7 +1829,16 @@ function registerIpcHandlers(): void {
     map.set(id, promise as Promise<unknown>);
     return promise;
   };
-  ipcMain.handle(IPC.chaseRedeemAll, async (_e, id: string) => {
+
+  /**
+   * Core redeem-all flow, factored out of the IPC handler so the
+   * auto-redeem scheduler can invoke it directly. Same in-flight
+   * guards apply (closure-scoped maps below). Returns the same
+   * `ChaseRedeemResult` shape the IPC contract specifies.
+   */
+  const performChaseRedeem = async (
+    id: string,
+  ): Promise<import('../shared/types.js').ChaseRedeemResult> => {
     const profiles = await loadChaseProfiles();
     const profile = profiles.find((p) => p.id === id);
     if (!profile) return { ok: false, kind: 'error', reason: 'profile not found' };
@@ -1808,7 +1918,76 @@ function registerIpcHandlers(): void {
     } finally {
       chaseRedeemInFlight.delete(id);
     }
+  };
+
+  // Expose to the auto-redeem scheduler. Captured here so the
+  // scheduler tick can fire performChaseRedeem without going through
+  // ipcRenderer (it's already on the main process).
+  triggerChaseRedeem = performChaseRedeem;
+
+  ipcMain.handle(IPC.chaseRedeemAll, async (_e, id: string) => {
+    return performChaseRedeem(id);
   });
+
+  ipcMain.handle(
+    IPC.chaseSetAutoRedeem,
+    async (_e, id: string, patch: { enabled: boolean; time?: string }) => {
+      const profiles = await loadChaseProfiles();
+      const profile = profiles.find((p) => p.id === id);
+      if (!profile) return profiles;
+      const current = profile.autoRedeem ?? {
+        enabled: false,
+        time: '15:00',
+        lastRunAt: null,
+        lastRunResult: null,
+        lastRunError: null,
+      };
+      // Validate time when caller provides one. Reject malformed
+      // strings so the scheduler never reads a corrupt schedule.
+      let nextTime = current.time;
+      if (typeof patch.time === 'string') {
+        const { parseScheduleTime } = await import(
+          './chaseRedeemScheduler.js'
+        );
+        if (!parseScheduleTime(patch.time)) {
+          throw new Error(`invalid time "${patch.time}" — expected HH:MM 24h`);
+        }
+        nextTime = patch.time;
+      }
+      // Skip-today-on-enable: when the user flips false → true and
+      // today's window has already passed, stamp lastRunAt to start-
+      // of-today so the natural fire-today path is short-circuited.
+      // Without this, enabling at 11 PM with a 3 PM time would fire
+      // on the next 60s tick and redeem the user's whole points
+      // balance — almost certainly not what they meant.
+      let nextLastRunAt: string | null = current.lastRunAt;
+      if (patch.enabled && !current.enabled) {
+        const { lastRunAtForFreshEnable } = await import(
+          './chaseRedeemScheduler.js'
+        );
+        const skipStamp = lastRunAtForFreshEnable(nextTime);
+        if (skipStamp) {
+          nextLastRunAt = skipStamp.toISOString();
+        }
+      }
+      const updated = await updateChaseProfile(id, {
+        autoRedeem: {
+          enabled: patch.enabled,
+          time: nextTime,
+          lastRunAt: nextLastRunAt,
+          lastRunResult: current.lastRunResult,
+          lastRunError: current.lastRunError,
+        },
+      });
+      logger.info('chase.autoRedeem.updated', {
+        id,
+        enabled: patch.enabled,
+        time: nextTime,
+        skippedToday: nextLastRunAt !== current.lastRunAt,
+      });
+      return updated;
+    },
+  );
 
   ipcMain.handle(IPC.chaseRedeemHistory, async (_e, id: string) => {
     return listRedeemHistory(id);
