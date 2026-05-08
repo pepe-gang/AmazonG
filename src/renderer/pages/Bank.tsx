@@ -1016,6 +1016,36 @@ function ChaseBankCard({
           </div>
         )}
 
+        {/* Stage C-sourced badges. Lock status badge appears only when
+            the card is NOT in the default UNLOCKED state — surfacing
+            unlocked is noise. Auto-pay badge appears only when enrolled
+            (the absence of the badge already implies "no auto-pay").
+            Both fields are optional on ChaseAccountSnapshot — old
+            snapshots persisted before Stage C don't have them, in which
+            case the row is hidden. */}
+        {snapshot &&
+          ((snapshot.lockStatus && snapshot.lockStatus !== 'UNLOCKED') ||
+            snapshot.autoPayEnrolled) && (
+            <div className="relative flex flex-wrap items-center gap-1 -mt-0.5">
+              {snapshot.lockStatus && snapshot.lockStatus !== 'UNLOCKED' && (
+                <span
+                  className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider bg-rose-500/20 text-rose-200 font-semibold"
+                  title="Card lock status from Chase — locked cards reject new charges until you unlock them in Chase"
+                >
+                  {snapshot.lockStatus.toLowerCase().replace(/_/g, ' ')}
+                </span>
+              )}
+              {snapshot.autoPayEnrolled && (
+                <span
+                  className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider bg-emerald-500/20 text-emerald-200 font-semibold"
+                  title="Auto-pay is enrolled on this card — Chase will draft the payment automatically on the due date"
+                >
+                  Auto-pay
+                </span>
+              )}
+            </div>
+          )}
+
         {/* Money-in-flight section — always rendered (even when
             both rows are zero) so cards stay the same height across
             the grid and the section doesn't pop in/out as snapshots

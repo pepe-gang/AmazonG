@@ -1,4 +1,5 @@
 import { app } from 'electron';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { BrowserContext, Locator, Page } from 'playwright';
 import { mkdir, readdir, readFile } from 'node:fs/promises';
@@ -11,6 +12,12 @@ import {
   parseInProcessPaymentsFromHtml,
   parsePendingChargesFromHtml,
 } from './chaseScrape.js';
+import { STAGE_C_IN_PAGE_HELPERS_SRC } from './chaseStageCInPageHelpers.js';
+import {
+  mapPaymentDetailToInProcess,
+  type StageCPaymentDetail,
+} from './chaseStageCMapping.js';
+import { validateStageCOverviewShape } from './chaseStageCSentinel.js';
 import type { ChasePaymentEntry } from '../shared/types.js';
 
 export type ChaseSession = {
@@ -1022,26 +1029,14 @@ async function runRedeemFlow(
   }
   await pacingPause();
 
-  await page.goto(
-    `https://chaseloyalty.chase.com/home?AI=${encodeURIComponent(cardAccountId)}`,
-    { waitUntil: 'load', timeout: 30_000 },
-  );
-  try {
-    await page.waitForSelector('text=Available points', { timeout: 30_000 });
-  } catch {
-    return {
-      ok: false,
-      kind: 'error',
-      reason: 'Rewards page never finished loading. Re-login may be required.',
-    };
-  }
-  await pacingPause();
-
-  // Pass AI on the cash-back URL too so Chase's loyalty SPA has
-  // explicit active-card context. Some session states render an
-  // empty page (just the decorative chrome) without it, even when
-  // /home?AI=... succeeded earlier — Chase appears to scope the
-  // loyalty session to whatever was last passed in the query.
+  // Direct nav to /cash-back?AI=... — the prior /home?AI=... step is
+  // skippable. Empirical confirmation via Playwright MCP (2026-05-08,
+  // see docs/research/chase-mcp-direct-fetch-2026-05-08.md): navigating
+  // straight to /cash-back loads /rest/cash-back/redemption-info
+  // correctly without first hitting /home. Saves the 3-5s loyalty-home
+  // hydration round-trip per redeem. The AI query param scopes the
+  // loyalty session to the right card (Chase's loyalty SPA reads it
+  // synchronously to pick the active card context).
   await page.goto(
     `https://chaseloyalty.chase.com/cash-back?AI=${encodeURIComponent(cardAccountId)}`,
     { waitUntil: 'load', timeout: 30_000 },
@@ -1516,32 +1511,72 @@ async function runFetch(
       });
     }
 
-    // 2) Payment-activity page — in-process payments. Kept as DOM
-    // scrape for now: the empirical capture didn't catch a payments-
-    // specific JSON endpoint (likely because the user had no in-process
-    // payments at capture time). Once we capture that endpoint we can
-    // make this a passive listener too. Same secure.chase.com session
-    // as step 1 — no cross-domain bounce.
+    // 2) Stage C: direct-fetch the overview endpoint to pull
+    //    paymentDetail (replaces the activity-page nav for in-process
+    //    payments) + lockStatus + autoPayEnrolled (new renderer fields).
+    //    Sentinel: only fires when Stage B's listener already captured
+    //    the SPA's first dashboard XHR (proves _abck is post-hydration).
+    //    Falls through silently to the activity-page DOM scrape on any
+    //    failure (timeout, drift, Akamai 403, etc).
+    //
+    //    Disabled by AUTOG_CHASE_DISABLE_STAGE_C=1 kill switch.
     let inProcessPayments: ChasePaymentEntry[] = [];
-    try {
-      await page.goto(
-        `https://secure.chase.com/web/auth/dashboard#/dashboard/payBillsArea/paymentsActivity/selectPayee;payeeId=-${encodeURIComponent(
+    let lockStatus: string | undefined;
+    let autoPayEnrolled: boolean | undefined;
+    let stageCInProcessSourced = false;
+    const stageCEnabled =
+      process.env.AUTOG_CHASE_DISABLE_STAGE_C !== '1' && xhrJson.dashboard !== null;
+    if (stageCEnabled) {
+      const stageC = await fetchStageCOverview(page, cardAccountId);
+      if (stageC.ok) {
+        lockStatus = stageC.lockStatus ?? undefined;
+        autoPayEnrolled = stageC.autoPayEnrolled ?? undefined;
+        inProcessPayments = mapPaymentDetailToInProcess(stageC.paymentDetail);
+        stageCInProcessSourced = true;
+        logger.info('chase.snapshot.stageC.ok', {
+          profileId,
           cardAccountId,
-        )};payeeType=CREDIT_CARD`,
-        { waitUntil: 'domcontentloaded', timeout: 30_000 },
-      );
-      const activityTbody = page.locator('tbody.activityRow').first();
-      await activityTbody
-        .waitFor({ state: 'visible', timeout: 30_000 })
-        .catch(() => undefined);
-      const activityHtml = await activityTbody.innerHTML({ timeout: 5_000 }).catch(() => '');
-      inProcessPayments = parseInProcessPaymentsFromHtml(activityHtml);
-    } catch (err) {
-      logger.warn('chase.snapshot.activityError', {
-        profileId,
-        cardAccountId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+          hasPaymentDetail: stageC.paymentDetail !== null,
+          inProcessFromStageC: inProcessPayments.length,
+          lockStatus: lockStatus ?? null,
+          autoPayEnrolled: autoPayEnrolled ?? null,
+        });
+      } else {
+        logger.info('chase.snapshot.stageC.fallback', {
+          profileId,
+          cardAccountId,
+          reason: stageC.reason,
+        });
+      }
+    }
+
+    // Stage B fallback for in-process payments — runs when Stage C
+    // didn't source them (kill-switch on, sentinel never fired, fetch
+    // failed, JSON shape drift). Same activity-page nav + DOM scrape
+    // as before. The kept-alive Stage B path means Stage C can be
+    // turned off in the field without losing in-process-payment
+    // coverage.
+    if (!stageCInProcessSourced) {
+      try {
+        await page.goto(
+          `https://secure.chase.com/web/auth/dashboard#/dashboard/payBillsArea/paymentsActivity/selectPayee;payeeId=-${encodeURIComponent(
+            cardAccountId,
+          )};payeeType=CREDIT_CARD`,
+          { waitUntil: 'domcontentloaded', timeout: 30_000 },
+        );
+        const activityTbody = page.locator('tbody.activityRow').first();
+        await activityTbody
+          .waitFor({ state: 'visible', timeout: 30_000 })
+          .catch(() => undefined);
+        const activityHtml = await activityTbody.innerHTML({ timeout: 5_000 }).catch(() => '');
+        inProcessPayments = parseInProcessPaymentsFromHtml(activityHtml);
+      } catch (err) {
+        logger.warn('chase.snapshot.activityError', {
+          profileId,
+          cardAccountId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // The chaseloyalty.chase.com nav that used to live here is GONE —
@@ -1587,6 +1622,9 @@ async function runFetch(
       pendingCharges,
       availableCredit,
       inProcessCount: inProcessPayments.length,
+      stageCInProcessSourced,
+      lockStatus: lockStatus ?? null,
+      autoPayEnrolled: autoPayEnrolled ?? null,
     });
     return {
       ok: true,
@@ -1596,6 +1634,8 @@ async function runFetch(
         pendingCharges,
         availableCredit,
         inProcessPayments,
+        lockStatus,
+        autoPayEnrolled,
         fetchedAt: new Date().toISOString(),
       },
     };
@@ -1851,6 +1891,147 @@ function formatChaseDollarAmount(num: number): string {
  */
 function formatChasePointsAmount(num: number): string {
   return `${num.toLocaleString('en-US')} pts`;
+}
+
+type StageCOverviewResult =
+  | {
+      ok: true;
+      paymentDetail: StageCPaymentDetail | null;
+      lockStatus: string | null;
+      autoPayEnrolled: boolean | null;
+    }
+  | { ok: false; reason: string };
+
+/**
+ * Stage C: direct-fetch hybrid for the snapshot path.
+ *
+ * Fires the overview endpoint (/svc/rl/.../dashboard/module/list with
+ * context=WEB_CBO_OVERVIEW_DASHBOARD) directly via page.evaluate AFTER
+ * Stage B's listener has captured the SPA's natural first dashboard
+ * XHR. Per pass-7 round-1 (chase-deep-pass7-round1-akamai-2026-05-08.md),
+ * waiting for the SPA's first XHR to land proves _abck is in its
+ * post-hydration valid state — Stage C is then safe to fire.
+ *
+ * Returns a distilled subset of the overview response — only what's
+ * needed to populate the per-card fields Stage B doesn't already
+ * provide:
+ *   - paymentDetail: replaces today's separate activity-page nav for
+ *     in-process payments. Round-2 audit confirmed
+ *     paymentMessageStatusCode + scheduledPaymentDate + paymentAmount
+ *     cover ≥95% of users (anyone with ≤1 in-flight payment per card).
+ *   - lockStatus + autoPayEnrolled: new fields surfaced in Bank.tsx.
+ *
+ * Falls through silently to Stage B path on any failure (sentinel
+ * timeout, JSON shape drift, Akamai 403, network error, fetch timeout).
+ *
+ * Anti-bot posture is identical to Stage B's listener path: same
+ * Chromium TLS, same cookies, same headers Chase emits naturally on
+ * its own SPA-fired XHR. Empirical via Playwright MCP (2026-05-08):
+ * direct fetch returned 200 in ~218ms from inside an authed page.
+ *
+ * Disabled when AUTOG_CHASE_DISABLE_STAGE_C=1 (kill switch).
+ */
+async function fetchStageCOverview(
+  page: Page,
+  cardAccountId: string,
+): Promise<StageCOverviewResult> {
+  const requestId = randomUUID();
+  // Inline PR1's tested helpers (single source of truth) into the
+  // page.evaluate body. String form so we control body/header
+  // serialization without Playwright's stringify-and-arg dance.
+  const evalSrc = `(async () => {
+${STAGE_C_IN_PAGE_HELPERS_SRC}
+    const f = await fetchWithTimeout(
+      '/svc/rl/accounts/secure/v1/dashboard/module/list?context=WEB_CBO_OVERVIEW_DASHBOARD',
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'accept': 'application/json, text/plain, */*',
+          'x-jpmc-csrf-token': 'NONE',
+          'x-jpmc-channel': 'id=C30',
+          'x-jpmc-client-request-id': ${JSON.stringify(requestId)},
+        },
+        body: 'context=WEB_CBO_OVERVIEW_DASHBOARD&selectorIdType=CUSTOMER_GROUP',
+      },
+      8000,
+    );
+    if (!f.ok) return f;
+    return await classifyResponse(f.response);
+  })()`;
+
+  let raw: unknown;
+  try {
+    raw = await page.evaluate(evalSrc);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `evaluate-error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  // Classifier returns either:
+  //   { kind: 'ok', json } — happy path
+  //   { kind: 'auth' | 'akamai-403' | 'rate-limit' | ... } — bail
+  //   { ok: false, kind: 'timeout' | 'network-error', ... } — fetch failed
+  if (!raw || typeof raw !== 'object') {
+    return { ok: false, reason: 'evaluate-non-object' };
+  }
+  const r = raw as Record<string, unknown>;
+  if (r.ok === false) {
+    return { ok: false, reason: `${String(r.kind ?? 'unknown')}` };
+  }
+  if (typeof r.kind === 'string' && r.kind !== 'ok') {
+    return {
+      ok: false,
+      reason: `${r.kind}${r.status !== undefined ? `-${String(r.status)}` : ''}`,
+    };
+  }
+  const json = (r.json ?? null) as unknown;
+  const sentinel = validateStageCOverviewShape(json, new Set([cardAccountId]));
+  if (!sentinel.ok) {
+    return { ok: false, reason: `sentinel-${sentinel.reason}` };
+  }
+  // Pull this card's row out of cardAccountOverviews.
+  const cache = (json as { cache?: Array<{ url?: string; response?: unknown }> }).cache ?? [];
+  const overviewEntry = cache.find(
+    (c) => typeof c?.url === 'string' && c.url.includes('/overview/card/v2/list'),
+  );
+  const groups =
+    ((overviewEntry?.response as { cardAccountOverviews?: Array<{ cardAccounts?: unknown[] }> })
+      ?.cardAccountOverviews) ?? [];
+  const idNum = Number(cardAccountId);
+  let match: Record<string, unknown> | null = null;
+  outer: for (const g of groups) {
+    for (const c of g.cardAccounts ?? []) {
+      const cc = c as Record<string, unknown>;
+      if (Number(cc.accountId) === idNum) {
+        match = cc;
+        break outer;
+      }
+    }
+  }
+  if (!match) {
+    return { ok: false, reason: 'card-not-in-overview' };
+  }
+  const detail = match.cardAccountDetail as Record<string, unknown> | undefined;
+  const pd = (detail?.paymentDetail ?? null) as StageCPaymentDetail | null;
+  const lockStatus =
+    typeof detail?.creditCardLockStatus === 'string'
+      ? (detail.creditCardLockStatus as string)
+      : null;
+  const autoPayEnrolled =
+    typeof detail?.autoPayEnrolled === 'boolean'
+      ? (detail.autoPayEnrolled as boolean)
+      : null;
+  return {
+    ok: true,
+    paymentDetail:
+      pd && (pd.paymentMessageStatusCode || pd.paymentAmount !== undefined) ? pd : null,
+    lockStatus,
+    autoPayEnrolled,
+  };
 }
 
 /**

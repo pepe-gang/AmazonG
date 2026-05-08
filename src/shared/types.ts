@@ -343,6 +343,17 @@ export type ChaseAccountSnapshot = {
    *  Optional for backwards-compat with snapshots persisted before
    *  this field existed; renderers should treat undefined as []. */
   inProcessPayments?: ChasePaymentEntry[];
+  /** Card lock status from Chase's overview JSON, e.g. "UNLOCKED",
+   *  "LOCKED", "TEMPORARILY_LOCKED". Stage C populates this from
+   *  /svc/rl/.../dashboard/module/list (overview) — optional because
+   *  Stage B doesn't surface it and old snapshots persisted before
+   *  Stage C don't have it. Renderers should treat undefined as
+   *  "unknown" and not show a lock indicator. */
+  lockStatus?: string;
+  /** Auto-pay enrollment flag from Chase's overview JSON. Optional
+   *  for the same reason as lockStatus. Renderers should hide the
+   *  auto-pay badge when undefined. */
+  autoPayEnrolled?: boolean;
   /** ISO-8601 of when the snapshot was captured. */
   fetchedAt: string;
 };
