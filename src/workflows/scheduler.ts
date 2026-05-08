@@ -38,6 +38,7 @@ import {
   runBuyTuple,
   runVerifyTuple,
   runFetchTrackingTuple,
+  runCancelFillersTuple,
 } from './runners.js';
 import type {
   Deps,
@@ -45,7 +46,7 @@ import type {
 } from './pollAndScrape.js';
 import { buildBuyJobReport, syntheticFailedResult } from './jobReport.js';
 
-type Phase = 'buy' | 'verify' | 'fetch_tracking';
+type Phase = 'buy' | 'verify' | 'fetch_tracking' | 'cancel_fillers';
 
 type Tuple = {
   jobId: string;
@@ -402,7 +403,10 @@ export class StreamingScheduler {
               attemptId: makeAttemptId(job.id, t.profile.email),
               jobId: job.id,
               amazonEmail: t.profile.email,
-              phase: job.phase,
+              // Pin to literal — gated by `job.phase === 'buy'` above. TS
+              // can't narrow the union through the .map() closure since
+              // AutoGJob.phase now includes 'cancel_fillers'.
+              phase: 'buy' as const,
               dealKey: job.dealKey,
               dealId: job.dealId,
               dealTitle: job.dealTitle,
@@ -421,6 +425,7 @@ export class StreamingScheduler {
               dryRun: this.sd.deps.buyDryRun,
               trackingIds: null,
               fillerOrderIds: null,
+              fillerCancelTasks: null,
               productTitle: null,
               stage: null,
             })
@@ -579,6 +584,18 @@ export class StreamingScheduler {
         const trackingRunner =
           this.sd.runners?.fetchTracking ?? runFetchTrackingTuple;
         await trackingRunner({
+          deps: this.sd.deps,
+          sessions: this.sd.sessions,
+          job: tuple.job,
+          profile: tuple.profile,
+          parentCid: this.sd.parentCid,
+        });
+        this.collectResult(tuple, this.lifecycleCompletionMarker(tuple));
+      } else if (tuple.phase === 'cancel_fillers') {
+        // cancel_fillers reports its own status to BG (with the per-task
+        // signal updates). Bundle just counts completion — same as
+        // verify/fetch_tracking.
+        await runCancelFillersTuple({
           deps: this.sd.deps,
           sessions: this.sd.sessions,
           job: tuple.job,

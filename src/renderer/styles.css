@@ -1570,9 +1570,35 @@ a,
   text-decoration: none;
   border-bottom: 1px dotted transparent;
   transition: border-color 120ms;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
 }
 .orderid-link:hover {
   border-bottom-color: var(--primary);
+}
+/* Per-FillerCancelTask state coloring. Three buckets the user can scan
+ * in the JobsTable filler-orders cell: green (cancelled / tracked —
+ * done), yellow (still trying), red (shipped or review needed —
+ * manual action required). */
+.orderid-link-ok {
+  color: hsl(142 70% 60%);
+}
+.orderid-link-ok:hover { border-bottom-color: hsl(142 70% 60%); }
+.orderid-link-pending {
+  color: hsl(40 90% 65%);
+}
+.orderid-link-pending:hover { border-bottom-color: hsl(40 90% 65%); }
+.orderid-link-danger {
+  color: hsl(0 80% 65%);
+}
+.orderid-link-danger:hover { border-bottom-color: hsl(0 80% 65%); }
+.orderid-status {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+  font-weight: 500;
 }
 .cell-orderid .muted {
   color: var(--text-subtle);

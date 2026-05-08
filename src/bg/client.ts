@@ -4,6 +4,7 @@ import type {
   IdentityInfo,
   JobAttemptStatus,
   JobStatusReport,
+  ServerFillerCancelTask,
 } from '../shared/types.js';
 
 /**
@@ -42,6 +43,25 @@ export type ServerPurchase = {
    *  pre-fix BG deployments parse cleanly; AmazonG defaults to [] when
    *  the field is missing. */
   fillerOrderIds?: string[];
+  /** Per-filler-order cancel-state-machine status surfaced from BG's
+   *  FillerCancelTask table. Empty array on legacy rows + non-filler
+   *  buys + on AmazonG-talking-to-old-BG (field missing on the wire).
+   *  AmazonG colors each chip per status: green for cancelled/tracked,
+   *  yellow for pending_cancel/pending_tracking, red for shipped_no_tracking
+   *  / unknown_terminal. */
+  fillerCancelTasks?: Array<{
+    id: string;
+    amazonOrderId: string;
+    status: string;
+    attempts: number;
+    lastSignal: string | null;
+    lastError: string | null;
+    cancelledAt: string | null;
+    shippedDetectedAt: string | null;
+    bgAccepted: number | null;
+    bgDuplicates: number | null;
+    bgUnmatched: number | null;
+  }>;
   /** Parent AutoBuyJob.viaFiller — true when the buy was a rebuy or
    *  filler-verify offshoot. Lets AmazonG render Buy Mode = 'filler'
    *  for these rows after the local attempt is pruned out of
@@ -203,6 +223,18 @@ export type BGClient = {
    * unreachable or the user might not have an AutoG key yet.
    */
   removeAmazonAccount(email: string): Promise<{ ok: true; deleted: number }>;
+  /**
+   * Fetch the work list for a just-claimed cancel_fillers job. Returns
+   * every FillerCancelTask for the (user, placedEmail) scope whose
+   * nextAttemptAt has elapsed AND status is non-terminal. The worker
+   * processes each, then reports back via `reportStatus` with a
+   * `fillerCancelTaskUpdates` array. BG runs each update through the
+   * pure state machine and writes the resulting DB transition.
+   */
+  listFillerCancelTasks(jobId: string): Promise<{
+    job: { id: string; buyJobId: string | null; placedEmail: string };
+    tasks: ServerFillerCancelTask[];
+  } | null>;
 };
 
 /**
@@ -215,7 +247,14 @@ function normalizeJob(raw: unknown): AutoGJob | null {
   const j = raw as Record<string, unknown>;
   return {
     id: String(j.id ?? ''),
-    phase: j.phase === 'verify' ? 'verify' : j.phase === 'fetch_tracking' ? 'fetch_tracking' : 'buy',
+    phase:
+      j.phase === 'verify'
+        ? 'verify'
+        : j.phase === 'fetch_tracking'
+          ? 'fetch_tracking'
+          : j.phase === 'cancel_fillers'
+            ? 'cancel_fillers'
+            : 'buy',
     dealTitle: typeof j.dealTitle === 'string' ? j.dealTitle : null,
     dealKey: typeof j.dealKey === 'string' ? j.dealKey : null,
     dealId: typeof j.dealId === 'string' && j.dealId.length > 0 ? j.dealId : null,
@@ -444,6 +483,15 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         throw new BGApiError(500, '/api/autog/amazon-accounts', 'empty response');
       }
       return r;
+    },
+
+    async listFillerCancelTasks(jobId: string) {
+      const url = `/api/autog/filler-cancel-tasks?jobId=${encodeURIComponent(jobId)}`;
+      const r = await request<{
+        job: { id: string; buyJobId: string | null; placedEmail: string };
+        tasks: ServerFillerCancelTask[];
+      }>(url, { method: 'GET' });
+      return r ?? null;
     },
   };
 }

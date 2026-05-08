@@ -1,13 +1,14 @@
 /**
- * Per-tuple runners — uniform API surface for the three workflow
- * phases AmazonG handles (`buy`, `verify`, `fetch_tracking`).
+ * Per-tuple runners — uniform API surface for the four workflow
+ * phases AmazonG handles (`buy`, `verify`, `fetch_tracking`,
+ * `cancel_fillers`).
  *
  * Both the legacy pMap path and the StreamingScheduler invoke phases
  * through these thin delegators. Keeps the dispatch boundary in one
  * place so the two paths can't drift in argument ordering or option
  * shape — a refactor in `runForProfile` / `handleVerifyJob` /
- * `handleFetchTrackingJob` only needs to update the matching ctx
- * type here.
+ * `handleFetchTrackingJob` / `handleCancelFillersJob` only needs to
+ * update the matching ctx type here.
  */
 
 import type { AmazonProfile, AutoGJob } from '../shared/types.js';
@@ -18,6 +19,7 @@ import {
   runForProfile,
   handleVerifyJobForTuple,
   handleFetchTrackingJobForTuple,
+  handleCancelFillersJobForTuple,
 } from './pollAndScrape.js';
 
 /**
@@ -88,6 +90,18 @@ export async function runFetchTrackingTuple(
   ctx: LifecycleTupleCtx,
 ): Promise<void> {
   return handleFetchTrackingJobForTuple(
+    ctx.deps,
+    ctx.sessions,
+    ctx.job,
+    ctx.parentCid,
+    [ctx.profile],
+  );
+}
+
+export async function runCancelFillersTuple(
+  ctx: LifecycleTupleCtx,
+): Promise<void> {
+  return handleCancelFillersJobForTuple(
     ctx.deps,
     ctx.sessions,
     ctx.job,

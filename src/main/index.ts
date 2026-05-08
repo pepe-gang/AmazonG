@@ -361,6 +361,18 @@ function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
     // when the server row is non-filler or hasn't been backfilled yet
     // (matches the type's "single-mode → []" convention).
     fillerOrderIds: s.fillerOrderIds ?? null,
+    // Per-filler-order state-machine status (from BG's
+    // FillerCancelTask table). Null on single-mode buys + on pre-
+    // feature BG deployments that don't surface the field. JobsTable
+    // colors chips per status.
+    fillerCancelTasks: Array.isArray(s.fillerCancelTasks)
+      ? s.fillerCancelTasks.map((t) => ({
+          id: t.id,
+          amazonOrderId: t.amazonOrderId,
+          status: t.status,
+          attempts: t.attempts,
+        }))
+      : null,
     productTitle: null,
     stage: null,
     createdAt: s.createdAt,
@@ -444,6 +456,10 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
           l.fillerOrderIds && l.fillerOrderIds.length > 0
             ? l.fillerOrderIds
             : (existing.fillerOrderIds ?? l.fillerOrderIds),
+        // Per-filler-order cancel-state-machine status. Server is
+        // always authoritative — it owns the FillerCancelTask table.
+        // Local doesn't track per-task state.
+        fillerCancelTasks: existing.fillerCancelTasks ?? l.fillerCancelTasks,
         productTitle: l.productTitle,
       });
     } else {

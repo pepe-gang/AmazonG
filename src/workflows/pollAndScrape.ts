@@ -679,7 +679,11 @@ export function startWorker(deps: Deps): WorkerHandle {
     // the order (`placedEmail`), and only if that account's `enabled`
     // is true. `autoBuy` is intentionally ignored here so the user
     // can pause new buys without losing tracking on existing orders.
-    if (job.phase === 'verify' || job.phase === 'fetch_tracking') {
+    if (
+      job.phase === 'verify' ||
+      job.phase === 'fetch_tracking' ||
+      job.phase === 'cancel_fillers'
+    ) {
       const profile = selectVerifyTrackingProfile(eligibleAll, job.placedEmail);
       return {
         eligible: profile ? [profile] : [],
@@ -1576,6 +1580,7 @@ async function resolveRolloverAttemptRow(
       dryRun: false,
       trackingIds: null,
       fillerOrderIds: null,
+      fillerCancelTasks: null,
       productTitle: null,
       stage: null,
     })
@@ -1594,6 +1599,316 @@ async function reportSafe(
   } catch (err) {
     logger.error('job.report.error', { jobId, error: String(err) }, cid);
   }
+}
+
+/**
+ * cancel_fillers phase: process every pending FillerCancelTask for
+ * this job's (user, placedEmail) scope. Per-task work:
+ *
+ *   1. Fetch order-details HTML once (single round-trip per task —
+ *      reused for shipped detection AND tracking extraction AND the
+ *      defensive ASIN check).
+ *   2. DEFENSIVE: if the order contains the target ASIN, signal
+ *      `danger_target_in_order`. STOP — never click Cancel against
+ *      an order that might be the user's actual deal. (Catastrophic-
+ *      loss prevention.)
+ *   3. State-driven action:
+ *        pending_cancel:
+ *          - already cancelled  → `order_already_cancelled`
+ *          - shipped detected   → `order_shipped_detected` (+ codes)
+ *          - cancel-unable copy → `cancel_unable`
+ *          - order-not-found    → `order_not_found`
+ *          - else → run cancel form, classify result
+ *        pending_tracking:
+ *          - codes captured     → `tracking_codes_received` (+ codes)
+ *          - already cancelled  → `order_already_cancelled` (Amazon
+ *                                  auto-cancelled post-ship)
+ *          - else               → `transient_error`
+ *
+ * No per-attempt row in the local Jobs table — the cancel work is
+ * tracked per-task on BG, surfaced via the dashboard's chip render.
+ *
+ * Re-exported under a tuple-shaped alias so runners.ts can dispatch
+ * without circular-import warnings.
+ */
+export { handleCancelFillersJob as handleCancelFillersJobForTuple };
+
+async function handleCancelFillersJob(
+  deps: Deps,
+  sessions: Map<string, DriverSession>,
+  job: AutoGJob,
+  cid: string,
+  eligible: AmazonProfile[],
+): Promise<void> {
+  const targetEmail = job.placedEmail;
+  if (!targetEmail) {
+    const error = `cancel_fillers: missing placedEmail on the job`;
+    logger.error('job.cancelFillers.invalid', { jobId: job.id, error }, cid);
+    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+    return;
+  }
+  const profile = eligible.find(
+    (p) => p.email.toLowerCase() === targetEmail.toLowerCase(),
+  );
+  if (!profile) {
+    // Profile not signed in. Send back a single profile_signed_out
+    // signal per pending task so BG keeps them in pending_cancel
+    // without burning attempts. We can't get the task list without
+    // calling BG first either way — call list, then report.
+    const list = await deps.bg
+      .listFillerCancelTasks(job.id)
+      .catch(() => null);
+    const tasks = list?.tasks ?? [];
+    logger.warn(
+      'job.cancelFillers.profile_missing',
+      { jobId: job.id, targetEmail, taskCount: tasks.length },
+      cid,
+    );
+    await reportSafe(
+      deps,
+      job.id,
+      {
+        status: 'completed',
+        fillerCancelTaskUpdates: tasks.map((t) => ({
+          taskId: t.taskId,
+          signal: 'profile_signed_out' as const,
+        })),
+      },
+      cid,
+    );
+    return;
+  }
+
+  const logCtx = { jobId: job.id, profile: profile.email };
+  logger.info('job.cancelFillers.start', logCtx, cid);
+
+  const list = await deps.bg.listFillerCancelTasks(job.id).catch((err) => {
+    logger.warn(
+      'job.cancelFillers.list.error',
+      { ...logCtx, error: err instanceof Error ? err.message : String(err) },
+      cid,
+    );
+    return null;
+  });
+  if (!list || list.tasks.length === 0) {
+    // Nothing to do — could happen if rescheduling raced or all
+    // tasks just terminated. Report as completed (no updates) so
+    // the AutoBuyJob row flips out of in_progress.
+    logger.info('job.cancelFillers.empty', logCtx, cid);
+    await reportSafe(deps, job.id, { status: 'completed' }, cid);
+    return;
+  }
+
+  const updates: Parameters<BGClient['reportStatus']>[1]['fillerCancelTaskUpdates'] = [];
+  let workPage: Page | null = null;
+  try {
+    const session = await getSession(deps, sessions, profile.email, profile.headless);
+    workPage = await session.newPage();
+
+    for (const t of list.tasks) {
+      // Wall-clock safety net — BG marked these expired, just round-trip
+      // the signal back without an Amazon hit.
+      if (t.expiredSafetyNet) {
+        updates.push({ taskId: t.taskId, signal: 'wall_clock_expired' });
+        continue;
+      }
+
+      const update = await processCancelFillerTask(
+        workPage,
+        t,
+        cid,
+      );
+      updates.push(update);
+
+      // Tiny inter-task pause — Amazon's cancel pipeline is
+      // eventually-consistent; chaining without breath sometimes
+      // hits anti-bot heuristics.
+      await workPage.waitForTimeout(800);
+    }
+
+    logger.info(
+      'job.cancelFillers.done',
+      {
+        ...logCtx,
+        taskCount: list.tasks.length,
+        signals: updates.map((u) => u.signal),
+      },
+      cid,
+    );
+    await reportSafe(
+      deps,
+      job.id,
+      { status: 'completed', fillerCancelTaskUpdates: updates },
+      cid,
+    );
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    logger.error('job.cancelFillers.error', { ...logCtx, error: raw }, cid);
+    // Report what we managed to collect plus a job-level error. BG
+    // will reschedule the next cancel_fillers run for any tasks
+    // still pending.
+    await reportSafe(
+      deps,
+      job.id,
+      {
+        status: 'failed',
+        error: `cancel_fillers worker error: ${raw.slice(0, 200)}`,
+        fillerCancelTaskUpdates: updates,
+      },
+      cid,
+    );
+  } finally {
+    if (workPage) {
+      await workPage.close().catch(() => undefined);
+    }
+    await closeAndForgetSession(sessions, profile.email);
+  }
+}
+
+/**
+ * Process one filler-cancel task. Single round-trip to Amazon's
+ * order-details page → classify the HTML signal → either return
+ * that signal directly (already cancelled / shipped / not found),
+ * or fall through to the cancel form.
+ *
+ * Imports kept lazy so the action's HTML parsers aren't paid by
+ * tests / paths that don't exercise this phase.
+ */
+async function processCancelFillerTask(
+  page: Page,
+  task: {
+    taskId: string;
+    amazonOrderId: string;
+    targetAsin: string | null;
+    status: 'pending_cancel' | 'pending_tracking';
+  },
+  cid: string,
+): Promise<NonNullable<Parameters<BGClient['reportStatus']>[1]['fillerCancelTaskUpdates']>[number]> {
+  const {
+    classifyOrderDetailsHtml,
+    orderContainsAsin,
+    cancelFormResultToSignal,
+  } = await import('../actions/cancelFillerSignals.js');
+  const { HTTP_BROWSERY_HEADERS } = await import('../actions/amazonHttp.js');
+
+  const orderDetailsUrl = `https://www.amazon.com/gp/your-account/order-details?orderID=${encodeURIComponent(
+    task.amazonOrderId,
+  )}`;
+
+  // 1. Fetch order-details HTML.
+  let html: string;
+  try {
+    const res = await page.context().request.get(orderDetailsUrl, {
+      headers: HTTP_BROWSERY_HEADERS,
+      timeout: 15_000,
+    });
+    if (!res.ok()) {
+      logger.warn(
+        'cancelFillers.task.http_error',
+        { taskId: task.taskId, orderId: task.amazonOrderId, status: res.status() },
+        cid,
+      );
+      return { taskId: task.taskId, signal: 'transient_error' };
+    }
+    html = await res.text();
+  } catch (err) {
+    logger.warn(
+      'cancelFillers.task.fetch_threw',
+      {
+        taskId: task.taskId,
+        orderId: task.amazonOrderId,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      cid,
+    );
+    return { taskId: task.taskId, signal: 'transient_error' };
+  }
+
+  // 2. DEFENSIVE: if the supposed filler order contains the target
+  //    ASIN, BAIL — never click cancel. Surfaces as DANGER notify on
+  //    BG so a human investigates.
+  if (task.targetAsin && orderContainsAsin(html, task.targetAsin)) {
+    logger.error(
+      'cancelFillers.task.danger',
+      {
+        taskId: task.taskId,
+        orderId: task.amazonOrderId,
+        targetAsin: task.targetAsin,
+      },
+      cid,
+    );
+    return { taskId: task.taskId, signal: 'danger_target_in_order' };
+  }
+
+  // 3. Classify the page state.
+  const probe = classifyOrderDetailsHtml(html);
+
+  // pending_tracking branch — we already detected shipped on a prior
+  // cycle. Now we're collecting codes.
+  if (task.status === 'pending_tracking') {
+    if (probe.signal === 'order_already_cancelled') {
+      // Amazon auto-cancelled post-ship (rare but happens).
+      return { taskId: task.taskId, signal: 'order_already_cancelled' };
+    }
+    if (probe.trackingIds && probe.trackingIds.length > 0) {
+      return {
+        taskId: task.taskId,
+        signal: 'tracking_codes_received',
+        trackingIds: probe.trackingIds,
+      };
+    }
+    // No codes yet — transient until 14d cap.
+    return { taskId: task.taskId, signal: 'transient_error' };
+  }
+
+  // pending_cancel branch.
+  // Direct terminal-ish signals from the page state:
+  if (
+    probe.signal === 'order_already_cancelled' ||
+    probe.signal === 'cancel_unable' ||
+    probe.signal === 'order_not_found'
+  ) {
+    return { taskId: task.taskId, signal: probe.signal };
+  }
+  if (probe.signal === 'order_shipped_detected') {
+    return {
+      taskId: task.taskId,
+      signal: 'order_shipped_detected',
+      ...(probe.trackingIds && probe.trackingIds.length > 0
+        ? { trackingIds: probe.trackingIds }
+        : {}),
+    };
+  }
+
+  // Indeterminate page — proceed to cancel form. Reuse the existing
+  // action; classify its result as a signal.
+  const { cancelFillerOrder, cancelFillerOrderViaOrderDetails } = await import(
+    '../actions/cancelFillerOrder.js'
+  );
+  const primary = await cancelFillerOrder(page, task.amazonOrderId, {
+    correlationId: cid,
+  });
+  let mapped = cancelFormResultToSignal(
+    primary.ok,
+    primary.ok ? undefined : primary.reason,
+  );
+  if (mapped === null) {
+    // Ambiguous "not on cancel-items page" — try the order-details
+    // fallback. It opens the same form via the order-details link
+    // when Amazon's primary cancel URL redirects away.
+    const fb = await cancelFillerOrderViaOrderDetails(
+      page,
+      task.amazonOrderId,
+      { correlationId: cid },
+    );
+    mapped = cancelFormResultToSignal(
+      fb.ok,
+      fb.ok ? undefined : fb.reason,
+    );
+    // If still ambiguous, treat as transient — BG will retry in 5 min.
+    if (mapped === null) mapped = 'transient_error';
+  }
+  return { taskId: task.taskId, signal: mapped };
 }
 
 export async function runForProfile(

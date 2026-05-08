@@ -1212,36 +1212,88 @@ function JobsCell({
           )}
         </td>
       );
-    case 'fillerOrders':
-      // Buy-with-Fillers audit trail. Each id is an Amazon order that
-      // came from the Place Order fan-out but does NOT contain the
-      // target — AutoG tries to cancel each inline + in the verify
-      // phase. Click a pill to open that order in the signed-in
-      // Amazon profile's session (same UX as the Order ID column).
+    case 'fillerOrders': {
+      // Buy-with-Fillers cell. Each filler order has its own state
+      // machine on BG (FillerCancelTask) — color the chip per status:
+      //   green   — cancelled / tracked  (terminal success)
+      //   yellow  — pending_cancel / pending_tracking (worker still trying)
+      //   red     — shipped_no_tracking / unknown_terminal (manual review)
+      // Falls back to plain audit chips when no per-task state is
+      // available (legacy rows pre-feature, or pre-cancel_fillers BG).
+      // Click a pill to open the order in the profile's signed-in
+      // browser session (same UX as the Order ID column).
+      const tasks = a.fillerCancelTasks ?? [];
+      const taskByOrder = new Map(tasks.map((t) => [t.amazonOrderId, t]));
+      const ids = a.fillerOrderIds ?? [];
+      // If we have tasks but no fillerOrderIds (rare — backfill row,
+      // or new BG without sync), surface the order ids from tasks.
+      const allIds = ids.length > 0 ? ids : tasks.map((t) => t.amazonOrderId);
+      const fillerStatusClass = (status: string): string => {
+        if (status === 'cancelled' || status === 'tracked') {
+          return 'orderid-link orderid-link-ok';
+        }
+        if (
+          status === 'shipped_no_tracking' ||
+          status === 'unknown_terminal'
+        ) {
+          return 'orderid-link orderid-link-danger';
+        }
+        return 'orderid-link orderid-link-pending';
+      };
+      const fillerStatusLabel = (status: string): string => {
+        switch (status) {
+          case 'cancelled':
+            return 'cancelled';
+          case 'tracked':
+            return 'tracked';
+          case 'pending_cancel':
+            return 'trying';
+          case 'pending_tracking':
+            return 'shipped — tracking';
+          case 'shipped_no_tracking':
+            return 'shipped — return needed';
+          case 'unknown_terminal':
+            return 'review needed';
+          default:
+            return status;
+        }
+      };
       return (
         <td className="cell-orderid">
-          {a.fillerOrderIds && a.fillerOrderIds.length > 0 ? (
+          {allIds.length > 0 ? (
             <div className="tracking-list">
-              {a.fillerOrderIds.map((oid) => (
-                <a
-                  key={oid}
-                  href="#"
-                  className="orderid-link"
-                  title={`Open filler order in ${a.amazonEmail}'s signed-in session`}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    onOpenFillerOrder(oid);
-                  }}
-                >
-                  {oid}
-                </a>
-              ))}
+              {allIds.map((oid) => {
+                const task = taskByOrder.get(oid);
+                const cls = task
+                  ? fillerStatusClass(task.status)
+                  : 'orderid-link';
+                const label = task ? fillerStatusLabel(task.status) : null;
+                const tip = task
+                  ? `${label} · ${task.attempts} attempt${task.attempts === 1 ? '' : 's'} · open in ${a.amazonEmail}'s signed-in session`
+                  : `Open filler order in ${a.amazonEmail}'s signed-in session`;
+                return (
+                  <a
+                    key={oid}
+                    href="#"
+                    className={cls}
+                    title={tip}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      onOpenFillerOrder(oid);
+                    }}
+                  >
+                    {label && <span className="orderid-status">{label}</span>}
+                    <span>{oid}</span>
+                  </a>
+                );
+              })}
             </div>
           ) : (
             <span className="muted">—</span>
           )}
         </td>
       );
+    }
     case 'status':
       return (
         <td className="cell-status">

@@ -1,6 +1,15 @@
 export type AutoGJob = {
   id: string;
-  phase: 'buy' | 'verify' | 'fetch_tracking';
+  /**
+   * cancel_fillers — per-Amazon-account batch claim that drives the
+   * FillerCancelTask state machine. The job carries
+   * `placedEmail` (the account that placed the original buy) and
+   * `buyJobId` (the parent buy). Worker queries
+   * GET /api/autog/filler-cancel-tasks?jobId=<id> to fetch the
+   * pending tasks, processes each, and reports per-task signal
+   * updates back via the standard /jobs/[id]/status route.
+   */
+  phase: 'buy' | 'verify' | 'fetch_tracking' | 'cancel_fillers';
   dealTitle: string | null;
   dealKey: string | null;
   /** Human-readable BG deal id (e.g. "DL-04260029"). Joined server-side. */
@@ -115,6 +124,60 @@ export type ProductInfo = {
   buyBlocker: string | null;
 };
 
+/**
+ * Per-FillerCancelTask signal update sent by the cancel_fillers worker.
+ * Mirrors the `FillerCancelTaskUpdate` shape in BG's
+ * `src/lib/fillerCancelOrchestration.ts`. Each entry maps to one task
+ * the worker processed in this batch — BG runs each through the pure
+ * state machine to compute the resulting transition.
+ */
+export type FillerCancelTaskUpdate = {
+  taskId: string;
+  signal:
+    | 'cancel_confirmed'
+    | 'cancel_unable'
+    | 'order_already_cancelled'
+    | 'order_shipped_detected'
+    | 'order_not_found'
+    | 'tracking_codes_received'
+    | 'tracking_unavailable'
+    | 'tracking_submitted'
+    | 'transient_error'
+    | 'profile_signed_out'
+    | 'wall_clock_expired'
+    | 'danger_target_in_order';
+  trackingIds?: string[];
+  bgAccepted?: number;
+  bgDuplicates?: number;
+  bgUnmatched?: number;
+  bgAccountId?: string | null;
+  bgSubmissionStatus?: string | null;
+  bgSubmissionError?: string | null;
+};
+
+/**
+ * One FillerCancelTask as returned by GET /api/autog/filler-cancel-tasks.
+ * The worker uses this list to know what work to do for the just-claimed
+ * cancel_fillers job. `expiredSafetyNet=true` means the row aged past
+ * its wall-clock cap (7d for pending_cancel, 14d for pending_tracking)
+ * — the worker reports it back as `wall_clock_expired` without an
+ * Amazon round-trip.
+ */
+export type ServerFillerCancelTask = {
+  taskId: string;
+  amazonOrderId: string;
+  targetAsin: string | null;
+  status:
+    | 'pending_cancel'
+    | 'pending_tracking';
+  attempts: number;
+  expiredSafetyNet: boolean;
+  autoBuyPurchaseId: string;
+  buyJobOrderId: string | null;
+  lastError: string | null;
+  lastSignal: string | null;
+};
+
 /** Payload shape accepted by POST /api/autog/jobs/[id]/status */
 export type JobStatusReport = {
   status: 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'action_required';
@@ -174,7 +237,25 @@ export type JobStatusReport = {
      * behind this field.
      */
     amazonPurchaseId?: string | null;
+    /**
+     * ASIN of the deal item this filler buy was for. Snapshotted by the
+     * worker at buy time (parsed from productUrl) and forwarded to BG
+     * so each FillerCancelTask row stores it. The cancel worker
+     * re-verifies on every attempt that the filler order does NOT
+     * contain this ASIN before clicking Cancel — defense against a
+     * parser bug that would otherwise cancel the user's actual deal
+     * order. Optional; omitted on non-filler buys.
+     */
+    targetAsin?: string | null;
   }[];
+  /**
+   * Per-task signal updates from a `cancel_fillers` worker batch. Only
+   * sent when reporting back from a cancel_fillers job. Each update
+   * runs through BG's pure state machine and either transitions the
+   * task to a new state (cancelled / pending_tracking / tracked / etc.)
+   * or schedules a retry (`transient_error`, `profile_signed_out`).
+   */
+  fillerCancelTaskUpdates?: FillerCancelTaskUpdate[];
 };
 
 export type FetchTrackingOutcome =
@@ -448,6 +529,18 @@ export type JobAttempt = {
    * post-placement sweep. Null on single-mode buys.
    */
   fillerOrderIds: string[] | null;
+  /**
+   * Per-filler-order cancel state from BG's FillerCancelTask table.
+   * Each task tracks one filler order id through cancel_fillers's
+   * state machine. JobsTable colors each chip per status. Null on
+   * single-mode buys + when running against pre-feature BG.
+   */
+  fillerCancelTasks: Array<{
+    id: string;
+    amazonOrderId: string;
+    status: string;
+    attempts: number;
+  }> | null;
   /**
    * Target item's title as shown on /spc (Amazon's real title, not BG's
    * dealTitle). Needed by the verify phase to locate the target line
