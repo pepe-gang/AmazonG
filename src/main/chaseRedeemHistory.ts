@@ -1,6 +1,7 @@
 import { app } from 'electron';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { writeJsonAtomic } from './atomicJson.js';
 import type { ChaseRedeemEntry } from '../shared/types.js';
 
 /**
@@ -41,8 +42,7 @@ async function loadAll(filePath: string): Promise<HistoryFile> {
 }
 
 async function saveAll(filePath: string, data: HistoryFile): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+  await writeJsonAtomic(filePath, data);
 }
 
 /** Most-recent-first list of past redemptions for one profile. */

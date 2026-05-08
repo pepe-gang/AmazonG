@@ -1,6 +1,7 @@
 import { app } from 'electron';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { writeJsonAtomic } from './atomicJson.js';
 import type { ChaseAccountSnapshot } from '../shared/types.js';
 
 /**
@@ -42,8 +43,7 @@ async function loadAll(filePath: string): Promise<StoreFile> {
 }
 
 async function saveAll(filePath: string, data: StoreFile): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+  await writeJsonAtomic(filePath, data);
 }
 
 export async function getAccountSnapshotAt(

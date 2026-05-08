@@ -1896,7 +1896,8 @@ async function attachChaseXhrCapture(
     const req = resp.request();
     const rt = req.resourceType();
     if (rt !== 'xhr' && rt !== 'fetch') return;
-    const contentType = resp.headers()['content-type'] ?? '';
+    const respHeaders = resp.headers();
+    const contentType = respHeaders['content-type'] ?? '';
     let body: unknown;
     let bodyLen = 0;
     try {
@@ -1912,12 +1913,16 @@ async function attachChaseXhrCapture(
     } catch {
       // body unreadable — redirect, blocked, or context closed mid-read
     }
+    // Capture full response headers — needed to observe _abck rotation,
+    // bm_sv lifecycle, and Set-Cookie patterns when investigating Stage C
+    // anti-bot behavior. Cheap (~1KB extra per entry).
     append({
       ts: Date.now(),
       event: 'response',
       url: resp.url(),
       status: resp.status(),
       contentType,
+      respHeaders,
       bodyLen,
       body,
     });

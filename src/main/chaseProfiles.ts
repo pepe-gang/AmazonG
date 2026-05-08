@@ -1,7 +1,8 @@
 import { app } from 'electron';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { writeJsonAtomic } from './atomicJson.js';
 import type { ChaseProfile } from '../shared/types.js';
 
 // re-exported below alongside chaseProfileDir; centralised so the
@@ -84,8 +85,7 @@ export async function loadChaseProfiles(): Promise<ChaseProfile[]> {
 }
 
 async function saveChaseProfiles(list: ChaseProfile[]): Promise<void> {
-  await mkdir(app.getPath('userData'), { recursive: true });
-  await writeFile(metadataPath(), JSON.stringify(list, null, 2), 'utf8');
+  await writeJsonAtomic(metadataPath(), list);
 }
 
 export async function createChaseProfile(label: string): Promise<ChaseProfile[]> {
