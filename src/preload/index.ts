@@ -188,6 +188,10 @@ const bridge: AutoGBridge = {
     ipcRenderer.on(IPC.evtChaseProfiles, listener);
     return () => ipcRenderer.off(IPC.evtChaseProfiles, listener);
   },
+  fetchStatsGet: (range) =>
+    ipcRenderer.invoke(IPC.fetchStatsGet, range) as ReturnType<
+      AutoGBridge['fetchStatsGet']
+    >,
 };
 
 contextBridge.exposeInMainWorld('autog', bridge);

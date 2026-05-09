@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { IPC, type Settings } from '../shared/ipc.js';
 import { createBGClient, type ServerPurchase } from '../bg/client.js';
 import { startWorker, type WorkerHandle } from '../workflows/pollAndScrape.js';
+import { startBgRelay } from './bgRelay.js';
 import { addLogSink, logger } from '../shared/logger.js';
 import {
   appendLogBatch as storeAppendLogBatch,
@@ -130,6 +131,13 @@ let triggerChaseRedeem:
 
 /** Interval handle for the auto-redeem scheduler tick, cleared on quit. */
 let chaseAutoRedeemTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Handle for the BG.com fetch relay (long-poll loop, 6 concurrent
+ * workers). Started when identity becomes available; stopped on
+ * disconnect / quit. Null when not running.
+ */
+let bgRelayHandle: { stop: () => Promise<void> } | null = null;
 
 /**
  * Tick once a minute through the Chase profile list, firing
@@ -880,6 +888,21 @@ function resizeToOnboarding(): void {
  * No-op if the worker is already running. Throws if there's no
  * connected BG identity yet — caller decides whether to surface that.
  */
+/**
+ * Idempotent start for the BG.com fetch relay. Spawns 6 concurrent
+ * long-poll workers; each pulls one RemoteFetchJob from BG, executes
+ * it from this machine's IP, and posts the response back. Ignored
+ * when already running OR when not connected to BG.
+ */
+async function startBgRelayNow(): Promise<void> {
+  if (bgRelayHandle) return;
+  if (!apiKey) return;
+  const settings = await loadSettings();
+  const bg = createBGClient(settings.bgBaseUrl, apiKey);
+  bgRelayHandle = startBgRelay({ bg });
+  logger.info('bgRelay.started');
+}
+
 async function startWorkerNow(): Promise<void> {
   if (worker) return;
   if (!apiKey) throw new Error('not connected');
@@ -1043,6 +1066,15 @@ app.whenReady().then(async () => {
     await bulkSyncDisplayNamesToBG();
   })();
 
+  // BG.com fetch relay — long-polls /api/autog/remote-fetch/claim
+  // and executes BG.com fetches from this machine's IP. Started
+  // here when identity was loaded from disk on launch (so an
+  // already-connected user picks up relay work without having to
+  // re-paste their key).
+  if (apiKey) {
+    void startBgRelayNow();
+  }
+
   // Auto-redeem scheduler — ticks every 60s, fires
   // performChaseRedeem on profiles whose schedule is due. Cheap loop:
   // single profiles.json read + an in-memory filter when nothing's
@@ -1122,6 +1154,13 @@ app.on('before-quit', async (e) => {
     clearInterval(chaseAutoRedeemTimer);
     chaseAutoRedeemTimer = null;
   }
+  // Stop the BG.com fetch relay — aborts in-flight long-polls so
+  // process exits cleanly within ~1s instead of waiting on a 25s
+  // server-side hold.
+  if (bgRelayHandle) {
+    await bgRelayHandle.stop().catch(() => undefined);
+    bgRelayHandle = null;
+  }
   try {
     await closeAllChromiumSessions();
   } catch (err) {
@@ -1159,6 +1198,12 @@ function registerIpcHandlers(): void {
     await saveIdentity({ apiKey: key, identity: me });
     resizeToConnected();
     broadcastStatus();
+    // Start the BG.com fetch relay now that we have a valid AutoG
+    // key. Relay long-polls /api/autog/remote-fetch/claim and
+    // executes BG.com fetches from this machine's IP. Idempotent —
+    // skip if already running (e.g. user re-connected without
+    // disconnecting first).
+    void startBgRelayNow();
     return me;
   });
 
@@ -1168,12 +1213,28 @@ function registerIpcHandlers(): void {
       worker = null;
       await abortPendingAttempts('stopped by user (disconnect)');
     }
+    // Stop the relay loop so we don't keep polling /claim with a
+    // dead key. Restarted on the next connect.
+    if (bgRelayHandle) {
+      await bgRelayHandle.stop().catch(() => undefined);
+      bgRelayHandle = null;
+    }
     identity = null;
     apiKey = null;
     await clearIdentity();
     resizeToOnboarding();
     broadcastStatus();
   });
+
+  ipcMain.handle(
+    IPC.fetchStatsGet,
+    async (_e, range: 'today' | '7d' | 'lifetime') => {
+      if (!apiKey) return null;
+      const settings = await loadSettings();
+      const bg = createBGClient(settings.bgBaseUrl, apiKey);
+      return bg.getFetchStatsSummary(range).catch(() => null);
+    },
+  );
 
   ipcMain.handle(IPC.workerStart, () => startWorkerNow());
 

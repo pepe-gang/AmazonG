@@ -1,10 +1,13 @@
 import { BGApiError } from '../shared/errors.js';
 import type {
   AutoGJob,
+  FetchStatsSummary,
   IdentityInfo,
   JobAttemptStatus,
   JobStatusReport,
+  RemoteFetchResult,
   ServerFillerCancelTask,
+  ServerRemoteFetchJob,
 } from '../shared/types.js';
 
 /**
@@ -235,6 +238,26 @@ export type BGClient = {
     job: { id: string; buyJobId: string | null; placedEmail: string };
     tasks: ServerFillerCancelTask[];
   } | null>;
+  /**
+   * BG.com fetch relay — long-polls for the next pending RemoteFetchJob.
+   * BG's claim endpoint holds the request open up to 25s; AmazonG's
+   * worker treats null returns as "no work, try again." Throws on
+   * network/auth errors so the caller's outer try/catch can back off.
+   */
+  claimRemoteFetchJob(): Promise<ServerRemoteFetchJob | null>;
+  /**
+   * Post the response back for a claimed remote-fetch job. AmazonG
+   * fetched the URL from its IP; this hands the result back so BG's
+   * relayFetch coordinator can construct the synthetic Response for
+   * the original caller.
+   */
+  postRemoteFetchResult(jobId: string, result: RemoteFetchResult): Promise<void>;
+  /**
+   * Pull the today/lifetime fetch stats for the AmazonG header pill.
+   * Same payload the BG dashboard's /routing page consumes; AmazonG
+   * just renders a subset.
+   */
+  getFetchStatsSummary(range: 'today' | '7d' | 'lifetime'): Promise<FetchStatsSummary | null>;
 };
 
 /**
@@ -491,6 +514,47 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         job: { id: string; buyJobId: string | null; placedEmail: string };
         tasks: ServerFillerCancelTask[];
       }>(url, { method: 'GET' });
+      return r ?? null;
+    },
+
+    async claimRemoteFetchJob(): Promise<ServerRemoteFetchJob | null> {
+      // The claim endpoint long-polls up to 25s server-side. Add a
+      // small buffer so a slow connection-close doesn't error here
+      // before the server's 204 lands. AbortController-controlled
+      // so the outer loop can cancel cleanly on stop.
+      const url = `${baseUrl}/api/autog/remote-fetch/claim`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(35_000),
+      });
+      if (res.status === 204) return null;
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new BGApiError(
+          res.status,
+          '/api/autog/remote-fetch/claim',
+          body.slice(0, 500),
+        );
+      }
+      const data = (await res.json()) as { job?: ServerRemoteFetchJob };
+      return data.job ?? null;
+    },
+
+    async postRemoteFetchResult(jobId: string, result: RemoteFetchResult) {
+      await request<{ ok: true }>(
+        `/api/autog/remote-fetch/${encodeURIComponent(jobId)}/result`,
+        { method: 'POST', body: JSON.stringify(result) },
+      );
+    },
+
+    async getFetchStatsSummary(
+      range: 'today' | '7d' | 'lifetime',
+    ): Promise<FetchStatsSummary | null> {
+      const r = await request<FetchStatsSummary>(
+        `/api/autog/fetch-stats?range=${range}`,
+        { method: 'GET' },
+      ).catch(() => null);
       return r ?? null;
     },
   };

@@ -586,3 +586,45 @@ export type JobAttempt = {
   createdAt: string;
   updatedAt: string;
 };
+
+
+/**
+ * One RemoteFetchJob as returned by POST /api/autog/remote-fetch/claim.
+ * AmazonG's relay loop processes these — fetches the URL from the
+ * desktop's IP, posts the response back. URLs are guaranteed to be
+ * api.prod.buyinggroup.com (BG-side decideRelay enforces this; AmazonG
+ * also re-validates as defense-in-depth).
+ */
+export type ServerRemoteFetchJob = {
+  id: string;
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body: string | null;
+  callTag: string;
+};
+
+/**
+ * Result body posted back to /api/autog/remote-fetch/[id]/result. On
+ * network/abort failures, set `error`. On any HTTP response (including
+ * 4xx/5xx from buyinggroup.com), set status + headers + body — that's
+ * the actual answer, not a relay failure.
+ */
+export type RemoteFetchResult = {
+  status?: number;
+  headers?: Record<string, string>;
+  body?: string;
+  error?: string;
+  clientIp?: string;
+  cloudDurationMs?: number;
+};
+
+/**
+ * Per-user fetch-stats response from /api/autog/fetch-stats. Subset
+ * the AmazonG header pill needs — full shape is on the BG dashboard.
+ */
+export type FetchStatsSummary = {
+  range: 'today' | '7d' | 'lifetime';
+  totals: { autog: number; cloud: number; total: number; pctAutog: number };
+  liveStatus: { online: boolean; lastSeenAt: string | null; ageMs: number | null };
+};

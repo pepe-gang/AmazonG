@@ -5,6 +5,7 @@ import type {
   ChaseProfile,
   ChaseRedeemEntry,
   ChaseRedeemResult,
+  FetchStatsSummary,
   IdentityInfo,
   JobAttempt,
   LogEvent,
@@ -150,6 +151,7 @@ export const IPC = {
    *  ChaseProfile rows (post-tick lastRunAt persistence). Renderer
    *  reconciles the Bank tab without a manual refresh. */
   evtChaseProfiles: 'evt:chase-profiles',
+  fetchStatsGet: 'fetch-stats:get',
 } as const;
 
 export type Settings = {
@@ -490,6 +492,13 @@ export type AutoGBridge = {
    *  persistence). Renderer reconciles the Bank tab without a
    *  manual refetch. */
   onChaseProfiles(cb: (profiles: ChaseProfile[]) => void): () => void;
+  /**
+   * Read the BG.com fetch-stats summary (today/lifetime). Renderer's
+   * header pill polls every 30s. Returns null on transport / auth
+   * errors; the pill renders "—" so a transient blip isn't visually
+   * jarring.
+   */
+  fetchStatsGet(range: 'today' | '7d' | 'lifetime'): Promise<FetchStatsSummary | null>;
 };
 
 declare global {

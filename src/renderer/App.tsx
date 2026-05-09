@@ -396,6 +396,7 @@ function MainShell({ status }: { status: RendererStatus }) {
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           <AutoRedeemHeaderIndicator profiles={chaseProfiles} />
+          <BgFetchStatsPill />
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border border-white/10 bg-white/[0.04]">
             <span className="relative inline-flex items-center justify-center size-3">
               {/* Running = expanding ring behind a solid dot. Idle = flat
@@ -798,6 +799,80 @@ function formatTime12h(s: string): string {
   const period = h >= 12 ? 'PM' : 'AM';
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return `${h12}:${min} ${period}`;
+}
+
+/**
+ * Header pill showing today's BG.com call counts split AutoG vs Cloud.
+ * Polls /api/autog/fetch-stats every 30s; renders nothing until the
+ * first response lands so a fresh launch doesn't flash a "—" pill.
+ *
+ * Color matches the dashboard's pctClass: green ≥80% AutoG, amber
+ * 40-79%, rose <40%. Tooltip shows the lifetime number for context.
+ */
+function BgFetchStatsPill() {
+  const [today, setToday] = useState<{
+    autog: number;
+    cloud: number;
+    pctAutog: number;
+    total: number;
+  } | null>(null);
+  const [lifetime, setLifetime] = useState<{ autog: number; cloud: number } | null>(null);
+
+  useEffect(() => {
+    const tick = async () => {
+      try {
+        const r = await window.autog.fetchStatsGet('today');
+        if (r) {
+          setToday({
+            autog: r.totals.autog,
+            cloud: r.totals.cloud,
+            pctAutog: r.totals.pctAutog,
+            total: r.totals.total,
+          });
+        }
+        const lt = await window.autog.fetchStatsGet('lifetime');
+        if (lt) {
+          setLifetime({ autog: lt.totals.autog, cloud: lt.totals.cloud });
+        }
+      } catch {
+        // transient errors leave the pill at its last value
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!today || today.total === 0) return null;
+
+  const colorClass =
+    today.pctAutog >= 80
+      ? 'border-emerald-400/30 bg-emerald-500/[0.08] text-emerald-200'
+      : today.pctAutog >= 40
+        ? 'border-amber-400/30 bg-amber-500/[0.08] text-amber-200'
+        : 'border-rose-400/30 bg-rose-500/[0.08] text-rose-200';
+
+  const tooltip = `BG.com calls today — AutoG: ${today.autog} · Cloud: ${today.cloud}${
+    lifetime
+      ? `\nLifetime — AutoG: ${lifetime.autog.toLocaleString()} · Cloud: ${lifetime.cloud.toLocaleString()}`
+      : ''
+  }\nAutoG = your home IP via this AmazonG · Cloud = Vercel/Railway IP`;
+
+  return (
+    <div
+      className={
+        'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border ' +
+        colorClass
+      }
+      title={tooltip}
+    >
+      <span>BG</span>
+      <span className="opacity-60">·</span>
+      <span className="tabular-nums">
+        {today.autog.toLocaleString()}/{today.cloud.toLocaleString()}
+      </span>
+    </div>
+  );
 }
 
 function UptimeText({ startedAt }: { startedAt: number | null }) {
