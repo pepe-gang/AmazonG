@@ -60,6 +60,54 @@ let clientIpFetchInFlight: Promise<string | null> | null = null;
 const BG_HOST = 'api.prod.buyinggroup.com';
 
 /**
+ * Marker prefix on `body` when BG serialized a FormData body. Mirror
+ * of FORM_DATA_PREFIX in BG's bgRelayRuntime.ts. Format:
+ *   "__bgrelay_form__:" + JSON.stringify([[key, value], ...])
+ *
+ * AmazonG re-detects the prefix, rebuilds a FormData object, and
+ * sends it as multipart/form-data — same wire format BG would have
+ * used directly. Without this round-trip BG.com receives a body-less
+ * POST and returns empty results.
+ */
+const FORM_DATA_PREFIX = '__bgrelay_form__:';
+
+/**
+ * Reconstruct the actual body the desktop should send, from the
+ * serialized string BG put in the job. String bodies pass through;
+ * the FormData marker triggers JSON parse + FormData rebuild.
+ *
+ * Also strips Content-Type from the headers when we rebuild a
+ * FormData body — multipart/form-data needs the boundary which
+ * fetch() generates fresh per request. If we kept BG's stored
+ * Content-Type, undici would send a header with a mismatched
+ * boundary and the server would reject the body.
+ */
+function deserializeRelayBody(
+  rawBody: string | null,
+  headers: Record<string, string>,
+): { body: BodyInit | undefined; headers: Record<string, string> } {
+  if (rawBody == null) return { body: undefined, headers };
+  if (rawBody.startsWith(FORM_DATA_PREFIX)) {
+    try {
+      const entries = JSON.parse(rawBody.slice(FORM_DATA_PREFIX.length)) as Array<[string, string]>;
+      const form = new FormData();
+      for (const [k, v] of entries) form.append(k, v);
+      // Strip stale Content-Type — fetch will regenerate with the
+      // proper multipart boundary.
+      const cleaned: Record<string, string> = {};
+      for (const [k, v] of Object.entries(headers)) {
+        if (k.toLowerCase() !== 'content-type') cleaned[k] = v;
+      }
+      return { body: form, headers: cleaned };
+    } catch {
+      // Fall through to plain-string body — better than throwing
+      // mid-fetch.
+    }
+  }
+  return { body: rawBody, headers };
+}
+
+/**
  * Fetch the desktop's public IP via api.ipify.org. Used once on
  * relay start; cached for subsequent jobs so we don't ping ipify on
  * every single relay. ipify is rate-limited generously (1 req/min)
@@ -204,18 +252,23 @@ async function processJob(
   let errorMsg: string | null = null;
 
   try {
+    // Rebuild FormData if BG serialized one — string bodies pass through
+    const { body: reqBody, headers: reqHeaders } = deserializeRelayBody(
+      job.body,
+      job.headers,
+    );
     const res = await fetch(job.url, {
       method: job.method,
-      headers: job.headers,
-      body: job.body,
+      headers: reqHeaders,
+      body: reqBody,
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    const headers: Record<string, string> = {};
+    const respHeaders: Record<string, string> = {};
     res.headers.forEach((v, k) => {
-      headers[k] = v;
+      respHeaders[k] = v;
     });
-    const body = await res.text();
-    result = { status: res.status, headers, body };
+    const respBody = await res.text();
+    result = { status: res.status, headers: respHeaders, body: respBody };
   } catch (err) {
     errorMsg = err instanceof Error ? err.message : String(err);
   }
