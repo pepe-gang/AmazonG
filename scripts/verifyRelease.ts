@@ -65,7 +65,6 @@ try {
   );
 } catch (err) {
   fail(`gh release view ${expectedTag} failed — release doesn't exist`);
-  return;
 }
 if (release.isDraft) {
   fail(
@@ -96,9 +95,13 @@ if (localDmg !== remoteDmg) {
 }
 ok(`Local DMG matches released DMG (${localDmg} bytes)`);
 
-// 4. /releases/latest must redirect to THIS tag
+// 4. /releases/latest must redirect to THIS tag. Use -I (HEAD) without
+//    -L so we capture the FIRST redirect target — which is the
+//    /releases/download/vX.Y.Z/... URL we want to assert against.
+//    Following all redirects (-L) lands on a signed asset URL that
+//    no longer contains the tag, defeating the check.
 const latestUrl = execSync(
-  `curl -s -o /dev/null -w "%{redirect_url}" -L "https://github.com/pepe-gang/AmazonG/releases/latest/download/AmazonG-arm64.dmg" 2>&1 | head -n 1`,
+  `curl -sI "https://github.com/pepe-gang/AmazonG/releases/latest/download/AmazonG-arm64.dmg" | awk -F': ' '/^[Ll]ocation:/ { print $2 }' | tr -d '\\r\\n'`,
   { encoding: "utf8" },
 ).trim();
 if (!latestUrl.includes(expectedTag)) {
@@ -118,7 +121,6 @@ try {
   parsed = JSON.parse(versionJson);
 } catch {
   fail(`BG ${bgUrl}/downloads/version.json returned non-JSON: ${versionJson.slice(0, 80)}`);
-  return;
 }
 if (parsed.latestVersion !== expectedVersion) {
   fail(
@@ -135,7 +137,7 @@ function ok(msg: string) {
   console.log(`  ✓ ${msg}`);
 }
 
-function fail(msg: string): void {
+function fail(msg: string): never {
   console.error(`  ✗ ${msg}`);
   process.exit(1);
 }
