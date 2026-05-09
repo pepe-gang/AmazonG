@@ -25,7 +25,8 @@
     "prepackage": "npm run build && npm run install-browsers",
     "package": "npm run prepackage && electron-builder --mac --arm64 -c.mac.identity=null",
     "package:signed": "npm run prepackage && electron-builder --mac --arm64",
-    "release": "npm run prepackage && electron-builder --mac --arm64 --publish=always"
+    "release": "npm run prepackage && electron-builder --mac --arm64 --publish=always",
+    "release:verify": "tsx scripts/verifyRelease.ts"
   },
   "build": {
     "appId": "com.pepegang.amazong",
