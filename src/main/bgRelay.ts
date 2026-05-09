@@ -183,7 +183,7 @@ async function workerLoop(
 ): Promise<void> {
   while (!signal.aborted) {
     try {
-      const job = await bg.claimRemoteFetchJob();
+      const job = await bg.claimRemoteFetchJob(signal);
       if (signal.aborted) return;
       if (!job) {
         // 204 — nothing pending. Loop back immediately; the long-poll
@@ -194,7 +194,7 @@ async function workerLoop(
       // Process. Errors are caught + posted back as result-failure
       // so the worker loop never crashes. Logging is tagged with
       // workerId for parallel visibility.
-      await processJob(bg, job, workerId);
+      await processJob(bg, job, workerId, signal);
     } catch (err) {
       if (signal.aborted) return;
       // Auth errors / BG down — back off briefly then retry. We
@@ -214,6 +214,7 @@ async function processJob(
   bg: BGClient,
   job: import('../shared/types.js').ServerRemoteFetchJob,
   workerId: number,
+  stopSignal: AbortSignal,
 ): Promise<void> {
   // Defense-in-depth: BG already filters URLs in decideRelay, but
   // re-validate so a hypothetical compromised BG can't turn this
@@ -261,7 +262,9 @@ async function processJob(
       method: job.method,
       headers: reqHeaders,
       body: reqBody,
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      // Compose stop with the per-fetch ceiling so app quit aborts
+      // an in-flight BG.com fetch instead of waiting up to 20s.
+      signal: AbortSignal.any([stopSignal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]),
     });
     const respHeaders: Record<string, string> = {};
     res.headers.forEach((v, k) => {

@@ -243,8 +243,12 @@ export type BGClient = {
    * BG's claim endpoint holds the request open up to 25s; AmazonG's
    * worker treats null returns as "no work, try again." Throws on
    * network/auth errors so the caller's outer try/catch can back off.
+   *
+   * `signal` is composed with the internal 35s timeout so a stop()
+   * (app quit / disconnect) aborts the in-flight long-poll instead of
+   * blocking the cleanup pipeline for up to 35 seconds.
    */
-  claimRemoteFetchJob(): Promise<ServerRemoteFetchJob | null>;
+  claimRemoteFetchJob(signal?: AbortSignal): Promise<ServerRemoteFetchJob | null>;
   /**
    * Post the response back for a claimed remote-fetch job. AmazonG
    * fetched the URL from its IP; this hands the result back so BG's
@@ -517,16 +521,20 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
       return r ?? null;
     },
 
-    async claimRemoteFetchJob(): Promise<ServerRemoteFetchJob | null> {
+    async claimRemoteFetchJob(signal?: AbortSignal): Promise<ServerRemoteFetchJob | null> {
       // The claim endpoint long-polls up to 25s server-side. Add a
       // small buffer so a slow connection-close doesn't error here
-      // before the server's 204 lands. AbortController-controlled
-      // so the outer loop can cancel cleanly on stop.
+      // before the server's 204 lands. The caller's `signal` is
+      // composed in so app shutdown aborts the fetch immediately
+      // instead of blocking quit for up to 35 seconds.
       const url = `${baseUrl}/api/autog/remote-fetch/claim`;
+      const composite = signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(35_000)])
+        : AbortSignal.timeout(35_000);
       const res = await fetch(url, {
         method: 'POST',
         headers,
-        signal: AbortSignal.timeout(35_000),
+        signal: composite,
       });
       if (res.status === 204) return null;
       if (!res.ok) {

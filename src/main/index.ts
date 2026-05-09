@@ -1144,7 +1144,13 @@ async function closeAllChromiumSessions(): Promise<void> {
 // Intercept the first quit, run cleanup, then quit for real. Without this
 // hook the Playwright Chromium processes (each profile's persistent
 // context) outlive the Electron app and stay visible as orphan windows.
+//
+// Hard deadline: cleanup is bounded at 2s. If the relay/Chromium tear-down
+// hangs (e.g. a wedged BG long-poll, a Chromium context refusing to close),
+// we exit anyway — the OS reaps the orphans. Without this cap, a single
+// stuck task can make the app feel impossible to force-quit.
 let quittingCleanly = false;
+const QUIT_CLEANUP_DEADLINE_MS = 2_000;
 app.on('before-quit', async (e) => {
   if (quittingCleanly) return;
   e.preventDefault();
@@ -1154,18 +1160,19 @@ app.on('before-quit', async (e) => {
     clearInterval(chaseAutoRedeemTimer);
     chaseAutoRedeemTimer = null;
   }
-  // Stop the BG.com fetch relay — aborts in-flight long-polls so
-  // process exits cleanly within ~1s instead of waiting on a 25s
-  // server-side hold.
-  if (bgRelayHandle) {
-    await bgRelayHandle.stop().catch(() => undefined);
-    bgRelayHandle = null;
-  }
-  try {
-    await closeAllChromiumSessions();
-  } catch (err) {
-    logger.warn('app.quit.cleanup.error', { error: String(err) });
-  } finally {
+
+  const cleanup = (async () => {
+    // Stop the BG.com fetch relay — aborts in-flight long-polls so
+    // workers exit immediately instead of waiting on a 25s hold.
+    if (bgRelayHandle) {
+      await bgRelayHandle.stop().catch(() => undefined);
+      bgRelayHandle = null;
+    }
+    try {
+      await closeAllChromiumSessions();
+    } catch (err) {
+      logger.warn('app.quit.cleanup.error', { error: String(err) });
+    }
     // Drain buffered logs before exit. The IPC drain is best-effort (the
     // renderer may already be torn down); the disk drain is awaited so
     // the last <200ms of events survive the shutdown.
@@ -1175,9 +1182,17 @@ app.on('before-quit', async (e) => {
     } catch {
       // Already swallowed inside flushDiskLogs; defensive double-catch.
     }
-    quittingCleanly = true;
-    app.quit();
+  })();
+
+  const deadline = new Promise<'deadline'>((resolve) =>
+    setTimeout(() => resolve('deadline'), QUIT_CLEANUP_DEADLINE_MS),
+  );
+  const winner = await Promise.race([cleanup.then(() => 'clean' as const), deadline]);
+  if (winner === 'deadline') {
+    logger.warn('app.quit.cleanup.timeout', { ms: QUIT_CLEANUP_DEADLINE_MS });
   }
+  quittingCleanly = true;
+  app.quit();
 });
 
 function registerIpcHandlers(): void {
