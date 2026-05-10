@@ -11,6 +11,7 @@ import {
   isVerifyCardChallenge,
   isPaymentRevisionRequired,
   parseOrderConfirmation,
+  readQuantityFromOrderDetailsHtml,
   readTargetCashbackFromDom,
   buildTitlePrefix,
   computeCashbackRadioPlans,
@@ -861,5 +862,99 @@ describe('isPaymentRevisionRequired (order-details fixture)', () => {
       </body></html>
     `);
     expect(isPaymentRevisionRequired(doc)).toBe(true);
+  });
+});
+
+describe('readQuantityFromOrderDetailsHtml', () => {
+  it('extracts qty from a single "Quantity: N" label', () => {
+    const html = `<html><body>
+      <div class="line-item">
+        <span>Apple iPad 11-inch</span>
+        <span>Quantity: 2</span>
+        <span>$299.00</span>
+      </div>
+    </body></html>`;
+    expect(readQuantityFromOrderDetailsHtml(html)).toBe(2);
+  });
+
+  it('extracts qty=1 (the most common case)', () => {
+    expect(
+      readQuantityFromOrderDetailsHtml(
+        '<div>Some product <span>Quantity: 1</span></div>',
+      ),
+    ).toBe(1);
+  });
+
+  it('handles "Quantity:N" without space', () => {
+    expect(
+      readQuantityFromOrderDetailsHtml(
+        '<div>Quantity:3</div>',
+      ),
+    ).toBe(3);
+  });
+
+  it('case-insensitive', () => {
+    expect(
+      readQuantityFromOrderDetailsHtml('<div>QUANTITY: 5</div>'),
+    ).toBe(5);
+    expect(
+      readQuantityFromOrderDetailsHtml('<div>quantity: 7</div>'),
+    ).toBe(7);
+  });
+
+  it('SUMS multiple "Quantity: N" matches across the page (multi-line-item order)', () => {
+    // Real-world: an order with 3 different line items each showing
+    // their own qty. We sum because the function returns the TOTAL
+    // unit count for the order.
+    const html = `<html><body>
+      <div>Item A <span>Quantity: 2</span></div>
+      <div>Item B <span>Quantity: 1</span></div>
+      <div>Item C <span>Quantity: 5</span></div>
+    </body></html>`;
+    expect(readQuantityFromOrderDetailsHtml(html)).toBe(8);
+  });
+
+  it('returns null when no "Quantity:" pattern is found', () => {
+    expect(readQuantityFromOrderDetailsHtml('<html></html>')).toBeNull();
+    expect(readQuantityFromOrderDetailsHtml('')).toBeNull();
+    expect(
+      readQuantityFromOrderDetailsHtml('<div>Total: $598.00</div>'),
+    ).toBeNull();
+  });
+
+  it('rejects values outside 1..999 range (defensive)', () => {
+    expect(
+      readQuantityFromOrderDetailsHtml('<div>Quantity: 0</div>'),
+    ).toBeNull();
+    // 4-digit qty wouldn't match the {1,3} bound on the digit count
+    expect(
+      readQuantityFromOrderDetailsHtml('<div>Quantity: 1000</div>'),
+    ).toBeNull();
+  });
+
+  it('does not match "Quantity" inside arbitrary attributes / class names', () => {
+    // The leading look-behind (^|>|\s) ensures we only match plain-text
+    // "Quantity:" not e.g. data-quantity or class names that happen to
+    // contain the word.
+    expect(
+      readQuantityFromOrderDetailsHtml(
+        '<div data-quantity="42">no qty label here</div>',
+      ),
+    ).toBeNull();
+  });
+
+  it('reproduces the user-reported case (iPad order, qty=2)', () => {
+    // Approximation of what Amazon's order-details page renders for a
+    // 1-line × qty 2 order. The user-reported bug had AmazonG capturing
+    // qty=1 from the /spc DOM; the order-details page (post-place) shows
+    // 2 — this function makes that visible.
+    const html = `<html><body>
+      <div>
+        Apple iPad 11-inch: A16 chip — Blue
+        <span>Quantity: 2</span>
+        Total: $598.00
+      </div>
+    </body></html>`;
+    expect(readQuantityFromOrderDetailsHtml(html)).toBe(2);
   });
 });

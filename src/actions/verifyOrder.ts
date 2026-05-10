@@ -1,6 +1,9 @@
 import type { Page } from 'playwright';
 import { JSDOM } from 'jsdom';
-import { isPaymentRevisionRequired } from '../parsers/amazonCheckout.js';
+import {
+  isPaymentRevisionRequired,
+  readQuantityFromOrderDetailsHtml,
+} from '../parsers/amazonCheckout.js';
 import { HTTP_BROWSERY_HEADERS } from './amazonHttp.js';
 
 export type VerifyOrderOutcome =
@@ -14,10 +17,18 @@ export type VerifyOrderOutcome =
        *  log so the row's diagnostics surface "needs payment revision"
        *  instead of looking quietly stuck-pending. */
       paymentRevisionRequired?: boolean;
+      /** Total quantity of the target item in this order, scraped from
+       *  the order-details page line-item listing. Null when the page
+       *  layout doesn't expose qty in a recognized shape. The verify
+       *  caller forwards this to BG as `purchasedCount` so a buy-time
+       *  reporting bug (e.g. /spc-DOM-read returning 1 when Amazon
+       *  actually placed 2) gets corrected on the next verify pass. */
+      placedQuantity?: number | null;
     }
   | { kind: 'cancelled'; orderId: string }
   | { kind: 'timeout'; orderId: string }
   | { kind: 'error'; orderId: string; message: string };
+
 
 /**
  * Decide whether an order is active, cancelled, or indeterminate by
@@ -146,7 +157,14 @@ export async function verifyOrder(
   //    ship once payment is fixed), but we surface the flag so the
   //    caller can emit a warning log.
   const paymentRevisionRequired = isPaymentRevisionRequired(doc);
-  return paymentRevisionRequired
-    ? { kind: 'active', orderId, paymentRevisionRequired: true }
-    : { kind: 'active', orderId };
+  // Read placed qty from the order details page. Used by the verify
+  // caller to forward `purchasedCount` to BG, which corrects any
+  // buy-time reporting bug retroactively.
+  const placedQuantity = readQuantityFromOrderDetailsHtml(html);
+  const base = { kind: 'active' as const, orderId };
+  return {
+    ...base,
+    ...(paymentRevisionRequired ? { paymentRevisionRequired: true } : {}),
+    ...(placedQuantity !== null ? { placedQuantity } : {}),
+  };
 }

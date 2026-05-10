@@ -19,6 +19,40 @@ export function parseOrderConfirmation(doc: Document, currentUrl: string): Order
 }
 
 /**
+ * Read the total quantity Amazon's ORDER-DETAILS page reports. Used
+ * by verifyOrder for the post-place qty correction path — the
+ * order-details page is the most authoritative source for "how many
+ * units did Amazon actually accept" because it reflects the final
+ * order state (including any post-checkout adjustments Amazon made).
+ *
+ * Pure text/regex parser — JSDOM would be more "correct" but ~50×
+ * slower for a single read, and Amazon's order-details text shapes
+ * are stable enough across A/B variants that regex is reliable.
+ *
+ * Strategies, in order:
+ *   1. "Quantity: N" labels (line-item rows on the details page).
+ *      Sums across all matches so multi-line-item orders work too.
+ *   2. Returns null if no numeric "Quantity:" pattern is found.
+ *
+ * Caller should fall back to whatever value it had before when this
+ * returns null (e.g. the buy-time `purchasedCount` already on file).
+ */
+export function readQuantityFromOrderDetailsHtml(
+  html: string,
+): number | null {
+  const matches = Array.from(
+    html.matchAll(/(?:^|>|\s)Quantity[:\s]+(\d{1,3})\b/gi),
+  );
+  if (matches.length === 0) return null;
+  let total = 0;
+  for (const m of matches) {
+    const n = parseInt(m[1] ?? '', 10);
+    if (Number.isFinite(n) && n > 0 && n < 1000) total += n;
+  }
+  return total > 0 ? total : null;
+}
+
+/**
  * Amazon's thankyou page renders a small badge over each line-item's
  * thumbnail: `<span class="checkout-quantity-badge">3</span>`. Absent for
  * qty=1 (Amazon hides it). For single-product orders (our case) there's

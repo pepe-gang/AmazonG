@@ -191,6 +191,13 @@ export type JobStatusReport = {
   /** Carrier tracking codes collected by a fetch_tracking job. One order
    *  can split into multiple shipments (qty=3 MacBooks → 3 codes). */
   trackingIds?: string[] | null;
+  /** Verify-phase only: surgical correction to AutoBuyPurchase.purchasedCount
+   *  for the (buyJobId, placedEmail) match. Set by verifyOrder when the
+   *  order-details page reports a different qty than what was captured
+   *  at buy time (e.g. /spc-DOM-read returning 1 when Amazon actually
+   *  placed 2). BG updates ONLY purchasedCount — leaves status, orderId,
+   *  trackingIds, and other fields untouched. */
+  correctPurchasedCount?: number | null;
   purchases?: {
     amazonEmail: string;
     status: 'queued' | 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'failed' | 'cancelled' | 'action_required';

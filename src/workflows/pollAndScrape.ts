@@ -1034,6 +1034,14 @@ async function handleVerifyJob(
           status: 'completed',
           placedOrderId: targetOrderId,
           placedEmail: profile.email,
+          // Forward the qty Amazon's order-details page reports. Used
+          // by BG to correct any buy-time qty mis-report (e.g. /spc-DOM
+          // returning 1 when Amazon actually placed 2). Only included
+          // when the verify pass extracted a numeric qty — null/missing
+          // leaves the existing purchasedCount alone on the BG side.
+          ...(outcome.kind === 'active' && typeof outcome.placedQuantity === 'number'
+            ? { correctPurchasedCount: outcome.placedQuantity }
+            : {}),
         },
         cid,
       );

@@ -1422,6 +1422,38 @@ export async function buyWithFillers(
     await page.waitForTimeout(3_000);
   }
 
+  // Pick the most authoritative qty source for the placed order.
+  // Priority:
+  //   1. parsed.quantity     — Amazon's post-place "checkout-quantity-badge"
+  //                            on the confirmation page; renders only when
+  //                            qty > 1, hidden when qty = 1.
+  //   2. placedQuantity      — pre-place /spc-DOM read; fragile across
+  //                            unfamiliar layouts but useful when Amazon
+  //                            DOESN'T render the confirmation badge.
+  //   3. targetQuantity      — what we explicitly POSTed to cart-add. The
+  //                            cart-add either landed at this qty or
+  //                            failed loudly; safe last-resort fallback.
+  // Fixes the "filler buys all reporting purchasedCount=1" bug — /spc
+  // alone returned 1 for orders that Amazon actually placed at qty=2.
+  const finalPlacedQuantity =
+    parsed.quantity ?? placedQuantity ?? targetQuantity;
+  if (
+    parsed.quantity != null &&
+    placedQuantity != null &&
+    parsed.quantity !== placedQuantity
+  ) {
+    logger.warn(
+      'step.fillerBuy.qty.mismatch',
+      {
+        fromConfirmation: parsed.quantity,
+        fromSpc: placedQuantity,
+        targetQuantity,
+        note: 'using confirmation badge as authoritative',
+      },
+      cid,
+    );
+  }
+
   logger.info(
     'step.fillerBuy.placed',
     {
@@ -1432,7 +1464,9 @@ export async function buyWithFillers(
       finalPrice: parsed.finalPrice,
       finalPriceText: parsed.finalPriceText,
       targetCashbackPct,
-      placedQuantity,
+      placedQuantity: finalPlacedQuantity,
+      placedQuantityFromSpc: placedQuantity,
+      placedQuantityFromConfirmation: parsed.quantity,
       fillersAdded,
     },
     cid,
@@ -1442,6 +1476,7 @@ export async function buyWithFillers(
     ok: true,
     stage: 'placed',
     ...successBase,
+    placedQuantity: finalPlacedQuantity, // ← override successBase's /spc value
     amazonPurchaseId,
     orderId,
     orderIds: orderMatches,
