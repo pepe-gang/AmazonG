@@ -14,7 +14,7 @@ import { evaluateCashbackGate } from '../shared/cashbackGate.js';
 import { clearCart, type ClearCartResult } from './clearCart.js';
 import { addFillerViaHttp, waitForDeliverySettle } from './buyWithFillers.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
-import { SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHttp.js';
+import { HTTP_BROWSERY_HEADERS, SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHttp.js';
 
 type BuyOptions = {
   dryRun: boolean;
@@ -126,6 +126,15 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     logger.info(message, { ...ctx, ...(data ?? {}) }, cid);
   const warn: StepEmitter = (message, data) =>
     logger.warn(message, { ...ctx, ...(data ?? {}) }, cid);
+
+  // Capture deal ASIN from the PDP url at start. Used downstream by
+  // verifyOrderContainsAsin to defend against the cross-deal orderId
+  // contamination bug (2026-05-07: 6 BG purchases on cpnnick@gmail.com
+  // all stamped with the same Amazon orderId across 5 different deals;
+  // the post-place thank-you DOM rendered a stale latestOrderId on
+  // rapid-fire same-account buys). The PDP url is reliable here — the
+  // workflow hands buyNow an already-loaded product page.
+  const dealAsin = parseAsinFromUrl(page.url());
 
   try {
     step('step.buy.start', { dryRun: opts.dryRun, productUrl: page.url() });
@@ -512,6 +521,32 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         warn('step.buy.orderid.notfound', {
           note: 'neither thank-you DOM nor order-history page revealed a parseable order id',
         });
+      }
+    }
+
+    // Sanity-check: the captured orderId's order-details page must
+    // contain a link to our deal's ASIN. Defends against the cross-deal
+    // contamination bug (see dealAsin docstring above). On mismatch we
+    // null the orderId rather than report a misattributed value — BG's
+    // dashboard then shows the row as "no orderId" instead of pointing
+    // at someone else's order. Skipped silently when ASIN couldn't be
+    // parsed (non-PDP buy pathway) or when the order-details fetch
+    // itself fails (transient HTTP — don't punish good captures).
+    if (orderId && dealAsin) {
+      const trust = await verifyOrderContainsAsin(page, orderId, dealAsin);
+      if (trust.trusted) {
+        step('step.buy.orderid.verified', {
+          orderId,
+          asin: dealAsin,
+          reason: trust.reason,
+        });
+      } else {
+        warn('step.buy.orderid.untrusted', {
+          orderId,
+          asin: dealAsin,
+          reason: trust.reason,
+        });
+        orderId = null;
       }
     }
 
@@ -1782,8 +1817,15 @@ export async function waitForConfirmationOrPending(
     const state = await page
       .evaluate((bannerSel: string) => {
         const url = location.href;
+        // Accept only post-Place-Order URLs as "confirmation". The
+        // previously-included `/gp/buy/spc/handlers/display` clause was
+        // a foot-gun: that's the SPC review URL itself, BEFORE Place
+        // Order. If Amazon ever stalled the click without navigating
+        // away, the regex would still say "confirmed" and the orderId
+        // reader would hit a stale DOM. Drop it; require a real
+        // post-place URL.
         if (
-          /thankyou|orderconfirm|order-confirmation|\/gp\/buy\/spc\/handlers\/display|\/gp\/css\/order-details/i.test(
+          /thankyou|orderconfirm|order-confirmation|\/gp\/css\/order-details|\/gp\/your-account\/order-details/i.test(
             url,
           )
         ) {
@@ -2223,6 +2265,57 @@ async function readLatestOrderIdFromDom(page: Page): Promise<string | null> {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   return /^\d{3}-\d{7}-\d{7}$/.test(trimmed) ? trimmed : null;
+}
+
+/**
+ * Confirm `orderId`'s order-details page actually contains a link to
+ * `asin`. Defense against cross-deal contamination where the captured
+ * orderId belongs to a DIFFERENT order than the one we just attempted
+ * (observed 2026-05-07: rapid-fire buys on the same Amazon account
+ * stamped 6 BG purchases for 5 different deals with one shared orderId
+ * pointing at an unrelated MacBook order).
+ *
+ * Returns { trusted: true } when ANY of:
+ *   - the order-details fetch fails (transient HTTP — fall back to trust)
+ *   - the response doesn't look like an order page (Amazon may have
+ *     redirected to login/captcha — don't penalize the capture)
+ *   - the ASIN appears in a /dp/<asin> or /gp/product/<asin> href
+ *
+ * Returns { trusted: false } only when we got a real order page but the
+ * ASIN is absent. Caller nulls the orderId on the buy report.
+ */
+async function verifyOrderContainsAsin(
+  page: Page,
+  orderId: string,
+  asin: string,
+): Promise<{ trusted: boolean; reason: string }> {
+  const url = `https://www.amazon.com/gp/your-account/order-details?orderID=${encodeURIComponent(
+    orderId,
+  )}`;
+  let html: string;
+  try {
+    const res = await page.context().request.get(url, {
+      headers: HTTP_BROWSERY_HEADERS,
+      timeout: 10_000,
+    });
+    if (!res.ok()) {
+      return { trusted: true, reason: `fetch HTTP ${res.status()} — skipped` };
+    }
+    html = await res.text();
+  } catch (err) {
+    return { trusted: true, reason: `fetch threw — skipped: ${String(err).slice(0, 80)}` };
+  }
+  if (!html.includes(orderId)) {
+    return { trusted: true, reason: 'order-details page did not echo orderId — skipped' };
+  }
+  const hrefRe = new RegExp(`/(?:dp|gp/product)/${asin}\\b`, 'i');
+  if (hrefRe.test(html)) {
+    return { trusted: true, reason: 'asin matched in order-details href' };
+  }
+  return {
+    trusted: false,
+    reason: `asin ${asin} not in order ${orderId} (cross-deal contamination)`,
+  };
 }
 
 /**
