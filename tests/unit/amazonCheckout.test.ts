@@ -349,7 +349,7 @@ describe('computeCashbackRadioPlans (MacBook /spc fixture)', () => {
     expect(plans).toEqual([]);
   });
 
-  it('skips address/payment radio groups', () => {
+  it('skips address/payment radio groups (legacy MacBook fixture)', () => {
     const doc = docOf(fixture('spc/macbook-B0FWD726XF-6pct.html'));
     const plans = computeCashbackRadioPlans(doc, 6);
     // None of the plans should target payment/address radios — their
@@ -360,6 +360,68 @@ describe('computeCashbackRadioPlans (MacBook /spc fixture)', () => {
       ),
     );
     expect(addrOrPay).toEqual([]);
+  });
+});
+
+describe('computeCashbackRadioPlans (Chewbacca SPC fixture, 2026-05-10)', () => {
+  // Live capture from Amazon's new "Chewbacca" checkout pipeline. Visual
+  // selection looks like a card/box but underneath the inputs are still
+  // <input type="radio">. Pinned by this fixture so a future Amazon
+  // markup change that breaks `pickBestCashbackDelivery` is caught
+  // before it ships.
+  //
+  // Two delivery groups, each with 3 options. Both default to `rush`
+  // (0%) and offer `second-nominated-day` (Amazon Day, 6% back) as the
+  // best alternative. Picker should plan a click on the 6% option for
+  // BOTH groups.
+  const GROUP_A =
+    'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-3981603-3254601:4cdbd52e-1181-4574-b002-4a511dc0c65e';
+  const GROUP_B =
+    'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-3981603-3254601:af404a4a-a0c4-4c19-8b3c-b5b7746c4e35';
+
+  it('plans a click on the 6% Amazon Day radio in BOTH delivery groups', () => {
+    const doc = docOf(fixture('spc/chewbacca-ipad-2026-05-10-6pct.html'));
+    const plans = computeCashbackRadioPlans(doc, 6);
+
+    const planA = plans.find((p) => p.name === GROUP_A);
+    expect(planA).toBeDefined();
+    expect(planA!.pickedPct).toBe(6);
+    expect(planA!.value).toBe('second-nominated-day');
+    expect(planA!.label).toMatch(/6\s*%\s*back/i);
+
+    const planB = plans.find((p) => p.name === GROUP_B);
+    expect(planB).toBeDefined();
+    expect(planB!.pickedPct).toBe(6);
+    expect(planB!.value).toBe('second-nominated-day');
+    expect(planB!.label).toMatch(/6\s*%\s*back/i);
+  });
+
+  it('returns exactly 2 plans (one per delivery-option group)', () => {
+    const doc = docOf(fixture('spc/chewbacca-ipad-2026-05-10-6pct.html'));
+    const plans = computeCashbackRadioPlans(doc, 6);
+    expect(plans.length).toBe(2);
+  });
+
+  it('does NOT plan a click on payment-method radios (5% Prime Visa text in payment area)', () => {
+    // Negative control: the 5%-back payment-method blurb in the
+    // selected-payment-method-art-description-text block must not
+    // mislead the picker into thinking a delivery group has 5%.
+    const doc = docOf(fixture('spc/chewbacca-ipad-2026-05-10-6pct.html'));
+    const plans = computeCashbackRadioPlans(doc, 6);
+    const fivePctPlans = plans.filter((p) => p.pickedPct === 5);
+    expect(fivePctPlans).toEqual([]);
+  });
+
+  it('does NOT plan a click on delivery-slot sub-radios (timeslot dropdowns)', () => {
+    // The Chewbacca layout adds nested `slot-...` radio groups under
+    // each delivery option for picking specific timeslots. They have
+    // 0% labels (just times like "Tomorrow 4 AM - 8 AM FREE") and
+    // should never be picked even when min=0 hypothetically — but at
+    // min=6 they're guaranteed-skipped because none have "% back".
+    const doc = docOf(fixture('spc/chewbacca-ipad-2026-05-10-6pct.html'));
+    const plans = computeCashbackRadioPlans(doc, 6);
+    const slotPlans = plans.filter((p) => p.name.startsWith('slot-'));
+    expect(slotPlans).toEqual([]);
   });
 });
 
@@ -941,6 +1003,62 @@ describe('readQuantityFromOrderDetailsHtml', () => {
         '<div data-quantity="42">no qty label here</div>',
       ),
     ).toBeNull();
+  });
+
+  describe('Strategy 1: od-item-view-qty image-badge (Amazon\'s real markup)', () => {
+    // Verified against a real order-details capture (114-2574765-0161804,
+    // iPad 128GB Pink, qty=2 — the row that exposed the regex mismatch).
+    // Amazon overlays a small qty badge on each line-item's product
+    // image; the data-component="quantity" div seen elsewhere on the
+    // page is empty.
+    it('extracts qty from the real od-item-view-qty image-badge structure', () => {
+      const html = `<html><body>
+        <div data-component="purchasedItems">
+          <div data-component="itemImage">
+            <a href="/dp/B0DZ75TN5F"><img alt="Apple iPad 11-inch" src="..."/></a>
+            <div class="od-item-view-qty"><span>2</span></div>
+          </div>
+        </div>
+      </body></html>`;
+      expect(readQuantityFromOrderDetailsHtml(html)).toBe(2);
+    });
+
+    it('handles whitespace and extra classes on the qty div', () => {
+      const html = `<div class="extra-class od-item-view-qty wrapper">
+        <span class="a-size-mini">  3  </span>
+      </div>`;
+      expect(readQuantityFromOrderDetailsHtml(html)).toBe(3);
+    });
+
+    it('handles single-quoted class attribute', () => {
+      const html = `<div class='od-item-view-qty'><span>4</span></div>`;
+      expect(readQuantityFromOrderDetailsHtml(html)).toBe(4);
+    });
+
+    it('SUMS multiple od-item-view-qty badges for multi-line-item orders', () => {
+      const html = `<html><body>
+        <div class="od-item-view-qty"><span>2</span></div>
+        <div class="od-item-view-qty"><span>1</span></div>
+        <div class="od-item-view-qty"><span>5</span></div>
+      </body></html>`;
+      expect(readQuantityFromOrderDetailsHtml(html)).toBe(8);
+    });
+
+    it('prefers Strategy 1 (badge) over Strategy 2 (label) when both present', () => {
+      // Defensive: if Amazon ever renders BOTH, the badge is the
+      // authoritative source — don't double-count.
+      const html = `<html><body>
+        <div class="od-item-view-qty"><span>2</span></div>
+        <span>Quantity: 99</span>
+      </body></html>`;
+      expect(readQuantityFromOrderDetailsHtml(html)).toBe(2);
+    });
+
+    it('does NOT match a class string that merely contains the word "qty"', () => {
+      // od-something-qty (different class) shouldn't match.
+      const html = `<div class="od-other-qty-related"><span>9</span></div>`;
+      expect(readQuantityFromOrderDetailsHtml(html)).toBeNull();
+    });
   });
 
   it('reproduces the user-reported case (iPad order, qty=2)', () => {

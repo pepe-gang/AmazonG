@@ -18,7 +18,7 @@ import {
   DEFAULT_HIDDEN_COLUMNS,
   DEFAULT_VISIBLE_STATUS_GROUPS,
   resolveColumnOrder,
-  STATUS_GROUP,
+  effectiveStatusGroup,
   STATUS_GROUP_LABEL,
   type JobColumnId,
   type SortDir,
@@ -182,7 +182,7 @@ export function JobsTable({
         const hay = `${a.dealTitle ?? ''} ${a.amazonEmail} ${a.dealId ?? ''} ${a.dealKey ?? ''} ${a.orderId ?? ''}`.toLowerCase();
         if (!hay.includes(q)) continue;
       }
-      c[STATUS_GROUP[a.status]] += 1;
+      c[effectiveStatusGroup(a)] += 1;
     }
     return c;
   }, [attempts, accountFilter, search]);
@@ -191,7 +191,7 @@ export function JobsTable({
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = attempts.filter((a) => {
-      if (!visibleStatusGroups.has(STATUS_GROUP[a.status])) return false;
+      if (!visibleStatusGroups.has(effectiveStatusGroup(a))) return false;
       if (accountFilter.size > 0 && !accountFilter.has(a.amazonEmail)) return false;
       if (q.length > 0) {
         const hay = `${a.dealTitle ?? ''} ${a.amazonEmail} ${a.dealId ?? ''} ${a.dealKey ?? ''} ${a.orderId ?? ''}`.toLowerCase();
@@ -350,16 +350,33 @@ export function JobsTable({
   );
   const selectedVerifiable = selectedAttempts.filter((a) => !!a.orderId);
 
-  const runBulkVerify = async () => {
-    if (selectedVerifiable.length === 0) return;
+  // Pending-bucket rows that have an orderId — eligible for bulk
+  // re-verify. Includes BOTH:
+  //   - status verified|completed but no trackingIds (tracking-gate
+  //     demotions — most likely to contain Amazon-cancelled orders
+  //     that local state didn't catch up with)
+  //   - status awaiting_verification (pre-verify buys whose verify
+  //     pass never ran or failed transiently — re-running fixes them)
+  // Rows without orderId are excluded since verifyOrder can't run.
+  const pendingTrackingVerifiable = useMemo(
+    () =>
+      attempts.filter((a) => {
+        if (!a.orderId) return false;
+        return effectiveStatusGroup(a) === 'pending';
+      }),
+    [attempts],
+  );
+
+  const runVerifyLoop = async (rows: typeof selectedVerifiable) => {
+    if (rows.length === 0) return;
     setBulkBusy('verify');
-    setBulkProgress({ done: 0, total: selectedVerifiable.length });
+    setBulkProgress({ done: 0, total: rows.length });
     let active = 0, cancelled = 0, failed = 0;
     // Serialize — each verify opens a Chromium session for that profile;
     // running them in parallel would hit ProcessSingleton locks when
     // multiple selected rows share an Amazon account.
-    for (let i = 0; i < selectedVerifiable.length; i++) {
-      const a = selectedVerifiable[i]!;
+    for (let i = 0; i < rows.length; i++) {
+      const a = rows[i]!;
       try {
         const r = await window.autog.jobsVerifyOrder(a.attemptId);
         if (r.kind === 'active') active++;
@@ -368,7 +385,7 @@ export function JobsTable({
       } catch {
         failed++;
       }
-      setBulkProgress({ done: i + 1, total: selectedVerifiable.length });
+      setBulkProgress({ done: i + 1, total: rows.length });
     }
     setBulkBusy(null);
     setBulkProgress(null);
@@ -377,6 +394,10 @@ export function JobsTable({
     );
     setTimeout(() => setOrderToast(null), 6000);
   };
+
+  const runBulkVerify = () => runVerifyLoop(selectedVerifiable);
+  const runReverifyPendingTracking = () =>
+    runVerifyLoop(pendingTrackingVerifiable);
 
   // Fetch-tracking bulk action. Same eligibility as verify (row needs an
   // orderId), but skips rows that already have every tracking we've seen
@@ -493,6 +514,24 @@ export function JobsTable({
       <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-white/[0.04]">
         <h2 className="text-base font-medium tracking-tight">Amazon Purchases</h2>
         <div className="flex items-center gap-3">
+          {pendingTrackingVerifiable.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void runReverifyPendingTracking()}
+              disabled={bulkBusy !== null}
+              title={
+                `Re-check Amazon for ${pendingTrackingVerifiable.length} ` +
+                `row${pendingTrackingVerifiable.length === 1 ? '' : 's'} ` +
+                `currently in Pending due to no tracking. Active orders ` +
+                `stay Pending; orders Amazon cancelled flip to Cancelled.`
+              }
+            >
+              {bulkBusy === 'verify' && bulkProgress
+                ? `Re-verifying ${bulkProgress.done}/${bulkProgress.total}…`
+                : `Re-verify Pending (${pendingTrackingVerifiable.length})`}
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
@@ -1297,7 +1336,7 @@ function JobsCell({
     case 'status':
       return (
         <td className="cell-status">
-          <StatusBadge status={a.status} />
+          <StatusBadge attempt={a} />
           {a.error && (
             <div
               className={

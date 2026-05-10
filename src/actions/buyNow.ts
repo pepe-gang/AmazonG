@@ -15,6 +15,7 @@ import { clearCart, type ClearCartResult } from './clearCart.js';
 import { addFillerViaHttp, waitForDeliverySettle } from './buyWithFillers.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import { HTTP_BROWSERY_HEADERS, SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHttp.js';
+import { resolvePlacedQuantity } from '../shared/quantityResolver.js';
 
 type BuyOptions = {
   dryRun: boolean;
@@ -557,6 +558,24 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       finalPriceText: confirmation.finalPriceText,
     });
 
+    // Resolve final qty via the shared resolver. In single-buy mode we
+    // don't have a separate /spc-DOM read — `placedQuantity` here is
+    // the PDP `#quantity` dropdown intent (= cart-add target). The
+    // resolver's third defense (warn on missing badge for qty>1) gives
+    // us the same Amazon-markup-change observability as buyWithFillers.
+    const qtyResolution = resolvePlacedQuantity({
+      fromConfirmationBadge: confirmation.quantity,
+      fromSpcDom: null,
+      fromCartAddTarget: placedQuantity,
+    });
+    if (qtyResolution.warn === 'badge_missing_on_multi') {
+      warn('step.buy.qty.badge_missing_on_multi', {
+        targetQuantity: placedQuantity,
+        note:
+          'confirmation badge absent on qty>1 — Amazon may have changed markup; ' +
+          'using PDP-dropdown intent instead',
+      });
+    }
     return {
       ok: true,
       dryRun: false,
@@ -565,7 +584,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       finalPrice: confirmation.finalPrice,
       finalPriceText: confirmation.finalPriceText,
       cashbackPct,
-      quantity: confirmation.quantity ?? placedQuantity,
+      quantity: qtyResolution.quantity,
     };
   } catch (err) {
     return fail('confirm_parse', 'unexpected error in buyNow flow', String(err));
@@ -655,12 +674,22 @@ async function addToCartThenCheckout(
   // in-flight add. Same 8s cap buyWithFillers uses.
   await page.waitForLoadState('domcontentloaded', { timeout: 8_000 }).catch(() => undefined);
 
-  try {
-    // 'commit' = ~50ms vs ~300ms for DCL. Next op is a Playwright
-    // locator click which polls for visibility internally.
-    await page.goto(ATC_CART_URL, { waitUntil: 'commit', timeout: 30_000 });
-  } catch (err) {
-    return { ok: false, reason: 'failed to load cart page', detail: String(err) };
+  // 'commit' = ~50ms vs ~300ms for DCL. Next op is a Playwright
+  // locator click which polls for visibility internally. Goto error
+  // tolerated — Amazon's Chewbacca pipeline can ERR_ABORT this nav by
+  // redirecting before commit fires. Verify by final URL instead.
+  await page
+    .goto(ATC_CART_URL, { waitUntil: 'commit', timeout: 30_000 })
+    .catch(() => undefined);
+  {
+    const landed = page.url();
+    if (!/^https?:\/\/(?:[a-z0-9-]+\.)?amazon\.com\//i.test(landed)) {
+      return {
+        ok: false,
+        reason: 'failed to load cart page',
+        detail: `landed on ${landed || '(blank)'}`,
+      };
+    }
   }
 
   let clicked = false;
@@ -1360,7 +1389,9 @@ export async function ensureAddress(
   page: Page,
   allowedPrefixes: string[],
   emit: { step: StepEmitter; warn: StepEmitter },
+  opts: { allowAmazon500Recovery?: boolean } = {},
 ): Promise<AddrResult> {
+  const allowRecovery = opts.allowAmazon500Recovery ?? true;
   const matcher = new RegExp('\\b(' + allowedPrefixes.join('|') + ')\\s+[A-Za-z0-9]');
 
   // Fast path: if the current /spc address's house number already matches
@@ -1474,10 +1505,43 @@ export async function ensureAddress(
   try {
     await page.waitForURL(/\/gp\/buy\/spc|\/checkout\/p\/[^/]+\/spc/i, { timeout: 20_000 });
   } catch {
+    const stuckUrl = page.url();
+    // Amazon's transient HTTP 500 page during checkout. Observed live
+    // 2026-05-10 on a real DL-05260034 buy: address-picker form.submit()
+    // landed the browser at /errors/500?ref=chk_web_sry instead of /spc.
+    // The checkout session is poisoned after the 500, but recreating it
+    // via /checkout/entry/cart?proceedToCheckout=1 typically gives us a
+    // fresh purchaseId — and the address change often committed
+    // server-side already (Amazon's address-set is independent of the
+    // /spc render that 500'd). Recurse once with recovery disabled so we
+    // can't infinite-loop if Amazon's checkout farm is genuinely down.
+    if (allowRecovery && /\/errors\//i.test(stuckUrl)) {
+      emit.warn('step.checkout.address.amazon500', {
+        stuck: stuckUrl,
+        action: 'recreating /spc via SPC_ENTRY_URL and retrying ensureAddress once',
+      });
+      try {
+        await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
+      } catch (err) {
+        return {
+          ok: false,
+          reason: 'amazon returned http 500 during address change; spc recreate failed',
+          detail: `stuck=${stuckUrl}; err=${String(err)}`,
+        };
+      }
+      if (!SPC_URL_MATCH.test(page.url())) {
+        return {
+          ok: false,
+          reason: 'amazon returned http 500 during address change; spc recreate did not land on /spc',
+          detail: `stuck=${stuckUrl}; landed=${page.url()}`,
+        };
+      }
+      return ensureAddress(page, allowedPrefixes, emit, { allowAmazon500Recovery: false });
+    }
     return {
       ok: false,
       reason: 'address submitted but did not redirect back to /spc',
-      detail: `stuck at ${page.url()}`,
+      detail: `stuck at ${stuckUrl}`,
     };
   }
   // Wait for /spc UI to re-render (Place Order button).
@@ -1817,19 +1881,79 @@ export async function waitForConfirmationOrPending(
     const state = await page
       .evaluate((bannerSel: string) => {
         const url = location.href;
-        // Accept only post-Place-Order URLs as "confirmation". The
-        // previously-included `/gp/buy/spc/handlers/display` clause was
-        // a foot-gun: that's the SPC review URL itself, BEFORE Place
-        // Order. If Amazon ever stalled the click without navigating
-        // away, the regex would still say "confirmed" and the orderId
-        // reader would hit a stale DOM. Drop it; require a real
-        // post-place URL.
+        // Accept only post-Place-Order URLs as "confirmation". Two
+        // foot-guns to avoid:
+        //   - `/gp/buy/spc/handlers/display` is the SPC review URL
+        //     BEFORE Place Order (removed in v0.13.34).
+        //   - `/gp/your-account/order-details` is the user's account
+        //     "View Order" page accessed from the flyout — NOT a
+        //     post-place URL (added by mistake in v0.13.34, removed
+        //     here). If a user manually clicks View Order on an old
+        //     order while a buy is in-flight, including this here
+        //     would let the regex say "confirmed" off an unrelated
+        //     order's page and the orderId reader would grab a stale
+        //     latestOrderId. Same root cause as the May-7 cross-deal
+        //     contamination incident.
+        // Confirmation detector — three layers in order:
+        //
+        //   1. URL substrings — broadened 2026-05-10 to also match
+        //      Chewbacca's post-Place-Order paths.
+        //        thankyou                      legacy /gp/buy/thankyou/...
+        //        orderconfirm[ation]           /spc/orderconfirmation/...
+        //        order-confirmation            hyphenated variant
+        //        /gp/css/order-details         post-buy view-order
+        //        /checkout/p/X/(thanks|        Chewbacca thank-you /
+        //          confirm[ation]|finished)    confirmation variants
+        //        /gp/buy/confirm/              older confirmation
+        //
+        //   2. document.title fallback — Amazon's confirmation page
+        //      starts the <title> with one of a few well-known phrases.
+        //      Anchored to .startsWith so chrome strings like
+        //      "Place your order — Amazon" can't false-positive.
+        //
+        //   3. Visible heading fallback — large h1/h2 on the page
+        //      saying "Thank you" / "Order placed". Only used when
+        //      neither URL nor title matched, since heading text can
+        //      drift between Amazon's redesigns. Anchored to short
+        //      text so it can't false-match recommendation copy.
+        //
+        // INC-2026-05-10: AmazonG saw a successful place-order but
+        // returned stage:'confirm_parse' because the new layout's
+        // URL didn't contain any pre-2026-05 substring → bot looped
+        // until the 60s deadline → no orderId capture, no verify.
         if (
-          /thankyou|orderconfirm|order-confirmation|\/gp\/css\/order-details|\/gp\/your-account\/order-details/i.test(
+          /thankyou|orderconfirm|order-confirmation|\/gp\/css\/order-details|\/checkout\/p\/[^/]+\/(?:thanks|thanksforyourpurchase|confirm|confirmation|finished)|\/gp\/buy\/confirm\//i.test(
             url,
           )
         ) {
           return { kind: 'confirmation' as const, url };
+        }
+        const title = (document.title || '').toLowerCase().trim();
+        if (
+          title.startsWith('order placed') ||
+          title.startsWith('thank you') ||
+          title.startsWith('your order has been placed') ||
+          title.startsWith('thanks for your order')
+        ) {
+          return { kind: 'confirmation' as const, url };
+        }
+        // Heading fallback — find a short, prominent h1/h2 saying
+        // "Thank you" or "Order placed". `innerText.length < 80`
+        // filters out long marketing copy that contains the phrase
+        // as a fragment.
+        const headings = Array.from(
+          document.querySelectorAll<HTMLElement>('h1, h2'),
+        );
+        for (const h of headings) {
+          const text = (h.innerText || '').replace(/\s+/g, ' ').trim();
+          if (text.length === 0 || text.length > 80) continue;
+          if (
+            /^(?:thank you|thanks)[!,.\s]/i.test(text) ||
+            /^order placed[!,.\s]?/i.test(text) ||
+            /^your order (?:has been placed|is confirmed)/i.test(text)
+          ) {
+            return { kind: 'confirmation' as const, url };
+          }
         }
         // Delivery-options-changed banner: Amazon re-rendered /spc, wiped
         // the radio we picked, surfaced a purchase-level error. Check
@@ -2015,6 +2139,28 @@ export async function waitForConfirmationOrPending(
 
     await page.waitForTimeout(500);
   }
+  // Diagnostic dump on timeout — if a future Amazon layout change
+  // slips past all three detectors, the next failure will at least
+  // record the URL + title + visible headings so the regex can be
+  // fixed surgically instead of by guessing. INC-2026-05-10
+  // motivated this: the bot lost the order id because the new
+  // confirmation URL didn't contain any pre-2026-05 substring and
+  // we had no captured evidence of what URL it actually landed on.
+  const diag = await page
+    .evaluate(() => ({
+      url: location.href,
+      title: document.title,
+      h1s: Array.from(document.querySelectorAll('h1'))
+        .map((h) => ((h as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim())
+        .filter((t) => t.length > 0 && t.length < 200)
+        .slice(0, 3),
+      h2s: Array.from(document.querySelectorAll('h2'))
+        .map((h) => ((h as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim())
+        .filter((t) => t.length > 0 && t.length < 200)
+        .slice(0, 3),
+    }))
+    .catch(() => ({ url: '', title: '', h1s: [], h2s: [] }));
+  step('step.buy.place.confirmation.timeout.diag', diag);
   return { ok: false, reason: 'confirmation URL never loaded' };
 }
 

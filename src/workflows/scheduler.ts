@@ -31,6 +31,7 @@
 
 import { logger } from '../shared/logger.js';
 import type { AmazonProfile, AutoGJob } from '../shared/types.js';
+import type { FillerPool } from '../shared/ipc.js';
 import type { DriverSession } from '../browser/driver.js';
 import { makeAttemptId } from '../shared/sanitize.js';
 import { AccountLock } from './accountLock.js';
@@ -60,7 +61,7 @@ type Tuple = {
     useFiller: boolean;
     effectiveMinCashbackPct: number;
     requireMinCashback: boolean;
-    wheyProteinFillerOnly: boolean;
+    fillerPool: FillerPool;
     surgicalCashbackRecovery: boolean;
   };
 };
@@ -112,11 +113,21 @@ export type JobContext = {
   fillerByEmail: Map<string, boolean>;
   effectiveMinByEmail: Map<string, number>;
   requireMinByEmail: Map<string, boolean>;
-  wheyProteinFillerOnly: boolean;
+  fillerPool: FillerPool;
   surgicalCashbackRecovery: boolean;
   // Optional: the verify/tracking job carries placedEmail at the
   // job level. For those phases the eligible list is already filtered
   // to one profile (or empty if the email isn't signed in).
+  /**
+   * When `eligible` is empty for a verify/fetch_tracking job, this
+   * tells the scheduler WHY so it can build a specific error string
+   * (and the BG dashboard can render distinct pills):
+   *   - 'not_signed_in' — profile not in the signed-in list
+   *   - 'disabled'      — signed in but `enabled === false`
+   *   - 'not_found'     — no matching profile at all
+   * Undefined when `eligible.length > 0`.
+   */
+  emptyReason?: 'not_signed_in' | 'disabled' | 'not_found';
 };
 
 export class StreamingScheduler {
@@ -151,7 +162,13 @@ export class StreamingScheduler {
     // its bundle finalizes (with whatever in-flight + already-completed
     // results are present).
     for (const t of this.readyQueue) {
-      this.collectResult(t, this.failedResult(t, 'worker stopping'));
+      this.collectResult(
+        t,
+        this.failedResult(
+          t,
+          'AmazonG worker stopped — job abandoned mid-flight (will retry on next claim)',
+        ),
+      );
     }
     this.readyQueue.length = 0;
 
@@ -263,10 +280,17 @@ export class StreamingScheduler {
         continue;
       }
       if (ctx.eligible.length === 0) {
-        const error =
-          job.phase === 'buy'
-            ? 'no enabled Amazon accounts available for this buy'
-            : `target account ${job.placedEmail ?? '(none)'} not signed in`;
+        let error: string;
+        if (job.phase === 'buy') {
+          error = 'no enabled Amazon accounts available for this buy';
+        } else if (ctx.emptyReason === 'disabled') {
+          // Signed in but account is disabled in AmazonG. Distinct
+          // from "not signed in" so BG's dashboard can render a
+          // separate "🚫 Disabled" pill.
+          error = `target account ${job.placedEmail ?? '(none)'} is disabled in AmazonG`;
+        } else {
+          error = `target account ${job.placedEmail ?? '(none)'} not signed in`;
+        }
         logger.warn(
           'scheduler.eligible.empty',
           { jobId: job.id, phase: job.phase, placedEmail: job.placedEmail },
@@ -382,7 +406,7 @@ export class StreamingScheduler {
             this.sd.deps.minCashbackPct,
           requireMinCashback:
             ctx.requireMinByEmail.get(account) ?? true,
-          wheyProteinFillerOnly: ctx.wheyProteinFillerOnly,
+          fillerPool: ctx.fillerPool,
           surgicalCashbackRecovery: ctx.surgicalCashbackRecovery,
         };
       }
@@ -561,7 +585,7 @@ export class StreamingScheduler {
           useFiller: tuple.buyCtx.useFiller,
           effectiveMinCashbackPct: tuple.buyCtx.effectiveMinCashbackPct,
           requireMinCashback: tuple.buyCtx.requireMinCashback,
-          wheyProteinFillerOnly: tuple.buyCtx.wheyProteinFillerOnly,
+          fillerPool: tuple.buyCtx.fillerPool,
           surgicalCashbackRecovery: tuple.buyCtx.surgicalCashbackRecovery,
           abortSignal: bundle.abortController.signal,
           abortSiblings: (reason) => bundle.abortController.abort(reason),

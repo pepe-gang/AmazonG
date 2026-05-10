@@ -166,6 +166,13 @@ export type SearchResultCandidate = {
    *  "unknown — exclude" when filtering for Amazon-sold). Equal to
    *  `AMAZON_US_MERCHANT_ID` for "Sold by Amazon" listings. */
   merchantId: string | null;
+  /** Card-rendered product title (h2 a span text). Null when the
+   *  search card is missing the standard title element (rare). Used
+   *  by per-pool title blocklists in the filler picker — e.g. the
+   *  'eero' pool filters out any candidate whose title contains
+   *  "echo" so an "amazon eero" search doesn't smuggle Echo speakers
+   *  into the cart. */
+  title: string | null;
 };
 
 /**
@@ -216,7 +223,52 @@ export function extractSearchResultCandidates(doc: Document): SearchResultCandid
       (form.querySelector('input[name="merchantId"]') as HTMLInputElement | null)
         ?.value ?? null;
 
-    out.push({ asin, offerListingId, csrf, price, isPrime, merchantId });
+    // Card title. Two layouts seen in the wild (verified 2026-05-10):
+    //   A. Most products: top-level `<h2><span>Full product name</span></h2>`
+    //      → easy: read h2 text.
+    //   B. Echo / Kindle / Fire products: `<h2><span>Amazon</span></h2>`
+    //      (brand chip) PLUS a SECOND h2 NESTED INSIDE the product
+    //      link with the real name, exposed via its `aria-label`:
+    //        <a><h2 aria-label="Echo Dot (newest model)…"><span>…</span></h2></a>
+    //      Reading the FIRST h2's text gives just "Amazon" — the
+    //      blocklist then misses the card and Echo speakers slip
+    //      into the cart.
+    //
+    // Strategy: prefer the link-nested `a h2` (aria-label first, then
+    // text). Fall back to the top-level h2 span when no link-nested
+    // h2 exists (Layout A). Concatenate the brand chip when the
+    // link-nested name doesn't start with it, so downstream regex
+    // patterns that match "Amazon Echo Dot" still hit (since the
+    // link-h2 alone returns "Echo Dot…").
+    const linkH2 = card.querySelector('a h2');
+    const linkH2Name =
+      (linkH2?.getAttribute('aria-label') ?? linkH2?.textContent ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    let title: string | null = null;
+    if (linkH2Name) {
+      // Look for a brand chip (a top-level h2 whose text doesn't already
+      // start the link-h2's name). Common pattern: top h2 == "Amazon",
+      // link h2 == "Echo Dot …" → combined: "Amazon Echo Dot …".
+      const topH2 = card.querySelector('h2');
+      const topText = (topH2?.textContent ?? '').replace(/\s+/g, ' ').trim();
+      const linkLower = linkH2Name.toLowerCase();
+      if (
+        topText &&
+        topText.length < 30 && // brand chips are short
+        !linkLower.startsWith(topText.toLowerCase())
+      ) {
+        title = `${topText} ${linkH2Name}`;
+      } else {
+        title = linkH2Name;
+      }
+    } else {
+      const titleEl = card.querySelector('h2 a span, h2 span');
+      title =
+        (titleEl?.textContent ?? '').replace(/\s+/g, ' ').trim() || null;
+    }
+
+    out.push({ asin, offerListingId, csrf, price, isPrime, merchantId, title });
   });
   return out;
 }

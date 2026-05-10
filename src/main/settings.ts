@@ -22,7 +22,7 @@ const DEFAULTS: Settings = {
   snapshotOnFailure: false,
   snapshotGroups: [],
   buyWithFillers: false,
-  wheyProteinFillerOnly: true,
+  fillerPool: 'whey',
   failedHiddenBeforeTs: null,
   hiddenAttemptIds: [],
   autoEnqueueEnabled: false,
@@ -47,16 +47,18 @@ function filePath(): string {
 }
 
 /** Pre-v0.13.19 settings.json shape — single + filler split into two
- *  fields. Used only by `loadSettings` for migration. */
-type LegacyParallelKnobs = {
+ *  fields. Pre-v0.13.36: wheyProteinFillerOnly was a boolean before
+ *  the multi-pool refactor. Used only by `loadSettings` for migration. */
+type LegacyKnobs = {
   maxConcurrentSingleBuys?: number;
   maxConcurrentFillerBuys?: number;
+  wheyProteinFillerOnly?: boolean;
 };
 
 export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await readFile(filePath(), 'utf8');
-    const parsed = JSON.parse(raw) as Partial<Settings> & LegacyParallelKnobs;
+    const parsed = JSON.parse(raw) as Partial<Settings> & LegacyKnobs;
 
     // v0.13.19 migration: the split single/filler concurrency knobs were
     // unified into one `maxConcurrentBuys` because the batch cart-add
@@ -76,6 +78,14 @@ export async function loadSettings(): Promise<Settings> {
           migrated.maxConcurrentBuys = Math.min(...candidates);
         }
       }
+    }
+
+    // v0.13.36 migration: wheyProteinFillerOnly (boolean) →
+    // fillerPool (enum). true → 'whey' (preserve previous behavior),
+    // false → 'general'. The new field is the source of truth going
+    // forward.
+    if (migrated.fillerPool === undefined && parsed.wheyProteinFillerOnly !== undefined) {
+      migrated.fillerPool = parsed.wheyProteinFillerOnly ? 'whey' : 'general';
     }
 
     return { ...DEFAULTS, ...migrated };

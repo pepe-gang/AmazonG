@@ -68,10 +68,20 @@ export async function clearCart(
   );
 
   // 2. Click-loop fallback — original pre-experiment path.
-  try {
-    await page.goto(CART_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  } catch (err) {
-    throw new NavigationError(CART_URL, 'goto failed', err);
+  // Amazon's Chewbacca pipeline (live 2026-05-10+) sometimes redirects
+  // /gp/cart/view.html → /checkout/p/… so fast that even
+  // `waitUntil: 'commit'` throws ERR_ABORTED — the second navigation
+  // starts before the first commits. Treat any final URL on
+  // amazon.com as a success and let the downstream code decide via
+  // selector probes. Only re-throw when the page actually didn't
+  // navigate (still on about:blank or off-domain).
+  await page.goto(CART_URL, { waitUntil: 'commit', timeout: 30_000 }).catch(() => undefined);
+  const landedUrl = page.url();
+  if (!/^https?:\/\/(?:[a-z0-9-]+\.)?amazon\.com\//i.test(landedUrl)) {
+    throw new NavigationError(
+      CART_URL,
+      `goto failed; landed on ${landedUrl || '(blank)'}`,
+    );
   }
 
   const deadline = Date.now() + OVERALL_DEADLINE_MS;

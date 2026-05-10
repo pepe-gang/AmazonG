@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { computeProfit } from '@shared/profit';
 import type { AmazonProfile, JobAttempt } from '../../shared/types.js';
-import { STATUS_GROUP } from '../lib/jobsColumns.js';
+import { effectiveStatusGroup } from '../lib/jobsColumns.js';
 import { UsersIcon } from './icons.js';
 
 type SortKey = 'account' | 'today' | 'month' | 'lastMonth' | 'year' | 'all';
@@ -69,7 +69,7 @@ export function AccountStatsCard({
       const emailLower = p.email.toLowerCase();
       for (const a of attempts) {
         if (a.amazonEmail.toLowerCase() !== emailLower) continue;
-        if (STATUS_GROUP[a.status] !== 'success') continue;
+        if (effectiveStatusGroup(a) !== 'success') continue;
         const profit = computeProfit(a) ?? 0;
         const t = new Date(a.createdAt).getTime();
 

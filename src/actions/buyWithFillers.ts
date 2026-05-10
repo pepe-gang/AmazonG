@@ -25,6 +25,8 @@ import {
   verifyProductDetailed,
 } from '../parsers/productConstraints.js';
 import { DEFAULT_MISSING_CASHBACK_PCT } from '../shared/cashbackGate.js';
+import { resolvePlacedQuantity } from '../shared/quantityResolver.js';
+import type { FillerPool } from '../shared/ipc.js';
 import {
   BYG_BUTTON_SELECTOR,
   BYG_HEADER_SELECTOR,
@@ -85,12 +87,13 @@ type BuyWithFillersOptions = {
    */
   dryRun: boolean;
   /**
-   * When true, the filler picker uses a whey-protein search-term pool
-   * instead of the general impulse mix and randomises the count to
-   * 6–8 (vs the fixed 8 for the general pool). Prime + $20–$100
-   * rules unchanged.
+   * Filler-search-term pool. 'whey' / 'eero' / 'amazon-basics' use
+   * narrow brand-specific term lists; 'general' (default) uses the
+   * broad impulse mix. Whey randomises the count to 6–8 (vs the fixed
+   * 8 for general). Prime + $20–$100 rules unchanged across pools.
+   * Undefined / 'general' falls through to the legacy term generator.
    */
-  wheyProteinFillerOnly?: boolean;
+  fillerPool?: FillerPool;
   /**
    * Set of ASINs the picker must NOT add to cart. Pre-seeded into the
    * dedup state, then mutated by the picker as it goes — callers
@@ -244,6 +247,15 @@ export type BuyWithFillersResult =
        * we make sure nothing slips through and ships.
        */
       fillerOrderIds: string[];
+      /**
+       * Full cart ASIN list at Place Order time (target + all
+       * committed fillers). Persisted on the JobAttempt so the verify
+       * phase can re-scan order history with the full list and catch
+       * filler-only orders that hadn't propagated yet during the
+       * buy-time scan. INC-2026-05-10 motivation in JobAttempt's
+       * `cartAsins` doc.
+       */
+      cartAsins: string[];
       finalPrice: number | null;
       finalPriceText: string | null;
     })
@@ -305,6 +317,86 @@ const WHEY_PROTEIN_SEARCH_TERMS: readonly string[] = [
   'gnc whey', 'gold standard whey', 'pure protein whey',
 ];
 
+// Eero (Amazon-owned mesh-WiFi brand). All "mesh"-anchored so the
+// pool surfaces eero routers/extenders/accessories and stays out of
+// Echo / Fire / Kindle bins that Amazon's loose search would
+// otherwise return for bare "eero" queries. Expanded 2026-05-10 to
+// cover the eero 7 line (and other generations) — the eero 6
+// search alone returns ~3 unique items, leaving the filler target
+// short across consecutive buys as attemptedAsins accumulates.
+const EERO_SEARCH_TERMS: readonly string[] = [
+  'amazon eero mesh',
+  'amazon eero mesh charger',
+  'amazon eero 6 mesh',
+  'amazon eero 6+ mesh',
+  'amazon eero 7 mesh',
+  'amazon eero pro mesh',
+  'amazon eero max mesh',
+];
+
+// Amazon Basics (house-brand commodities). Single broad term per user
+// request. Expand here for more variety if needed.
+const AMAZON_BASICS_SEARCH_TERMS: readonly string[] = [
+  'amazon basics',
+];
+
+/** Resolve the search-term pool for a given fillerPool setting. */
+function termsForPool(pool: FillerPool | undefined): readonly string[] | null {
+  if (pool === 'whey') return WHEY_PROTEIN_SEARCH_TERMS;
+  if (pool === 'eero') return EERO_SEARCH_TERMS;
+  if (pool === 'amazon-basics') return AMAZON_BASICS_SEARCH_TERMS;
+  // 'general' / undefined → null tells caller to fall through to the
+  // existing broad-mix term generator (no pool override).
+  return null;
+}
+
+/**
+ * Global title blocklist — applies regardless of fillerPool. These
+ * specific products always cause user pain (returns hassle, attention
+ * from Amazon's anti-bot heuristics, etc.) and should never end up in
+ * the cart as fillers. Add new entries here; the per-pool list below
+ * is for narrower per-context exclusions.
+ */
+const GLOBAL_FILLER_TITLE_BLOCKLIST: readonly RegExp[] = [
+  // 2026-05-10: All Amazon Echo products kept showing up as fillers
+  // (Pop, Dot, Show, Studio, Spot, Hub, Auto, etc.). Anchored to
+  // "amazon echo" so we catch every Echo line/generation/color
+  // without blocking unrelated "echo" products (e.g., echo
+  // cancellation microphones). Allows the items through ONLY when
+  // they are the explicit buy target — see addFillerItems where
+  // targetAsin is pre-seeded into the seen set BEFORE the blocklist
+  // runs, so a user buying an Echo deal can still place the order.
+  /\bamazon\s+echo\b/i,
+];
+
+/**
+ * Per-pool title blocklist. Returns true when a candidate's title
+ * disqualifies it from the active pool. Amazon's search is loose:
+ * "amazon eero" surfaces Echo speakers, Fire TVs, and other
+ * Amazon-brand items; we filter those out so the cart only contains
+ * actual Eero gear.
+ *
+ * Always-block rules live in GLOBAL_FILLER_TITLE_BLOCKLIST and are
+ * checked first.
+ */
+function isBlockedByPool(
+  pool: FillerPool | undefined,
+  title: string | null,
+): boolean {
+  if (!title) return false;
+  // Global block first — applies regardless of pool.
+  for (const re of GLOBAL_FILLER_TITLE_BLOCKLIST) {
+    if (re.test(title)) return true;
+  }
+  if (pool === 'eero') {
+    // Echo, Fire TV, Kindle, and Ring share Amazon-brand search hits
+    // with eero. None of them are eero-family hardware so they don't
+    // belong in the cart for an eero filler run.
+    return /\b(echo|fire\s*tv|kindle|ring|alexa)\b/i.test(title);
+  }
+  return false;
+}
+
 // When wheyProteinFillerOnly is on, the count is randomised in this
 // inclusive range — adds a touch of variation per buy on top of the
 // shuffled term order so two consecutive whey-mode buys aren't
@@ -312,6 +404,14 @@ const WHEY_PROTEIN_SEARCH_TERMS: readonly string[] = [
 // general FILLER_COUNT drop from 12 → 8.
 const WHEY_FILLER_MIN_COUNT = 6;
 const WHEY_FILLER_MAX_COUNT = 8;
+
+// Narrow-pool filler targets. The eero search now spans the 6 / 6+ /
+// 7 / Pro / Max lines (7 terms) so the pool is wide enough to land 6
+// fillers reliably even after a retry has burned some ASINs into
+// attemptedAsins. Per-buy randomness comes from the global term
+// shuffle. Target 6 (user request 2026-05-10) — was 3 when the pool
+// was just ~4 unique items.
+const EERO_FILLER_COUNT = 6;
 
 /**
  * Wrap the shared logger so every call auto-merges a context bundle
@@ -582,17 +682,25 @@ export async function buyWithFillers(
 
     // Cart-verify nav — only needed in fallback path; the HTTP path's
     // ASIN-in-response check already proved the target landed.
-    try {
-      await page.goto(CART_URL, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30_000,
-      });
-    } catch (err) {
+    //
+    // Amazon's Chewbacca checkout pipeline (live 2026-05-10+) does
+    // aggressive same-domain redirects from /gp/cart/view.html →
+    // /checkout/p/… that can fire fast enough to ERR_ABORT even a
+    // `waitUntil: 'commit'` goto. Tolerate that by catching the goto
+    // error and checking the final URL — anywhere on amazon.com is
+    // good enough for the downstream `hasTargetInCart` selector probe
+    // to do its work. Only fail when the page didn't navigate at all
+    // (still on about:blank or hopped off-domain entirely).
+    await page
+      .goto(CART_URL, { waitUntil: 'commit', timeout: 30_000 })
+      .catch(() => undefined);
+    const landed = page.url();
+    if (!/^https?:\/\/(?:[a-z0-9-]+\.)?amazon\.com\//i.test(landed)) {
       return {
         ok: false,
         stage: 'cart_verify',
         reason: 'failed to load cart page',
-        detail: String(err),
+        detail: `landed on ${landed || '(blank)'}`,
       };
     }
     const inCart = await hasTargetInCart(page, targetAsin);
@@ -615,19 +723,27 @@ export async function buyWithFillers(
   //    search is worse than a slightly smaller cover.
   //
   // Pool + count picked here so log lines downstream can attribute
-  // results to the active mode. Whey-only randomises 10–12 to add a
-  // bit of cart-shape variation across runs; general pool stays at the
-  // historical fixed 12.
-  const useWheyPool = opts.wheyProteinFillerOnly === true;
-  const fillerTerms = useWheyPool ? WHEY_PROTEIN_SEARCH_TERMS : FILLER_SEARCH_TERMS;
+  // results to the active mode. Whey-only randomises 6–8 to add a bit
+  // of cart-shape variation across runs; eero uses a smaller target
+  // (~3) because the search pool only yields ~4 unique items —
+  // FILLER_COUNT=8 would guarantee 0-filler buys after a retry
+  // exhausts attemptedAsins (INC-2026-05-10). amazon-basics + general
+  // stay at the historical fixed count since their search pools are
+  // wide enough.
+  const poolOverride = termsForPool(opts.fillerPool);
+  const fillerTerms = poolOverride ?? FILLER_SEARCH_TERMS;
+  const useWheyPool = opts.fillerPool === 'whey';
+  const useEeroPool = opts.fillerPool === 'eero';
   const fillerTargetCount = useWheyPool
     ? WHEY_FILLER_MIN_COUNT +
       Math.floor(Math.random() * (WHEY_FILLER_MAX_COUNT - WHEY_FILLER_MIN_COUNT + 1))
+    : useEeroPool
+    ? EERO_FILLER_COUNT
     : FILLER_COUNT;
   logger.info(
     'step.fillerBuy.fillers.config',
     {
-      pool: useWheyPool ? 'whey' : 'general',
+      pool: opts.fillerPool ?? 'general',
       targetCount: fillerTargetCount,
       preExcludedCount: opts.attemptedAsins?.size ?? 0,
     },
@@ -637,6 +753,7 @@ export async function buyWithFillers(
     terms: fillerTerms,
     targetCount: fillerTargetCount,
     attemptedAsins: opts.attemptedAsins,
+    pool: opts.fillerPool,
   }, logCtx);
   const fillersAdded = fillersResult.added;
   const fillerAsins = fillersResult.asins;
@@ -715,15 +832,21 @@ export async function buyWithFillers(
       { landedUrl: page.url(), note: 'entry-cart shortcut did not redirect to /spc; using click-based flow' },
       cid,
     );
-    try {
-      await page.goto(CART_URL, { waitUntil: 'commit', timeout: 30_000 });
-    } catch (err) {
-      return {
-        ok: false,
-        stage: 'proceed_checkout',
-        reason: 'failed to reload cart before checkout (fallback path)',
-        detail: String(err),
-      };
+    // Same redirect-tolerance rationale as cart_verify above —
+    // catch the goto error and verify by URL instead of throwing.
+    await page
+      .goto(CART_URL, { waitUntil: 'commit', timeout: 30_000 })
+      .catch(() => undefined);
+    {
+      const landed = page.url();
+      if (!/^https?:\/\/(?:[a-z0-9-]+\.)?amazon\.com\//i.test(landed)) {
+        return {
+          ok: false,
+          stage: 'proceed_checkout',
+          reason: 'failed to reload cart before checkout (fallback path)',
+          detail: `landed on ${landed || '(blank)'}`,
+        };
+      }
     }
     const clicked = await clickProceedToCheckout(page);
     if (!clicked) {
@@ -1340,6 +1463,39 @@ export async function buyWithFillers(
       },
       cid,
     );
+  } else {
+    // Coverage telemetry — INC-2026-05-10 (purchaseId
+    // 106-0543366-6065024) had partial coverage (target order matched,
+    // filler-only order 114-4485329-7352228 missed) which then meant
+    // the filler-only order shipped untouched. Log so future cases are
+    // visible in the dashboard before they ship.
+    const matchedAsinSet = new Set<string>();
+    for (const m of orderMatches) for (const a of m.matchedAsins) matchedAsinSet.add(a);
+    const coveredCount = matchedAsinSet.size;
+    if (coveredCount < cartAsins.length) {
+      logger.warn(
+        'step.fillerBuy.placed.orderid.partial',
+        {
+          targetAsin,
+          cartAsinsCount: cartAsins.length,
+          coveredCount,
+          missingAsins: cartAsins.filter((a) => !matchedAsinSet.has(a)),
+          orderIdsFound: orderMatches.map((m) => m.orderId),
+          note: 'verify-side rescan should fill the gap',
+        },
+        cid,
+      );
+    } else {
+      logger.info(
+        'step.fillerBuy.placed.orderid.full',
+        {
+          targetAsin,
+          cartAsinsCount: cartAsins.length,
+          orderIdsFound: orderMatches.map((m) => m.orderId),
+        },
+        cid,
+      );
+    }
   }
 
   // 16. Immediately cancel any filler-only orders (best-effort sweep).
@@ -1422,26 +1578,19 @@ export async function buyWithFillers(
     await page.waitForTimeout(3_000);
   }
 
-  // Pick the most authoritative qty source for the placed order.
-  // Priority:
-  //   1. parsed.quantity     — Amazon's post-place "checkout-quantity-badge"
-  //                            on the confirmation page; renders only when
-  //                            qty > 1, hidden when qty = 1.
-  //   2. placedQuantity      — pre-place /spc-DOM read; fragile across
-  //                            unfamiliar layouts but useful when Amazon
-  //                            DOESN'T render the confirmation badge.
-  //   3. targetQuantity      — what we explicitly POSTed to cart-add. The
-  //                            cart-add either landed at this qty or
-  //                            failed loudly; safe last-resort fallback.
-  // Fixes the "filler buys all reporting purchasedCount=1" bug — /spc
-  // alone returned 1 for orders that Amazon actually placed at qty=2.
-  const finalPlacedQuantity =
-    parsed.quantity ?? placedQuantity ?? targetQuantity;
-  if (
-    parsed.quantity != null &&
-    placedQuantity != null &&
-    parsed.quantity !== placedQuantity
-  ) {
+  // Resolve the qty value to record on this purchase. See
+  // shared/quantityResolver.ts for the full priority + defense logic.
+  // Critical defense: when the badge is absent on a qty>1 buy, we
+  // refuse to fall back to /spc (the known under-counting source) and
+  // use the cart-add target instead. Any future Amazon markup change
+  // that hides the badge surfaces immediately as a warn log.
+  const qtyResolution = resolvePlacedQuantity({
+    fromConfirmationBadge: parsed.quantity,
+    fromSpcDom: placedQuantity,
+    fromCartAddTarget: targetQuantity,
+  });
+  const finalPlacedQuantity = qtyResolution.quantity;
+  if (qtyResolution.warn === 'spc_disagrees') {
     logger.warn(
       'step.fillerBuy.qty.mismatch',
       {
@@ -1449,6 +1598,18 @@ export async function buyWithFillers(
         fromSpc: placedQuantity,
         targetQuantity,
         note: 'using confirmation badge as authoritative',
+      },
+      cid,
+    );
+  } else if (qtyResolution.warn === 'badge_missing_on_multi') {
+    logger.warn(
+      'step.fillerBuy.qty.badge_missing_on_multi',
+      {
+        targetQuantity,
+        fromSpc: placedQuantity,
+        note:
+          'confirmation badge absent on qty>1 — Amazon may have changed markup; ' +
+          'trusting cart-add target instead of /spc DOM (which has known under-count bug)',
       },
       cid,
     );
@@ -1481,6 +1642,7 @@ export async function buyWithFillers(
     orderId,
     orderIds: orderMatches,
     fillerOrderIds,
+    cartAsins,
     finalPrice: parsed.finalPrice,
     finalPriceText: parsed.finalPriceText,
   };
@@ -1507,6 +1669,26 @@ export async function buyWithFillers(
  * specific ASIN, then grab the full match set. Prevents racing a
  * half-propagated order list where only one of several split orders
  * has landed yet.
+ *
+ * After the primary ASIN appears we POLL FOR FULL COVERAGE: Amazon's
+ * fanout often commits the target order ~1-3s before any filler-only
+ * orders propagate. Without this loop, we scan once after the target
+ * lands, miss the still-propagating filler-only orders, and report
+ * incomplete `fillerOrderIds` to BG — which means no `FillerCancelTask`
+ * is ever created for those orders, and they ship untouched.
+ *
+ * INC-2026-05-10 (purchaseId 106-0543366-6065024): Amazon cancelled the
+ * target on order 114-8746903-8263417, but a separate filler-only order
+ * 114-4485329-7352228 was missing from buy-time `fillerOrderIds`
+ * because our scan ran before that order propagated. Verify-side
+ * `cancelFillerOrdersOnly` then ran against an empty list and the
+ * fillers shipped.
+ *
+ * The polling reloads the history page (Amazon SSRs the order list,
+ * so client-side polling alone won't see new orders) every ~800ms
+ * until either every cart ASIN is matched OR the budget expires.
+ * Best-coverage result wins across iterations so a flaky reload
+ * doesn't regress earlier matches.
  */
 async function fetchOrderIdsForAsins(
   page: Page,
@@ -1523,20 +1705,59 @@ async function fetchOrderIdsForAsins(
     return [];
   }
 
-  // Wait until at least the primary (target) ASIN appears on the page
-  // so we don't read the history mid-propagation.
-  if (primaryAsin) {
-    await page
-      .waitForFunction(
-        (asin) =>
-          document.querySelector(
-            `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"]`,
-          ) !== null,
-        primaryAsin,
-        { timeout: 15_000, polling: 1_000 },
-      )
-      .catch(() => undefined);
-  }
+  // Wait until the order-history page has decrypted EVERY visible
+  // order card AND the just-placed order has propagated. Two
+  // independent waits combined into one predicate:
+  //
+  //   (a) `csd-encrypted-sensitive` count = 0  → Siege fully done.
+  //       Catches the "mid-decrypt, only top card decrypted" race
+  //       (INC-2026-05-10, DL-05260034, lost 114-3440494-2197804).
+  //
+  //   (b) An `a[href*="/dp/<primaryAsin>"]` exists inside an actual
+  //       order card → the target order has propagated. Catches
+  //       the "Siege done but new order isn't even rendered yet"
+  //       race observed 2026-05-10 19:39 in a real buy log:
+  //         "step.fillerBuy.placed.orderid.notfound"
+  //         "cartAsinsCount":1  "fillerOrderIds":[]
+  //       Cause: Place Order had just finished → /spc → goto
+  //       /gp/css/order-history fired BEFORE Amazon's order-history
+  //       page rendered the brand-new order, so Siege completed on
+  //       N stale cards while the new one was missing entirely.
+  //       The /dp link is scoped to ".order-card" elements (not
+  //       page-chrome carousels like "Buy it again", which would
+  //       false-positive otherwise).
+  //
+  // When primaryAsin is null (rare; only on single-buy fallbacks),
+  // skip the (b) clause — the (a) clause alone is the legacy
+  // behavior. Bounded at 15s total either way; the inner
+  // reload-poll loop downstream has its own retry budget.
+  await page
+    .waitForFunction(
+      (asin) => {
+        if (document.querySelectorAll('.csd-encrypted-sensitive').length !== 0) {
+          return false;
+        }
+        if (!asin) return true;
+        // Scope the /dp/ check to .order-card to avoid matching the
+        // right-rail "Buy it again" carousel — those /dp/<asin>
+        // links exist in static page chrome and would satisfy the
+        // wait before any order had actually propagated.
+        const orderCards = document.querySelectorAll('.order-card.js-order-card');
+        for (const card of Array.from(orderCards)) {
+          if (
+            card.querySelector(
+              `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"]`,
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
+      },
+      primaryAsin,
+      { timeout: 15_000, polling: 500 },
+    )
+    .catch(() => undefined);
 
   // Read once, non-retrying — we've already waited above.
   //
@@ -1576,128 +1797,222 @@ async function fetchOrderIdsForAsins(
   // See docs/research/amazon-pipeline.md for the live test that
   // produced this fix.
   const raw = await page
-    .evaluate(
-      ({ asinList }) => {
-        // Walk every element + text node in document order, collecting
-        // "order-id encountered at position N" and "dp link with ASIN
-        // encountered at position N" events into a single stream.
-        type Event =
-          | { kind: 'id'; id: string }
-          | { kind: 'link'; asin: string };
-        const events: Event[] = [];
-
-        // Collect /dp/ links with their ASINs, in document order.
-        const linkNodes = Array.from(
-          document.querySelectorAll<HTMLAnchorElement>('a[href*="/dp/"], a[href*="/gp/product/"]'),
-        );
-        const linkAsin = (href: string): string | null => {
-          const m = href.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i);
-          return m?.[1] ?? null;
-        };
-        // Build a map from link → asin for quick lookup during the walk.
-        const linkToAsin = new Map<HTMLAnchorElement, string>();
-        for (const a of linkNodes) {
-          const asin = linkAsin(a.getAttribute('href') || '');
-          if (asin) linkToAsin.set(a, asin);
-        }
-
-        // Single walk over text + element nodes in document order. The
-        // `acceptNode` filter rejects text inside non-rendered elements
-        // (<script>/<style>/<noscript>/<template>) so JSON-embedded
-        // sessionIds and EWC cache keys (which share the orderId shape
-        // \d{3}-\d{7}-\d{7}) can't pollute seenIds.
-        const walker = document.createTreeWalker(
-          document.body,
-          NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
-          {
-            acceptNode(node) {
-              if (node.nodeType === Node.TEXT_NODE) {
-                const p = node.parentElement;
-                if (p) {
-                  const tag = p.tagName;
-                  if (
-                    tag === 'SCRIPT' ||
-                    tag === 'STYLE' ||
-                    tag === 'NOSCRIPT' ||
-                    tag === 'TEMPLATE'
-                  ) {
-                    return NodeFilter.FILTER_REJECT;
-                  }
-                }
-              }
-              return NodeFilter.FILTER_ACCEPT;
-            },
-          },
-        );
-        const seenIds = new Set<string>();
-        let n: Node | null = walker.currentNode;
-        // Advance past document.body itself — currentNode starts at root.
-        n = walker.nextNode();
-        while (n) {
-          if (n.nodeType === Node.TEXT_NODE) {
-            const text = (n.textContent ?? '').trim();
-            if (text) {
-              // Scan for ALL id occurrences in this single text node
-              // (rare but possible — e.g. an <a> with the id as text).
-              const allRe = /\b(\d{3}-\d{7}-\d{7})\b/g;
-              let mm: RegExpExecArray | null;
-              while ((mm = allRe.exec(text)) !== null) {
-                const id = mm[1]!;
-                if (!seenIds.has(id)) {
-                  seenIds.add(id);
-                  events.push({ kind: 'id', id });
-                }
-              }
-            }
-          } else if (n.nodeType === Node.ELEMENT_NODE) {
-            const asin = linkToAsin.get(n as HTMLAnchorElement);
-            if (asin) events.push({ kind: 'link', asin });
-          }
-          n = walker.nextNode();
-        }
-
-        // First-occurrence-per-ASIN attribution. For each cart ASIN,
-        // record the orderId most recently seen above its FIRST /dp/
-        // link only. The first /dp/<asin> link on the page is the
-        // topmost — i.e. inside the most-recently-placed order card.
-        // Subsequent /dp/<asin> links in older order cards (same ASIN,
-        // historical purchase) are ignored.
-        const asinToFirstOrder = new Map<string, string>();
-        let currentId: string | null = null;
-        for (const ev of events) {
-          if (ev.kind === 'id') {
-            currentId = ev.id;
-          } else if (
-            currentId &&
-            asinList.includes(ev.asin) &&
-            !asinToFirstOrder.has(ev.asin)
-          ) {
-            asinToFirstOrder.set(ev.asin, currentId);
-          }
-        }
-
-        // Group: orderId → set of cart ASINs first-seen under it.
-        const matchedByOrder = new Map<string, Set<string>>();
-        for (const [asin, orderId] of asinToFirstOrder) {
-          if (!matchedByOrder.has(orderId)) matchedByOrder.set(orderId, new Set<string>());
-          matchedByOrder.get(orderId)!.add(asin);
-        }
-
-        const out: { orderId: string; matchedAsins: string[] }[] = [];
-        for (const [orderId, asinSet] of matchedByOrder) {
-          out.push({ orderId, matchedAsins: Array.from(asinSet) });
-        }
-        return out;
-      },
-      { asinList: asins },
-    )
+    .evaluate(scanOrderHistoryDOMFn, { asinList: asins })
     .catch(() => [] as OrderMatch[]);
 
   // The first-occurrence-per-ASIN algorithm above only emits orderIds
   // that ended up with at least one cart ASIN matched, so no zero-match
   // filtering is needed (and the previous "no_asins" warning is dead
   // code under the new algorithm).
-  return raw;
+
+  // Poll for fuller coverage. The initial scan often catches only the
+  // target order (which propagates first). Filler-only orders may
+  // still be settling on Amazon's side. Reload + re-scan every ~800ms
+  // until full coverage OR budget expires (~5s). Keep the
+  // best-coverage result across iterations so a reload that happens
+  // to render fewer cart ASINs doesn't regress earlier matches.
+  const countCovered = (matches: OrderMatch[]): number => {
+    const seen = new Set<string>();
+    for (const m of matches) for (const a of m.matchedAsins) seen.add(a);
+    return seen.size;
+  };
+  let best = raw;
+  let bestCovered = countCovered(best);
+  const COVERAGE_BUDGET_MS = 5_000;
+  const POLL_INTERVAL_MS = 800;
+  const deadline = Date.now() + COVERAGE_BUDGET_MS;
+  while (bestCovered < asins.length && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    try {
+      await page.reload({ waitUntil: 'commit', timeout: 15_000 });
+    } catch {
+      // Reload flake — try the next iteration with the same DOM.
+    }
+    // Wait for Siege done AND target's /dp/ link present inside an
+    // order card. Same combined predicate as the initial wait —
+    // see comment above for the two races this catches. Tighter
+    // 3s budget per iteration since the outer poll loop already
+    // has 5s total.
+    await page
+      .waitForFunction(
+        (asin) => {
+          if (document.querySelectorAll('.csd-encrypted-sensitive').length !== 0) {
+            return false;
+          }
+          if (!asin) return true;
+          const orderCards = document.querySelectorAll('.order-card.js-order-card');
+          for (const card of Array.from(orderCards)) {
+            if (
+              card.querySelector(
+                `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"]`,
+              )
+            ) {
+              return true;
+            }
+          }
+          return false;
+        },
+        primaryAsin,
+        { timeout: 3_000, polling: 300 },
+      )
+      .catch(() => undefined);
+    const next = await page
+      .evaluate(scanOrderHistoryDOMFn, { asinList: asins })
+      .catch(() => [] as OrderMatch[]);
+    const nextCovered = countCovered(next);
+    if (nextCovered > bestCovered) {
+      best = next;
+      bestCovered = nextCovered;
+    }
+  }
+  return best;
+}
+
+/**
+ * Document-walker eval extracted as a named function so the polling
+ * loop in fetchOrderIdsForAsins can re-run it on each reload without
+ * duplicating the body. Same algorithm as the inlined version above
+ * — see that comment block for the why.
+ */
+const scanOrderHistoryDOMFn = ({ asinList }: { asinList: string[] }) => {
+  type Event = { kind: 'id'; id: string } | { kind: 'link'; asin: string };
+  const events: Event[] = [];
+
+  const linkNodes = Array.from(
+    document.querySelectorAll<HTMLAnchorElement>(
+      'a[href*="/dp/"], a[href*="/gp/product/"]',
+    ),
+  );
+  const linkAsin = (href: string): string | null => {
+    const m = href.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i);
+    return m?.[1] ?? null;
+  };
+  const linkToAsin = new Map<HTMLAnchorElement, string>();
+  for (const a of linkNodes) {
+    const asin = linkAsin(a.getAttribute('href') || '');
+    if (asin) linkToAsin.set(a, asin);
+  }
+
+  const walker = document.createTreeWalker(
+    document.body,
+    NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+    {
+      acceptNode(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const p = node.parentElement;
+          if (p) {
+            const tag = p.tagName;
+            if (
+              tag === 'SCRIPT' ||
+              tag === 'STYLE' ||
+              tag === 'NOSCRIPT' ||
+              tag === 'TEMPLATE'
+            ) {
+              return NodeFilter.FILTER_REJECT;
+            }
+          }
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    },
+  );
+  const seenIds = new Set<string>();
+  let n: Node | null = walker.currentNode;
+  n = walker.nextNode();
+  while (n) {
+    if (n.nodeType === Node.TEXT_NODE) {
+      const text = (n.textContent ?? '').trim();
+      if (text) {
+        const allRe = /\b(\d{3}-\d{7}-\d{7})\b/g;
+        let mm: RegExpExecArray | null;
+        while ((mm = allRe.exec(text)) !== null) {
+          const id = mm[1]!;
+          if (!seenIds.has(id)) {
+            seenIds.add(id);
+            events.push({ kind: 'id', id });
+          }
+        }
+      }
+    } else if (n.nodeType === Node.ELEMENT_NODE) {
+      const asin = linkToAsin.get(n as HTMLAnchorElement);
+      if (asin) events.push({ kind: 'link', asin });
+    }
+    n = walker.nextNode();
+  }
+
+  const asinToFirstOrder = new Map<string, string>();
+  let currentId: string | null = null;
+  for (const ev of events) {
+    if (ev.kind === 'id') {
+      currentId = ev.id;
+    } else if (
+      currentId &&
+      asinList.includes(ev.asin) &&
+      !asinToFirstOrder.has(ev.asin)
+    ) {
+      asinToFirstOrder.set(ev.asin, currentId);
+    }
+  }
+
+  const matchedByOrder = new Map<string, Set<string>>();
+  for (const [asin, orderId] of asinToFirstOrder) {
+    if (!matchedByOrder.has(orderId)) matchedByOrder.set(orderId, new Set<string>());
+    matchedByOrder.get(orderId)!.add(asin);
+  }
+
+  const out: { orderId: string; matchedAsins: string[] }[] = [];
+  for (const [orderId, asinSet] of matchedByOrder) {
+    out.push({ orderId, matchedAsins: Array.from(asinSet) });
+  }
+  return out;
+};
+
+/**
+ * Verify-time safety net for INC-2026-05-10: re-scans order history
+ * with the persisted full cart ASIN list and returns the orderIds that
+ * are NOT the target. By verify time (~10 min after buy), Amazon's
+ * fanout has fully propagated, so any filler-only orders missed at
+ * buy time will now show up. Caller diffs against the buy-time
+ * `fillerOrderIds` to identify newly-found orders.
+ *
+ * Reuses `scanOrderHistoryDOMFn`. No polling here — it's been long
+ * enough that one scan is sufficient. Returns empty on navigation /
+ * eval failures (best-effort safety net; verify still completes).
+ */
+export async function rescanFillerOrderIds(
+  page: Page,
+  cartAsins: string[],
+  targetOrderId: string,
+  _cid: string,
+): Promise<string[]> {
+  if (cartAsins.length === 0) return [];
+  try {
+    await page.goto(
+      'https://www.amazon.com/gp/css/order-history?ref_=nav_AccountFlyout_orders',
+      { waitUntil: 'commit', timeout: 30_000 },
+    );
+  } catch {
+    return [];
+  }
+  // Wait for Siege to decrypt every visible card before scanning
+  // (zero `csd-encrypted-sensitive` divs remaining). By verify time
+  // (~10 min after buy) decryption should be near-instant, but we
+  // still bound to 10s in case Amazon's checkout farm is slow.
+  // Same signal as buy-time scan — see INC-2026-05-10 comment in
+  // fetchOrderIdsForAsins for the failure mode this prevents.
+  await page
+    .waitForFunction(
+      () => document.querySelectorAll('.csd-encrypted-sensitive').length === 0,
+      undefined,
+      { timeout: 10_000, polling: 500 },
+    )
+    .catch(() => undefined);
+  const matches = await page
+    .evaluate(scanOrderHistoryDOMFn, { asinList: cartAsins })
+    .catch(() => [] as OrderMatch[]);
+  return matches
+    .map((m) => m.orderId)
+    .filter((id) => id !== targetOrderId);
 }
 
 /**
@@ -2527,11 +2842,10 @@ async function runSurgicalCashbackRecovery(
     targetAsin,
     cid,
     {
-      terms: opts.wheyProteinFillerOnly === true
-        ? WHEY_PROTEIN_SEARCH_TERMS
-        : FILLER_SEARCH_TERMS,
+      terms: termsForPool(opts.fillerPool) ?? FILLER_SEARCH_TERMS,
       targetCount: SURGICAL_REPLACEMENT_COUNT,
       attemptedAsins,
+      pool: opts.fillerPool,
     },
     { jobId: opts.jobId, profile: opts.profile },
   );
@@ -2880,10 +3194,35 @@ function buildFillerSearchUrl(term: string): string {
  * Returns an empty array on any HTTP / parse failure — caller advances
  * to the next term.
  */
+type SearchFillerDiag = {
+  /** HTTP status of the search-page fetch. -1 if the request threw. */
+  status: number;
+  /** Body length in bytes. 0 if the body couldn't be read. */
+  bodyLen: number;
+  /** Total candidate cards parsed from the page (pre-filter). */
+  totalCardsParsed: number;
+  /** Whether the page looks like a captcha / robot-check intercept. */
+  looksLikeCaptcha: boolean;
+  /** Per-filter rejection counts when totalCardsParsed > 0 but
+   *  candidates ends up 0 — disambiguates "Amazon returned nothing" from
+   *  "Amazon returned items but all got filtered out". */
+  rejectedByFilter?: {
+    notPrime: number;
+    noPrice: number;
+    priceBelow: number;
+    priceAbove: number;
+  };
+  /** First ~200 chars of body, for triage when results are empty.
+   *  Captcha pages return "Type the characters you see in this image"
+   *  or "We just need to make sure you're not a robot" so this catches
+   *  Amazon's bot-protection responses without needing the full HTML. */
+  bodyPreview: string;
+};
+
 async function searchFillerCandidatesViaHttp(
   page: Page,
   term: string,
-): Promise<SearchResultCandidate[]> {
+): Promise<{ candidates: SearchResultCandidate[]; diag: SearchFillerDiag }> {
   const url = buildFillerSearchUrl(term);
   let res;
   try {
@@ -2892,32 +3231,54 @@ async function searchFillerCandidatesViaHttp(
       timeout: 15_000,
     });
   } catch {
-    return [];
+    return {
+      candidates: [],
+      diag: { status: -1, bodyLen: 0, totalCardsParsed: 0, looksLikeCaptcha: false, bodyPreview: '' },
+    };
   }
-  if (!res.ok()) return [];
+  if (!res.ok()) {
+    return {
+      candidates: [],
+      diag: { status: res.status(), bodyLen: 0, totalCardsParsed: 0, looksLikeCaptcha: false, bodyPreview: '' },
+    };
+  }
   let html: string;
   try {
     html = await res.text();
   } catch {
-    return [];
+    return {
+      candidates: [],
+      diag: { status: res.status(), bodyLen: 0, totalCardsParsed: 0, looksLikeCaptcha: false, bodyPreview: '' },
+    };
   }
+  const looksLikeCaptcha =
+    /Type the characters you see in this image|Sorry, we just need to make sure|automated access to our website|api-services-support@amazon\.com/i.test(
+      html.slice(0, 8_000),
+    );
   const doc = new JSDOM(html).window.document;
   const all = extractSearchResultCandidates(doc);
-  // URL-level filter `p_6:ATVPDKIKX0DER` biases the results bin toward
-  // Amazon-fulfilled offers; we don't gate on buy-box winner === Amazon
-  // here because the per-card merchantId hard gate (commit 2f13ee2)
-  // empirically dropped ~73% of candidates per term, often leaving the
-  // accumulator below FILLER_COUNT and forcing rebuys to checkout with
-  // tiny / empty carts. FBA / Seller Fulfilled Prime items still
-  // cancel cleanly via Amazon's pre-ship cancel sweep in the vast
-  // majority of cases.
-  return all.filter((c) => {
-    if (!c.isPrime) return false;
-    if (c.price === null) return false;
-    if (c.price < FILLER_MIN_PRICE) return false;
-    if (c.price > FILLER_MAX_PRICE) return false;
+  let notPrime = 0;
+  let noPrice = 0;
+  let priceBelow = 0;
+  let priceAbove = 0;
+  const candidates = all.filter((c) => {
+    if (!c.isPrime) { notPrime++; return false; }
+    if (c.price === null) { noPrice++; return false; }
+    if (c.price < FILLER_MIN_PRICE) { priceBelow++; return false; }
+    if (c.price > FILLER_MAX_PRICE) { priceAbove++; return false; }
     return true;
   });
+  const diag: SearchFillerDiag = {
+    status: res.status(),
+    bodyLen: html.length,
+    totalCardsParsed: all.length,
+    looksLikeCaptcha,
+    bodyPreview: html.replace(/\s+/g, ' ').slice(0, 200),
+    ...(all.length > 0 && candidates.length === 0
+      ? { rejectedByFilter: { notPrime, noPrice, priceBelow, priceAbove } }
+      : {}),
+  };
+  return { candidates, diag };
 }
 
 export type PostAddResult =
@@ -3122,6 +3483,10 @@ type FillerOpts = {
    *  through. Used as both the dedup pre-seed and the accumulator
    *  the caller can read after the call. */
   attemptedAsins?: Set<string>;
+  /** Active filler pool. Drives the per-pool title blocklist
+   *  (`isBlockedByPool`) — e.g. eero pool excludes Echo / Fire TV.
+   *  Undefined / 'general' = no blocklist. */
+  pool?: FillerPool;
 };
 
 /**
@@ -3181,23 +3546,53 @@ async function addFillerItems(
   let csrf: string | null = null;
   for (const term of terms) {
     if (candidates.length >= targetCount) break;
-    const found = await searchFillerCandidatesViaHttp(mainPage, term);
+    const { candidates: found, diag } = await searchFillerCandidatesViaHttp(
+      mainPage,
+      term,
+    );
     if (found.length === 0) {
-      logger.info('step.fillerBuy.fillers.searchEmpty', { term }, cid);
+      // Enriched diagnostic — disambiguates the empty case:
+      //   bodyLen=0 + status=-1 → request threw (network error)
+      //   bodyLen<5_000 + status=200 → Amazon returned a near-empty
+      //     response (often the lightweight robot-check page)
+      //   looksLikeCaptcha=true → caught Amazon's bot challenge
+      //   totalCardsParsed>0 + rejectedByFilter → cards parsed but
+      //     every one was rejected (Prime/price gate too strict)
+      //   totalCardsParsed=0 + bodyLen>50k → parser miss; Amazon
+      //     likely shipped a layout we don't recognize
+      logger.warn(
+        'step.fillerBuy.fillers.searchEmpty',
+        { term, ...diag },
+        cid,
+      );
       continue;
     }
     let added = 0;
+    let blocked = 0;
     for (const c of found) {
       if (candidates.length >= targetCount) break;
       if (seen.has(c.asin)) continue;
       seen.add(c.asin);
+      // Per-pool title blocklist (e.g. eero pool excludes Echo / Fire
+      // TV / Kindle / Ring / Alexa). Tracked separately from `seen`
+      // so a future `general`-pool retry could still consider these.
+      if (isBlockedByPool(fillerOpts.pool, c.title)) {
+        blocked++;
+        continue;
+      }
       candidates.push(c);
       added++;
       if (csrf === null) csrf = c.csrf;
     }
     logger.info(
       'step.fillerBuy.fillers.searchHit',
-      { term, fresh: added, totalCandidates: candidates.length, of: targetCount },
+      {
+        term,
+        fresh: added,
+        ...(blocked > 0 ? { blockedByPool: blocked } : {}),
+        totalCandidates: candidates.length,
+        of: targetCount,
+      },
       cid,
     );
   }

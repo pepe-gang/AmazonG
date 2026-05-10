@@ -1,12 +1,14 @@
 import type { Page } from 'playwright';
 import type { BGClient } from '../bg/client.js';
 import type { DriverSession } from '../browser/driver.js';
+import type { FillerPool } from '../shared/ipc.js';
 import { openSession } from '../browser/driver.js';
 import { scrapeProduct } from '../actions/scrapeProduct.js';
 import { buyNow } from '../actions/buyNow.js';
 import { clearCartHttpOnly, type ClearCartResult } from '../actions/clearCart.js';
 import {
   buyWithFillers,
+  rescanFillerOrderIds,
   type BuyWithFillersResult,
 } from '../actions/buyWithFillers.js';
 import {
@@ -77,11 +79,10 @@ export type Deps = {
    */
   loadParallelism: () => Promise<{
     maxConcurrentBuys: number;
-    /** When true (and the buy is in filler mode), the filler picker
-     *  uses a whey-protein-only term pool instead of the general
-     *  impulse mix. Read every claim so a Settings toggle takes
+    /** Filler-mode search-term pool ('general' | 'whey' | 'eero' |
+     *  'amazon-basics'). Read every claim so a Settings change takes
      *  effect on the next deal without restarting the worker. */
-    wheyProteinFillerOnly: boolean;
+    fillerPool: FillerPool;
     /** Experimental: when true AND the buy is in filler mode AND the
      *  cashback gate fails with B1 (target's group has no "% back"
      *  radio at all), run surgical recovery (remove bundle-mates
@@ -401,6 +402,7 @@ async function loadFillerBuyContext(
 ): Promise<{
   buyAttemptId: string;
   fillerOrderIds: string[];
+  cartAsins: string[];
   productTitle: string | null;
 }> {
   const buyAttemptId = job.buyJobId
@@ -410,6 +412,7 @@ async function loadFillerBuyContext(
   return {
     buyAttemptId,
     fillerOrderIds: attempt?.fillerOrderIds ?? [],
+    cartAsins: attempt?.cartAsins ?? [],
     productTitle: attempt?.productTitle ?? null,
   };
 }
@@ -470,6 +473,13 @@ type FillerRunResult = {
    */
   fillerOrderIds: string[];
   /**
+   * Full cart ASIN list at Place Order time (target + every committed
+   * filler). Persisted so verify phase can re-scan order history with
+   * the full list and catch filler-only orders that hadn't propagated
+   * yet at buy-time. Empty on dry-run / failure / single-mode.
+   */
+  cartAsins: string[];
+  /**
    * Amazon's actual product title for the target (from /spc scraping).
    * Persisted so verify phase can locate the target on the cancel-
    * items page without needing ASIN (Chewbacca hides ASINs).
@@ -490,9 +500,9 @@ async function runFillerBuyWithRetries(
   minCashbackPct: number,
   /** Per-profile cashback gate enforcement. See runForProfile. */
   requireMinCashback: boolean,
-  /** Live "Whey Protein Filler only" toggle, re-read each claim. Single-
-   *  mode buys never reach here. */
-  wheyProteinFillerOnly: boolean,
+  /** Live filler-pool setting, re-read each claim. Single-mode buys
+   *  never reach here. */
+  fillerPool: FillerPool,
   /** Live experimental.surgicalCashbackRecovery toggle. When on,
    *  buyWithFillers handles B1 cashback failures via the inline
    *  surgical flow AND we skip the 3-attempt outer retry — surgical
@@ -552,7 +562,7 @@ async function runFillerBuyWithRetries(
       minCashbackPct,
       requireMinCashback,
       dryRun: deps.buyDryRun,
-      wheyProteinFillerOnly,
+      fillerPool,
       attemptedAsins,
       // Only the first attempt can reuse the verify-phase scrape — by
       // attempt 2 the page state has drifted (we've been to /spc and
@@ -599,6 +609,8 @@ async function runFillerBuyWithRetries(
     buy: fillerToBuyResult(lastRaw),
     fillerOrderIds:
       lastRaw.ok && 'fillerOrderIds' in lastRaw ? lastRaw.fillerOrderIds : [],
+    cartAsins:
+      lastRaw.ok && 'cartAsins' in lastRaw ? lastRaw.cartAsins : [],
     productTitle: lastRaw.ok ? lastRaw.productInfo.title : null,
   };
 }
@@ -685,13 +697,30 @@ export function startWorker(deps: Deps): WorkerHandle {
       job.phase === 'cancel_fillers'
     ) {
       const profile = selectVerifyTrackingProfile(eligibleAll, job.placedEmail);
+      // Diagnose why eligible is empty so the scheduler can build a
+      // specific error (and BG dashboard can distinguish "Signed Out"
+      // vs "Disabled" pills). eligibleAll is the SIGNED-IN list; if
+      // the target email is in it but selectVerifyTrackingProfile
+      // returned null, the only reason is `enabled: false`.
+      let emptyReason: 'not_signed_in' | 'disabled' | 'not_found' | undefined;
+      if (!profile) {
+        const target = (job.placedEmail ?? '').toLowerCase();
+        if (!target) {
+          emptyReason = 'not_found';
+        } else if (eligibleAll.some((p) => p.email.toLowerCase() === target)) {
+          emptyReason = 'disabled';
+        } else {
+          emptyReason = 'not_signed_in';
+        }
+      }
       return {
         eligible: profile ? [profile] : [],
         fillerByEmail: new Map<string, boolean>(),
         effectiveMinByEmail: new Map<string, number>(),
         requireMinByEmail: new Map<string, boolean>(),
-        wheyProteinFillerOnly: false,
+        fillerPool: 'general',
         surgicalCashbackRecovery: false,
+        ...(emptyReason ? { emptyReason } : {}),
       };
     }
 
@@ -710,7 +739,7 @@ export function startWorker(deps: Deps): WorkerHandle {
     let eligible = selectBuyProfiles(eligibleAll, job.placedEmail);
     const parallelism = await deps.loadParallelism().catch(() => ({
       maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
-      wheyProteinFillerOnly: false,
+      fillerPool: 'general' as FillerPool,
       surgicalCashbackRecovery: false,
     }));
 
@@ -747,7 +776,7 @@ export function startWorker(deps: Deps): WorkerHandle {
       fillerByEmail,
       effectiveMinByEmail,
       requireMinByEmail,
-      wheyProteinFillerOnly: parallelism.wheyProteinFillerOnly,
+      fillerPool: parallelism.fillerPool,
       surgicalCashbackRecovery: parallelism.surgicalCashbackRecovery,
     };
   };
@@ -1042,6 +1071,16 @@ async function handleVerifyJob(
           ...(outcome.kind === 'active' && typeof outcome.placedQuantity === 'number'
             ? { correctPurchasedCount: outcome.placedQuantity }
             : {}),
+          // Forward the payment-revision-needed flag when Amazon parked
+          // the order awaiting a re-charge. BG persists this on the
+          // AutoBuyPurchase row so its dashboard keeps the order in
+          // Pending bucket (vs flipping to Success on a verify-passed
+          // signal alone) — the order won't actually ship until the
+          // user revises payment, so tracking is still pending until
+          // either codes arrive or Amazon eventually cancels.
+          ...(outcome.kind === 'active' && outcome.paymentRevisionRequired
+            ? { paymentRevisionRequired: true }
+            : {}),
         },
         cid,
       );
@@ -1073,23 +1112,73 @@ async function handleVerifyJob(
       // items they didn't intend to buy. Skips the "clean non-target
       // items from target order" step that the active path runs —
       // target is already cancelled, nothing to clean.
+      //
+      // Safety-net rescan: order-history is now stable (~10 min after
+      // buy time, vs racy at buy time). Re-run the same DOM walker
+      // against the persisted cartAsins; any orderIds in the rescan
+      // result that weren't captured at buy time are filler-only
+      // orders that propagated late. Union with buy-time
+      // fillerOrderIds and persist the merged set so future
+      // bookkeeping (cancel_fillers tasks, audit) sees the full list.
+      // INC-2026-05-10 (purchaseId 106-0543366-6065024) had a
+      // 114-4485329-7352228 missed at buy time; this rescan would
+      // have caught it.
       let cancelledFillerError: string | null = null;
       if (job.viaFiller) {
-        const { fillerOrderIds } = await loadFillerBuyContext(
-          deps,
-          job,
-          profile.email,
-          activeAttemptId,
-        );
-        if (fillerOrderIds.length > 0) {
+        const { fillerOrderIds: persistedFillerOrderIds, cartAsins } =
+          await loadFillerBuyContext(deps, job, profile.email, activeAttemptId);
+        let mergedFillerOrderIds = persistedFillerOrderIds;
+        if (cartAsins.length > 0) {
+          const rescan = await rescanFillerOrderIds(
+            verifyPage,
+            cartAsins,
+            targetOrderId,
+            cid,
+          );
+          const known = new Set(persistedFillerOrderIds);
+          const newlyFound = rescan.filter((id) => !known.has(id));
+          if (newlyFound.length > 0) {
+            logger.warn(
+              'job.verify.cancelled.filler.rescan.newlyFound',
+              {
+                ...logCtx,
+                targetOrderId,
+                buyTimeKnownCount: persistedFillerOrderIds.length,
+                rescanFoundCount: rescan.length,
+                newlyFoundOrderIds: newlyFound,
+              },
+              cid,
+            );
+            mergedFillerOrderIds = [...persistedFillerOrderIds, ...newlyFound];
+            await deps.jobAttempts
+              .update(activeAttemptId, { fillerOrderIds: mergedFillerOrderIds })
+              .catch(() => undefined);
+          } else {
+            logger.info(
+              'job.verify.cancelled.filler.rescan.complete',
+              {
+                ...logCtx,
+                targetOrderId,
+                buyTimeKnownCount: persistedFillerOrderIds.length,
+                rescanFoundCount: rescan.length,
+              },
+              cid,
+            );
+          }
+        }
+        if (mergedFillerOrderIds.length > 0) {
           logger.info(
             'job.verify.cancelled.filler.cleanup.start',
-            { ...logCtx, targetOrderId, fillerOrderIdCount: fillerOrderIds.length },
+            {
+              ...logCtx,
+              targetOrderId,
+              fillerOrderIdCount: mergedFillerOrderIds.length,
+            },
             cid,
           );
           const cleanup = await cancelFillerOrdersOnly(
             verifyPage,
-            fillerOrderIds,
+            mergedFillerOrderIds,
             cid,
           );
           logger.info(
@@ -1449,6 +1538,12 @@ async function handleFetchTrackingJob(
           status: 'pending_tracking',
           placedOrderId: targetOrderId,
           placedEmail: profile.email,
+          // Same forwarding reason as the verify-completion branch:
+          // BG persists this so its dashboard keeps the row in Pending
+          // bucket while we wait for either tracking or cancellation.
+          ...(outcome.paymentRevisionRequired
+            ? { paymentRevisionRequired: true }
+            : {}),
         },
         cid,
       );
@@ -1588,6 +1683,7 @@ async function resolveRolloverAttemptRow(
       dryRun: false,
       trackingIds: null,
       fillerOrderIds: null,
+      cartAsins: null,
       fillerCancelTasks: null,
       productTitle: null,
       stage: null,
@@ -1937,10 +2033,9 @@ export async function runForProfile(
    *  entirely and default a missing /spc reading to 5%. See
    *  shared/cashbackGate.ts. */
   requireMinCashback: boolean,
-  /** When true (and the buy is in filler mode), the picker uses a
-   *  whey-protein-only term pool with a 10–12 random count. Re-read
-   *  per claim by the caller. Single-mode buys ignore. */
-  wheyProteinFillerOnly: boolean,
+  /** Filler-mode search-term pool. Re-read per claim by the caller.
+   *  Single-mode buys ignore. */
+  fillerPool: FillerPool,
   /** Live experimental.surgicalCashbackRecovery toggle. Re-read per
    *  claim. Filler-mode only (single-mode buys never hit the cashback
    *  gate's recovery paths in the same way). */
@@ -2164,6 +2259,7 @@ export async function runForProfile(
     // downstream logging/attempt-update code to consume.
     let buy: BuyResult;
     let fillerOrderIds: string[] = [];
+    let cartAsins: string[] = [];
     let productTitle: string | null = null;
     // Persist the Place-Order stage on the attempt so the recovery
     // sweep can tell "stopped in a safe re-runnable phase" from
@@ -2180,9 +2276,10 @@ export async function runForProfile(
         .update(attemptId, { stage }, { forceFlush: true })
         .then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, wheyProteinFillerOnly, surgicalCashbackRecovery, info, preflightCleared, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, fillerPool, surgicalCashbackRecovery, info, preflightCleared, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
+      cartAsins = r.cartAsins;
       productTitle = r.productTitle;
     } else {
       buy = await buyNow(page, {
@@ -2305,9 +2402,12 @@ export async function runForProfile(
         quantity: buy.quantity,
         error: null,
         // Filler-mode context for the verify phase to pick up ~10 min
-        // later. Empty arrays / null on non-filler buys.
+        // later. Empty arrays / null on non-filler buys. cartAsins is
+        // the FULL cart ASIN list (target + every committed filler) —
+        // verify uses it to re-scan order history when buy-time scan
+        // had partial coverage (INC-2026-05-10).
         ...(useFillers
-          ? { fillerOrderIds, productTitle }
+          ? { fillerOrderIds, cartAsins, productTitle }
           : {}),
       })
       .catch(() => undefined);

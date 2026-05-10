@@ -27,7 +27,7 @@ import type {
   RendererStatus,
 } from '@shared/types';
 import { computeProfit } from '@shared/profit';
-import { STATUS_GROUP } from './lib/jobsColumns.js';
+import { effectiveStatusGroup } from './lib/jobsColumns.js';
 import { formatUptime } from './lib/format.js';
 import { useSettings } from './hooks/useSettings.js';
 import {
@@ -609,7 +609,7 @@ function DashboardView(props: {
   const statusCounts = useMemo(() => {
     const c = { pending: 0, success: 0, cancelled: 0, failed: 0 };
     for (const a of attempts) {
-      const group = STATUS_GROUP[a.status];
+      const group = effectiveStatusGroup(a);
       // Hide pre-reset failures from the counter — the popover's Clear
       // action stamps settings.failedHiddenBeforeTs when the user wants
       // to start fresh. Server rows keep flowing in through
@@ -629,7 +629,7 @@ function DashboardView(props: {
   const failedErrorBreakdown = useMemo(() => {
     const by = new Map<string, number>();
     for (const a of attempts) {
-      if (STATUS_GROUP[a.status] !== 'failed') continue;
+      if (effectiveStatusGroup(a) !== 'failed') continue;
       if (failedHiddenBeforeTs !== null && a.createdAt < failedHiddenBeforeTs) continue;
       const key = normalizeFailureError(a.error);
       by.set(key, (by.get(key) ?? 0) + 1);

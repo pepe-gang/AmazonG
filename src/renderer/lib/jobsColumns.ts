@@ -106,6 +106,44 @@ export const STATUS_GROUP: Record<JobAttemptStatus, StatusGroup> = {
   action_required: 'action_required',
 };
 
+/**
+ * Bucket an attempt for display, applying the tracking gate.
+ *
+ * Aligns AmazonG with BG's dashboard semantics: an order is only
+ * "Success" once tracking IDs land on the row. A `completed` or
+ * `verified` attempt with no `trackingIds` is still in-flight from
+ * the user's perspective (Amazon may cancel pre-ship; payment may
+ * still need revision; carrier may not have picked up). It buckets
+ * into Pending until codes arrive.
+ *
+ * Two exemptions to the tracking gate:
+ *   1. `dry_run_success` — no real order exists, no tracking is ever
+ *      expected, demoting it to Pending would be wrong.
+ *   2. Rows with no `orderId` — there's nothing to track and the row
+ *      can't be re-verified either (verify needs an orderId). These
+ *      are usually the result of an explicit cleanup (e.g. the
+ *      cross-deal orderId-contamination NULL pass on 2026-05-09).
+ *      Demoting them to Pending would imply "waiting for tracking,"
+ *      which can never arrive — they need user attention via a
+ *      different path, not by hiding in Pending.
+ *
+ * Use this — not `STATUS_GROUP[attempt.status]` directly — wherever
+ * a JobAttempt row is being bucketed for the user-facing table,
+ * counters, filters, or badge.
+ */
+export function effectiveStatusGroup(attempt: JobAttempt): StatusGroup {
+  const base = STATUS_GROUP[attempt.status];
+  if (
+    base === 'success' &&
+    attempt.status !== 'dry_run_success' &&
+    !!attempt.orderId &&
+    (!attempt.trackingIds || attempt.trackingIds.length === 0)
+  ) {
+    return 'pending';
+  }
+  return base;
+}
+
 export const ALL_STATUS_GROUPS: StatusGroup[] = [
   'pending', 'success', 'action_required', 'cancelled', 'failed',
 ];

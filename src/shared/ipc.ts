@@ -154,6 +154,14 @@ export const IPC = {
   fetchStatsGet: 'fetch-stats:get',
 } as const;
 
+/**
+ * Filler-mode search-term pool. Drives which Amazon-search keywords
+ * the filler picker rotates through when adding cart items as fillers.
+ * See WHEY_PROTEIN_SEARCH_TERMS / EERO_SEARCH_TERMS / AMAZON_BASICS_SEARCH_TERMS
+ * in src/actions/buyWithFillers.ts for the per-pool term lists.
+ */
+export type FillerPool = 'general' | 'whey' | 'eero' | 'amazon-basics';
+
 export type Settings = {
   headless: boolean;
   bgBaseUrl: string;
@@ -211,12 +219,16 @@ export type Settings = {
    */
   buyWithFillers: boolean;
   /**
-   * When on (and the buy is in filler mode), the filler picker uses a
-   * whey-protein search-term pool only. 10–12 fillers per buy (random
-   * count). Same Prime + price-band rules ($30–$100). No effect when
-   * filler mode is off.
+   * Which search-term pool the filler picker uses (filler-mode only).
+   *   - 'general'        — broad mix (legacy default behavior pre-v0.13.x)
+   *   - 'whey'           — whey-protein only (18 brand+flavor variants)
+   *   - 'eero'           — eero / Amazon Eero networking gear
+   *   - 'amazon-basics'  — Amazon Basics house brand
+   * No effect when filler mode is off. Pre-v0.13.36 setting was a
+   * boolean `wheyProteinFillerOnly`; loadSettings migrates true→'whey'
+   * and false→'general'.
    */
-  wheyProteinFillerOnly: boolean;
+  fillerPool: FillerPool;
   /**
    * When set, the Dashboard's Failed counter + the failures-by-reason
    * popover ignore every attempt whose createdAt predates this

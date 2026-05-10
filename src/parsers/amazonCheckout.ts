@@ -25,14 +25,17 @@ export function parseOrderConfirmation(doc: Document, currentUrl: string): Order
  * units did Amazon actually accept" because it reflects the final
  * order state (including any post-checkout adjustments Amazon made).
  *
- * Pure text/regex parser — JSDOM would be more "correct" but ~50×
- * slower for a single read, and Amazon's order-details text shapes
- * are stable enough across A/B variants that regex is reliable.
- *
- * Strategies, in order:
- *   1. "Quantity: N" labels (line-item rows on the details page).
- *      Sums across all matches so multi-line-item orders work too.
- *   2. Returns null if no numeric "Quantity:" pattern is found.
+ * Strategies, tried in order:
+ *   1. `<div class="od-item-view-qty"><span>N</span></div>` — the
+ *      qty badge Amazon overlays on each line-item's product image.
+ *      Verified against a real order-details capture (qty=2 iPad,
+ *      see tests/fixtures/orderDetails/qty2-single-item.html). Sums
+ *      across all matches so multi-line-item orders work too. This
+ *      is the primary signal — the empty `data-component="quantity"`
+ *      div seen on the page is NOT where the number is rendered.
+ *   2. Legacy "Quantity: N" inline-text fallback — kept defensively
+ *      in case Amazon ever serves an older template variant.
+ *   3. Returns null if neither pattern finds a positive integer.
  *
  * Caller should fall back to whatever value it had before when this
  * returns null (e.g. the buy-time `purchasedCount` already on file).
@@ -40,16 +43,37 @@ export function parseOrderConfirmation(doc: Document, currentUrl: string): Order
 export function readQuantityFromOrderDetailsHtml(
   html: string,
 ): number | null {
-  const matches = Array.from(
-    html.matchAll(/(?:^|>|\s)Quantity[:\s]+(\d{1,3})\b/gi),
-  );
-  if (matches.length === 0) return null;
+  // Strategy 1: the od-item-view-qty image-badge pattern. Tolerant of
+  // class-attr quoting (single/double), additional classes on the
+  // same element, attribute reordering, and whitespace between the
+  // div and the inner <span>.
+  const badgeRe =
+    /class\s*=\s*["'][^"']*\bod-item-view-qty\b[^"']*["'][^>]*>\s*<span[^>]*>\s*(\d{1,3})\s*<\/span>/gi;
+  const badgeMatches = Array.from(html.matchAll(badgeRe));
+  if (badgeMatches.length > 0) {
+    const total = sumBoundedInts(badgeMatches.map((m) => m[1] ?? ''));
+    if (total > 0) return total;
+  }
+
+  // Strategy 2: legacy "Quantity: N" inline text — never observed in
+  // the live capture but cheap to keep as a safety net.
+  const labelRe = /(?:^|>|\s)Quantity[:\s]+(\d{1,3})\b/gi;
+  const labelMatches = Array.from(html.matchAll(labelRe));
+  if (labelMatches.length > 0) {
+    const total = sumBoundedInts(labelMatches.map((m) => m[1] ?? ''));
+    if (total > 0) return total;
+  }
+
+  return null;
+}
+
+function sumBoundedInts(parts: string[]): number {
   let total = 0;
-  for (const m of matches) {
-    const n = parseInt(m[1] ?? '', 10);
+  for (const p of parts) {
+    const n = parseInt(p, 10);
     if (Number.isFinite(n) && n > 0 && n < 1000) total += n;
   }
-  return total > 0 ? total : null;
+  return total;
 }
 
 /**

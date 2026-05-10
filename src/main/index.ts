@@ -516,10 +516,25 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
       // over a local non-empty list and clobber a freshly-run manual
       // Fetch Tracking.
       const serverHasCodes = !!(existing.trackingIds && existing.trackingIds.length > 0);
+      // Prefer local TERMINAL status (cancelled_by_amazon | failed) over
+      // server's non-terminal status. The local-only verify path
+      // (`jobsVerifyOrder` IPC handler from the dashboard's Re-verify
+      // Pending button) flips the row to cancelled_by_amazon on disk
+      // but doesn't POST to BG — so the server still says "verified"
+      // until the next worker-claimed verify cycle. Without this guard
+      // the merge silently clobbers the local cancellation back to
+      // verified and the row stays in the Pending bucket. Local
+      // 'verified' / 'completed' / 'awaiting_verification' do NOT win
+      // here — those are intermediate and the server is authoritative.
+      const preferLocalStatus =
+        l.status === 'cancelled_by_amazon' || l.status === 'failed';
       merged.set(k, {
         ...existing,
         attemptId: l.attemptId,
         dryRun: l.dryRun,
+        ...(preferLocalStatus
+          ? { status: l.status, error: l.error ?? existing.error }
+          : {}),
         trackingIds: serverHasCodes ? existing.trackingIds : l.trackingIds,
         // Keep a locally-captured retail price visible even if the
         // /status POST never persisted it on BG (older rows, transient
@@ -926,7 +941,7 @@ async function startWorkerNow(): Promise<void> {
       const s = await loadSettings();
       return {
         maxConcurrentBuys: s.maxConcurrentBuys,
-        wheyProteinFillerOnly: s.wheyProteinFillerOnly,
+        fillerPool: s.fillerPool,
         surgicalCashbackRecovery: s.experimental?.surgicalCashbackRecovery === true,
       };
     },

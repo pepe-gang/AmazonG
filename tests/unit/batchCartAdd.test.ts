@@ -80,7 +80,53 @@ describe('extractSearchResultCandidates', () => {
       price: 24.99,
       isPrime: true,
       merchantId: 'ATVPDKIKX0DER',
+      // Test fixture's searchCardHtml() doesn't render an <h2> title,
+      // so the extractor returns null. Real Amazon search cards always
+      // have one.
+      title: null,
     });
+  });
+
+  it('extracts the product title from the h2 a span', () => {
+    // Mirrors Amazon's typical search card markup. Title is used by
+    // per-pool blocklists (e.g. eero pool excludes "echo" titles).
+    const html = `<html><body>
+      <div data-asin="B0EERO1" data-component-type="s-search-result">
+        <h2><a><span>Amazon eero Pro 6E mesh wifi router</span></a></h2>
+        <i class="a-icon-prime"></i>
+        <form action="/cart/add-to-cart">
+          <input name="anti-csrftoken-a2z" value="x" />
+          <input name="items[0.base][asin]" value="B0EERO1" />
+          <input name="items[0.base][offerListingId]" value="OL1" />
+          <input name="merchantId" value="ATVPDKIKX0DER" />
+        </form>
+      </div>
+    </body></html>`;
+    const out = extractSearchResultCandidates(docOf(html));
+    expect(out).toHaveLength(1);
+    expect(out[0].title).toBe('Amazon eero Pro 6E mesh wifi router');
+  });
+
+  it('extracts title with whitespace collapsed', () => {
+    // Real Amazon cards have the title text wrapped across many lines
+    // with extra whitespace. The extractor should normalize.
+    const html = `<html><body>
+      <div data-asin="B0WS1" data-component-type="s-search-result">
+        <h2><a><span>
+            Amazon eero
+              Pro 6
+            mesh wifi
+        </span></a></h2>
+        <form action="/cart/add-to-cart">
+          <input name="anti-csrftoken-a2z" value="x" />
+          <input name="items[0.base][asin]" value="B0WS1" />
+          <input name="items[0.base][offerListingId]" value="OL2" />
+          <input name="merchantId" value="ATVPDKIKX0DER" />
+        </form>
+      </div>
+    </body></html>`;
+    const out = extractSearchResultCandidates(docOf(html));
+    expect(out[0].title).toBe('Amazon eero Pro 6 mesh wifi');
   });
 
   it('parses price=null when no .a-price-whole element rendered', () => {

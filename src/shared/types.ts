@@ -198,6 +198,14 @@ export type JobStatusReport = {
    *  placed 2). BG updates ONLY purchasedCount — leaves status, orderId,
    *  trackingIds, and other fields untouched. */
   correctPurchasedCount?: number | null;
+  /** True when Amazon's order-details page shows "Payment revision needed"
+   *  (card declined, order parked awaiting a re-charge). The order is
+   *  technically active but won't ship until the user revises payment.
+   *  Forwarded by both verify and fetch_tracking jobs. BG persists this
+   *  on AutoBuyPurchase so the dashboard keeps the row in the Pending
+   *  bucket — Amazon won't ship → no tracking will arrive → don't show
+   *  it as Success on the back of a passing verify alone. */
+  paymentRevisionRequired?: boolean;
   purchases?: {
     amazonEmail: string;
     status: 'queued' | 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'failed' | 'cancelled' | 'action_required';
@@ -561,6 +569,18 @@ export type JobAttempt = {
    * post-placement sweep. Null on single-mode buys.
    */
   fillerOrderIds: string[] | null;
+  /**
+   * For filler-mode buys: the FULL cart ASIN list at the time of the
+   * Place Order click (target + every committed filler). Persisted so
+   * the verify phase can RE-SCAN order history with the full list and
+   * catch any filler-only orders that hadn't propagated yet at buy
+   * time — INC-2026-05-10 (purchaseId 106-0543366-6065024) had a
+   * filler-only order 114-4485329-7352228 that was missing from
+   * `fillerOrderIds` because it propagated after our buy-time scan
+   * completed. Null on single-mode buys + on pre-feature attempts
+   * still in the local store.
+   */
+  cartAsins: string[] | null;
   /**
    * Per-filler-order cancel state from BG's FillerCancelTask table.
    * Each task tracks one filler order id through cancel_fillers's

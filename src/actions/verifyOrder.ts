@@ -127,12 +127,20 @@ export async function verifyOrder(
     return { kind: 'error', orderId, message: errMatch[0].replace(/\s+/g, ' ').trim().slice(0, 200) };
   }
 
-  // 2. Cancellation — scoped match: the data-component="cancelled" div
-  //    PLUS "This order has been cancelled" text within it. The 3000-char
-  //    look-ahead bounds the match cost; live observed inner text is
-  //    ~80-100 chars so this is generous.
+  // 2. Cancellation — scoped match against EITHER of two known
+  //    Amazon container markers (verified against real captures):
+  //      - data-component="cancelledOrderBanner"  ← current/2026 layout;
+  //         the empty `data-component="cancelled"` div is also rendered
+  //         but has no inner text, so we have to look for the Banner.
+  //      - data-component="cancelled"             ← older layout where
+  //         the cancellation copy DID render inside the cancelled div
+  //         (kept for back-compat with any A/B variant still serving it).
+  //    Both must contain "This order has been cancelled" within 3000
+  //    chars of the opening tag — the text is the safety belt against
+  //    matching an unrelated future div that happens to share the
+  //    component name.
   const cancelledScopedRe =
-    /<div[^>]+data-component=["']cancelled["'][^>]*>[\s\S]{0,3000}?This order has been cancell?ed/i;
+    /<div[^>]+data-component=["'](?:cancelledOrderBanner|cancelled)["'][^>]*>[\s\S]{0,3000}?This order has been cancell?ed/i;
   if (cancelledScopedRe.test(html)) {
     return { kind: 'cancelled', orderId };
   }

@@ -122,7 +122,7 @@ function makeDeps(opts: {
         fillerByEmail: new Map(),
         effectiveMinByEmail: new Map(),
         requireMinByEmail: new Map(),
-        wheyProteinFillerOnly: false,
+        fillerPool: 'general' as const,
         surgicalCashbackRecovery: false,
       };
     },

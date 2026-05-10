@@ -189,7 +189,7 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
     profiles.length > 0
       ? profiles.every((p) => p.buyWithFillers === true)
       : settings.buyWithFillers;
-  const wheyOn = settings.wheyProteinFillerOnly;
+  const fillerPool = settings.fillerPool;
   const anyOff = profiles.some((p) => p.buyWithFillers !== true);
   const toggle = async () => {
     const next = !on;
@@ -240,43 +240,45 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
         </label>
       </div>
 
-      {/* Whey-only sub-toggle. Disabled when the master Filler toggle
-          is off because it has no effect outside filler mode. Sits
-          inside the same panel since it only modifies filler picker
-          behavior, not a separate feature. */}
+      {/* Filler-pool dropdown. No effect when the master Filler toggle
+          is off. Sits inside the same panel since it only modifies
+          filler picker behavior, not a separate feature. */}
       <div className="flex items-start justify-between gap-3 mt-3 pt-3 border-t border-white/[0.04]">
         <div className="min-w-0">
           <div className="text-xs font-medium text-foreground/80">
-            Whey Protein Filler only
+            Filler Pool
           </div>
           <div className="text-[11px] text-muted-foreground leading-snug mt-0.5 max-w-md">
-            Restrict fillers to whey-protein items only — 10&ndash;12 per buy
-            (random count). Same Prime + $20&ndash;$100 rules. Across the up-to-3
-            cashback retries, the picker remembers what it tried so each
-            retry lands different items. No effect when Buy with Fillers is off.
+            Which search-term pool the filler picker rotates through.
+            Whey runs 6&ndash;8 fillers (random), other pools run the
+            standard count. Same Prime + $20&ndash;$100 rules across all
+            pools. No effect when Buy with Fillers is off.
           </div>
         </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
+        <select
+          className="bg-transparent border border-white/10 rounded px-2 py-1 text-xs text-foreground/90 cursor-pointer"
+          value={fillerPool}
+          onChange={(e) =>
+            void update({
+              fillerPool: e.target.value as
+                | 'general'
+                | 'whey'
+                | 'eero'
+                | 'amazon-basics',
+            })
+          }
+          disabled={busy}
           title={
-            !on
-              ? wheyOn
-                ? 'Whey-only pool will activate when Buy with Fillers is enabled'
-                : 'Will use the general pool when Buy with Fillers is enabled'
-              : wheyOn
-                ? 'Whey-only pool active'
-                : 'Using the general impulse pool'
+            on
+              ? `${fillerPool} pool active`
+              : `${fillerPool} pool will activate when Buy with Fillers is enabled`
           }
         >
-          <Switch
-            checked={wheyOn}
-            onCheckedChange={(v) => void update({ wheyProteinFillerOnly: v })}
-            disabled={busy}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {wheyOn ? 'On' : 'Off'}
-          </span>
-        </label>
+          <option value="general">General mix</option>
+          <option value="whey">Whey Protein</option>
+          <option value="eero">Amazon Eero</option>
+          <option value="amazon-basics">Amazon Basics</option>
+        </select>
       </div>
     </div>
   );

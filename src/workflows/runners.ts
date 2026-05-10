@@ -12,6 +12,7 @@
  */
 
 import type { AmazonProfile, AutoGJob } from '../shared/types.js';
+import type { FillerPool } from '../shared/ipc.js';
 import type { ProfileResult } from './pollAndScrape.js';
 import type { Deps } from './pollAndScrape.js';
 import type { DriverSession } from '../browser/driver.js';
@@ -39,7 +40,7 @@ export type BuyTupleCtx = {
   useFiller: boolean;
   effectiveMinCashbackPct: number;
   requireMinCashback: boolean;
-  wheyProteinFillerOnly: boolean;
+  fillerPool: FillerPool;
   surgicalCashbackRecovery: boolean;
   abortSignal: AbortSignal;
   abortSiblings: (reason: 'out_of_stock' | 'price_exceeds') => void;
@@ -55,7 +56,7 @@ export async function runBuyTuple(ctx: BuyTupleCtx): Promise<ProfileResult> {
     ctx.useFiller,
     ctx.effectiveMinCashbackPct,
     ctx.requireMinCashback,
-    ctx.wheyProteinFillerOnly,
+    ctx.fillerPool,
     ctx.surgicalCashbackRecovery,
     ctx.abortSignal,
     ctx.abortSiblings,

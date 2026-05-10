@@ -156,7 +156,7 @@ export function LogsView({ attempt }: { attempt: JobAttempt }) {
             <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
               <span className="account-pill">{attempt.amazonEmail}</span>
               <span className="text-muted-foreground/60">·</span>
-              <StatusBadge status={attempt.status} />
+              <StatusBadge attempt={attempt} />
               <span className="text-muted-foreground/60">·</span>
               <span>{formatDate(attempt.createdAt)} {formatTime(attempt.createdAt)}</span>
               {attempt.cost && (
