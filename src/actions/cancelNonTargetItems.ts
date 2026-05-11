@@ -56,16 +56,12 @@ export async function cancelNonTargetItems(
       ? target.title.replace(/\s+/g, ' ').trim().slice(0, 40).replace(/["'\\]/g, '')
       : null;
 
-  // Select-all-then-uncheck-target. The legacy "walk up from each
-  // checkbox to find its row" approach over-reaches on the Chewbacca
-  // cancel-items layout: the walker grabs an ancestor that contains the
-  // target ASIN's /dp/ link anywhere inside, which causes sibling items'
-  // checkboxes to be wrongly classified as target → skipped → Amazon
-  // rejects the partial cancel (bundle constraint: all bundle items
-  // must cancel together). Live-tested 2026-05-11 on order
-  // 112-3920218-6945066: the new approach succeeds where the legacy one
-  // failed with `Unable to cancel requested items: All discounted
-  // bundle items must be canceled together`.
+  // Locate the target's checkbox first via /dp/<asin> link (or title
+  // text-node fallback), then check every other visible checkbox.
+  // Refuse to proceed if the target can't be uniquely identified — a
+  // wider "is this row the target?" walk over-reaches on Chewbacca's
+  // cancel-items page and triggers Amazon's bundle-cancel rejection
+  // (`All discounted bundle items must be canceled together`).
   const counts = await page
     .evaluate(
       ({ asin, title }) => {

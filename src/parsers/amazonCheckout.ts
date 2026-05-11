@@ -2,6 +2,8 @@ import { JSDOM } from 'jsdom';
 import type { OrderConfirmation } from '../shared/types.js';
 import { parsePrice } from './amazonProduct.js';
 
+const DP_LINK_ASIN_RE = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/;
+
 /**
  * Extract the order id + final price from Amazon's "thank you" / confirmation
  * page. Works for both `/gp/buy/thankyou/handlers/display.html` and the newer
@@ -20,48 +22,30 @@ export function parseOrderConfirmation(doc: Document, currentUrl: string): Order
 }
 
 /**
- * Read the placed qty for a SPECIFIC target ASIN from Amazon's
- * order-details HTML. This is the authoritative qty source — verify
- * phase uses it to correct any buy-time qty reporting drift.
+ * Read the placed qty for the target ASIN from Amazon's order-details
+ * HTML. Authoritative source — verify phase uses it to correct any
+ * buy-time qty reporting drift.
  *
- * Per-ASIN, not summed-across-order. Pre-2026-05-11 the function summed
- * every `od-item-view-qty` badge on the page, which gave the wrong
- * answer whenever an order contained the target plus fillers at
- * different qtys (e.g. target qty=1 + filler qty=5 → returned 6).
+ * Amazon renders `<div class="od-item-view-qty"><span>N</span></div>`
+ * per line-item when qty>1, and OMITS the badge when qty=1. We locate
+ * the target's `/dp/<asin>` (or `/gp/product/<asin>`) link, then walk
+ * up the ancestor chain. The first scope containing a badge wins;
+ * walking into a scope that holds another ASIN's link means we left
+ * the target's row → no own badge → qty=1.
  *
- * Convention discovered live 2026-05-11 on order 112-3920218-6945066:
- *   - Amazon renders `<div class="od-item-view-qty"><span>N</span></div>`
- *     on each line-item where qty>1.
- *   - For qty=1 items, the badge is OMITTED entirely.
- *
- * Strategy:
- *   1. Locate the target via `<a href="/dp/{asin}">` or
- *      `<a href="/gp/product/{asin}">`.
- *   2. Walk up to the smallest ancestor that contains exactly one
- *      od-item-view-qty badge → return that badge's number.
- *   3. If we walk up to a scope containing MULTIPLE badges, the
- *      target's row had no badge of its own → qty=1.
- *   4. If we never find any badge → qty=1.
- *   5. Returns null if targetAsin is null OR target link not present
- *      in the HTML (caller treats null as "qty unknown").
+ * Returns null when targetAsin is null OR not present in the HTML
+ * (caller treats null as "qty unknown, don't correct").
  */
 export function readQuantityFromOrderDetailsHtml(
   html: string,
   targetAsin: string | null,
 ): number | null {
   if (!targetAsin || html.length === 0) return null;
-  // Amazon embeds line-item HTML inside JSON-encoded strings on the
-  // order-details page (verified live 2026-05-11 on order
-  // 112-5561210-9300211): `class=\"od-item-view-qty\"><span>5</span>`.
-  // Browser JS unescapes this client-side before rendering, but our
-  // HTTP-only `request.get` returns the unrendered string. JSDOM still
-  // parses elements out of it but with literal-backslash attributes —
-  // so `.od-item-view-qty` selector misses. Normalize the JSON escapes
-  // back to plain HTML before JSDOM sees them.
-  const normalized = html
-    .replace(/\\"/g, '"')
-    .replace(/\\\//g, '/')
-    .replace(/\\n/g, ' ');
+  // Amazon's HTTP-fetched order-details page embeds line-item HTML as
+  // JSON-encoded strings: `class=\"od-item-view-qty\"><span>5</span>`.
+  // Browser JS unescapes before render; our HTTP-only request.get
+  // doesn't. Normalize the JSON escapes so `.od-item-view-qty` matches.
+  const normalized = html.replace(/\\(["/n])/g, (_, c) => (c === 'n' ? ' ' : c));
   let doc: Document;
   try {
     doc = new JSDOM(normalized).window.document;
@@ -73,12 +57,10 @@ export function readQuantityFromOrderDetailsHtml(
     doc.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${targetAsin}"]`);
   if (!link) return null;
 
-  // Walk up the ancestor chain, stopping the moment we see ANY other
-  // ASIN's /dp/ link inside the scope — that means we've crossed the
-  // row boundary, so the target's row had no own badge → qty=1.
   for (let scope: Element | null = link, d = 0; d < 10 && scope; scope = scope.parentElement, d++) {
-    const links = scope.querySelectorAll<HTMLAnchorElement>('a[href*="/dp/"], a[href*="/gp/product/"]');
-    const crossed = Array.from(links).some((a) => {
+    const crossed = Array.from(
+      scope.querySelectorAll<HTMLAnchorElement>('a[href*="/dp/"], a[href*="/gp/product/"]'),
+    ).some((a) => {
       const m = (a.getAttribute('href') ?? '').match(DP_LINK_ASIN_RE);
       return m !== null && m[1] !== targetAsin;
     });
@@ -90,8 +72,6 @@ export function readQuantityFromOrderDetailsHtml(
   }
   return 1;
 }
-
-const DP_LINK_ASIN_RE = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/;
 
 /**
  * Amazon's thankyou page renders a small badge over each line-item's
