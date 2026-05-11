@@ -286,18 +286,15 @@ const CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
 const FILLER_COUNT = 8;
 const FILLER_MIN_PRICE = 20;
 const FILLER_MAX_PRICE = 100;
-// Eero pool: lower floor than the general $20 — eero accessories (wall
-// mounts, power adapters, cables) cluster at $15–$30. Same $100 ceiling
-// so the cart total stays within the cashback-magnitude range. Per-pool
-// constants instead of a single global pair are needed because the
-// general/whey/amazon-basics pools rely on the $20 floor to skip filler
-// junk priced near $0 (sponsor-clutter, single-quantity sample packs).
+// Eero accessories (wall mounts, power adapters, cables) cluster at
+// $15–$30. Other pools keep $20 to skip near-$0 filler junk.
 const EERO_FILLER_MIN_PRICE = 15;
-const EERO_FILLER_MAX_PRICE = 100;
 
 function priceBandForPool(pool: FillerPool | undefined): { min: number; max: number } {
-  if (pool === 'eero') return { min: EERO_FILLER_MIN_PRICE, max: EERO_FILLER_MAX_PRICE };
-  return { min: FILLER_MIN_PRICE, max: FILLER_MAX_PRICE };
+  return {
+    min: pool === 'eero' ? EERO_FILLER_MIN_PRICE : FILLER_MIN_PRICE,
+    max: FILLER_MAX_PRICE,
+  };
 }
 
 // Low-risk impulse-item search terms borrowed from AutoG. Shuffled on each
@@ -404,17 +401,9 @@ function isBlockedByPool(
     if (re.test(title)) return true;
   }
   if (pool === 'eero') {
-    // Eero pool: positive allowlist. Title MUST contain "eero" (case-
-    // insensitive, word boundary) or it's blocked. Today's surface for
-    // "amazon eero mesh" includes TP-Link Deco, Tenda, Cudy, Linksys,
-    // NETGEAR, ARRIS and other mesh brands via Amazon's loose keyword
-    // match — none belong in an eero-themed filler cart. The old
-    // blocklist enumerated only Amazon-brand siblings (echo / fire tv /
-    // kindle / ring / alexa) and missed every 3p brand. Flipping to an
-    // allowlist shrinks the rule to "eero or skip" and makes the pool
-    // semantically self-describing. Global blocklist still runs first
-    // (`amazon echo`, `echo dot`, `echo pop`) so the rare eero+echo
-    // bundles can't slip through.
+    // Amazon's loose match for "amazon eero mesh" surfaces non-eero
+    // mesh brands (TP-Link, NETGEAR, Tenda, Linksys, etc.). A positive
+    // "eero or skip" allowlist handles them in one rule.
     return !/\beero\b/i.test(title);
   }
   return false;
@@ -428,12 +417,8 @@ function isBlockedByPool(
 const WHEY_FILLER_MIN_COUNT = 6;
 const WHEY_FILLER_MAX_COUNT = 8;
 
-// Narrow-pool filler target. The eero search (after 2026-05-11
-// drop-p_6 + drop-s=review-rank changes) yields ~10 eero candidates
-// from page 1 of "amazon eero 6" alone, so 5 fillers fills without
-// stress. Was 6 before, but lowering to 5 keeps the cart shape
-// distinct from the general pool (8) and trims one round-trip on
-// add-to-cart for slightly faster checkout.
+// Eero pool yields ~10 candidates per term under the current filters;
+// 5 fills cleanly with margin.
 const EERO_FILLER_COUNT = 5;
 
 /**
@@ -3230,33 +3215,21 @@ function shuffle<T>(arr: readonly T[]): T[] {
 }
 
 function buildFillerSearchUrl(term: string, pool: FillerPool | undefined): string {
-  // Search filters (Amazon's `rh=` syntax, comma-joined):
+  // Amazon `rh=` syntax, comma-joined:
   //   p_85:2470955011  — Prime-eligible
-  //   p_6:ATVPDKIKX0DER — sold by Amazon.com (Amazon's US merchant id).
-  //                        EERO POOL OMITS THIS. Eero gear is legitimately
-  //                        resold by 3p sellers via FBA; excluding them
-  //                        collapses the eero candidate pool from ~10 to
-  //                        ~4 per term. Other pools keep p_6 for cancel-
-  //                        flow reliability — 3p cancels can stall behind
-  //                        merchant approval and break the verify phase.
-  //   p_36:low-high     — price in cents, per-pool via priceBandForPool
-  //                       (eero $15–$100, others $20–$100).
-  //
-  // NO `s=review-rank`. We used to append it for "popular items first"
-  // but discovered 2026-05-11 that Amazon applies a hidden minimum-
-  // reviews filter to review-rank sort, which collapses sparse
-  // categories — eero search dropped from 194 results (default sort) to
-  // 6 results (review-rank). Saturated categories (whey/general) hit
-  // page 1's 48-card cap either way, so dropping it is neutral for
-  // them and a 30× unlock for eero.
+  //   p_6:ATVPDKIKX0DER — sold by Amazon. Eero pool omits this so FBA-3p
+  //                       eero is included; other pools keep it because
+  //                       3p cancels stall the verify phase.
+  //   p_36:lo-hi       — price in cents (see priceBandForPool).
+  // No `s=` sort: review-rank applies a hidden min-reviews filter that
+  // collapses sparse categories (eero: 194 results → 6); default
+  // Featured sort returns the full surface.
   const { min, max } = priceBandForPool(pool);
-  const minCents = Math.round(min * 100);
-  const maxCents = Math.round(max * 100);
-  const rhSegments: string[] = ['p_85:2470955011'];
-  if (pool !== 'eero') rhSegments.push('p_6:ATVPDKIKX0DER');
-  rhSegments.push(`p_36:${minCents}-${maxCents}`);
-  const rh = encodeURIComponent(rhSegments.join(','));
-  return `https://www.amazon.com/s?k=${encodeURIComponent(term)}&rh=${rh}`;
+  const priceFilter = `p_36:${Math.round(min * 100)}-${Math.round(max * 100)}`;
+  const rh = pool === 'eero'
+    ? `p_85:2470955011,${priceFilter}`
+    : `p_85:2470955011,p_6:ATVPDKIKX0DER,${priceFilter}`;
+  return `https://www.amazon.com/s?k=${encodeURIComponent(term)}&rh=${encodeURIComponent(rh)}`;
 }
 
 /**
