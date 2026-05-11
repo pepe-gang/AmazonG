@@ -1066,21 +1066,20 @@ describe('readQuantityFromOrderDetailsHtml — per-ASIN', () => {
     // qty>=1 means click Continue and proceed.
     const APPLE_WATCH_TITLE = 'Apple Watch Series 11';
 
-    it('returns 1 when Amazon reduced the target from qty=3 to qty=1', () => {
+
+    it('returns 1 when Amazon reduced the target from qty=3 to qty=1 (title anchor)', () => {
       const doc = docOf(fixture('spc/qla-reduced-qty-2026-05-11.html'));
-      // /dp/ links are stripped on this page variant — title fallback
-      // is the only locator that works.
       expect(readTargetQtyOnUpdatesPage(doc, null, APPLE_WATCH_TITLE)).toBe(1);
     });
 
-    it('returns 0 when the target title is not on the page', () => {
+    it('returns the capped qty from the QLA banner anchor — no asin/title needed', () => {
+      // The QLA banner element itself is rendered inside the capped row's
+      // line-item-group-display container. Locator works without
+      // targetAsin or targetTitle — important because scrapeProduct can
+      // return title=null and some page variants strip /dp/ links.
       const doc = docOf(fixture('spc/qla-reduced-qty-2026-05-11.html'));
-      expect(readTargetQtyOnUpdatesPage(doc, null, 'No Such Product')).toBe(0);
-    });
-
-    it('returns 0 when both asin and title are null', () => {
-      const doc = docOf(fixture('spc/qla-reduced-qty-2026-05-11.html'));
-      expect(readTargetQtyOnUpdatesPage(doc, null, null)).toBe(0);
+      expect(readTargetQtyOnUpdatesPage(doc, null, null)).toBe(1);
+      expect(readTargetQtyOnUpdatesPage(doc, null, 'No Such Product')).toBe(1);
     });
   });
 

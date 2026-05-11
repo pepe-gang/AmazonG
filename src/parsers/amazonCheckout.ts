@@ -201,14 +201,21 @@ export function readTargetQtyOnUpdatesPage(
   targetTitle: string | null,
 ): number {
   const findGroup = (): Element | null => {
-    // Locate the target via /dp/<asin> link or title-prefix text-node,
-    // then walk up to the line-item-group-display-* container.
+    // Strategy 1: the QLA banner itself is rendered inside the capped
+    // row's container. Most robust anchor — works regardless of
+    // whether targetAsin or targetTitle are available.
+    const limitEl = doc.querySelector('[data-messageId*="Limit" i], [data-messageid*="Limit" i]');
+    const fromBanner = limitEl?.closest('[id^="line-item-group-display-"]') ?? null;
+    if (fromBanner) return fromBanner;
+    // Strategy 2: /dp/<asin> link. Some page variants strip /dp/ links;
+    // some sessions render them. When present, this confirms the row.
     let anchor: Element | null = null;
     if (targetAsin) {
       anchor =
         doc.querySelector<HTMLAnchorElement>(`a[href*="/dp/${targetAsin}"]`) ??
         doc.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${targetAsin}"]`);
     }
+    // Strategy 3: title-prefix text-node match.
     if (!anchor && targetTitle && targetTitle.length > 5) {
       const needle = targetTitle.toLowerCase();
       const walker = doc.createTreeWalker(doc.body, doc.defaultView!.NodeFilter.SHOW_TEXT, null);

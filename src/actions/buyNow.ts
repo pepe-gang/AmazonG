@@ -863,32 +863,38 @@ export async function waitForCheckout(
             ? (body.match(/sorry,?\s+you['’]ve\s+reached[^.]*\.?/i)?.[0] ?? '').trim()
             : null;
         if (limitMessage !== null) {
-          // Amazon caps the cart; check if the target row was reduced
-          // to qty>=1 (proceed) vs removed/qty=0 (fail). Mirror the
-          // pure parser `readTargetQtyOnUpdatesPage`. Stepper [+] is
-          // hidden when qty is at max ("Maximum quantity reached"
-          // button replaces it), so anchor on Amazon's
-          // line-item-group-display-* container instead of the stepper.
+          // Anchor strategy for the capped row's container:
+          //  1. The QLA banner element itself sits inside the row's
+          //     `line-item-group-display-*` container — most robust;
+          //     works without targetAsin or targetTitle (the bot's
+          //     scrapeProduct sometimes returns title=null, and some
+          //     page variants strip /dp/ links).
+          //  2. /dp/<asin> link fallback.
+          //  3. Title-prefix text-node fallback.
           // eslint-disable-next-line @typescript-eslint/no-shadow
           const adjustedQty: number = (() => {
-            let anchor: Element | null = null;
-            if (targetAsin) {
-              anchor =
-                document.querySelector<HTMLAnchorElement>(`a[href*="/dp/${targetAsin}"]`) ??
-                document.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${targetAsin}"]`);
-            }
-            if (!anchor && targetTitle && targetTitle.length > 5) {
-              const needle = targetTitle.toLowerCase();
-              const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-              for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-                const txt = ((n as Text).textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
-                if (txt.length > 5 && txt.startsWith(needle)) {
-                  anchor = n.parentElement;
-                  break;
+            let group: Element | null =
+              limitEl?.closest('[id^="line-item-group-display-"]') ?? null;
+            if (!group) {
+              let anchor: Element | null = null;
+              if (targetAsin) {
+                anchor =
+                  document.querySelector<HTMLAnchorElement>(`a[href*="/dp/${targetAsin}"]`) ??
+                  document.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${targetAsin}"]`);
+              }
+              if (!anchor && targetTitle && targetTitle.length > 5) {
+                const needle = targetTitle.toLowerCase();
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+                for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+                  const txt = ((n as Text).textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+                  if (txt.length > 5 && txt.startsWith(needle)) {
+                    anchor = n.parentElement;
+                    break;
+                  }
                 }
               }
+              group = anchor?.closest('[id^="line-item-group-display-"]') ?? null;
             }
-            const group = anchor?.closest('[id^="line-item-group-display-"]');
             if (!group) return 0;
             const live = group.querySelector('.a-stepper-value-live');
             if (live) {
