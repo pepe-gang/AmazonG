@@ -286,6 +286,19 @@ const CART_URL = 'https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';
 const FILLER_COUNT = 8;
 const FILLER_MIN_PRICE = 20;
 const FILLER_MAX_PRICE = 100;
+// Eero pool: lower floor than the general $20 — eero accessories (wall
+// mounts, power adapters, cables) cluster at $15–$30. Same $100 ceiling
+// so the cart total stays within the cashback-magnitude range. Per-pool
+// constants instead of a single global pair are needed because the
+// general/whey/amazon-basics pools rely on the $20 floor to skip filler
+// junk priced near $0 (sponsor-clutter, single-quantity sample packs).
+const EERO_FILLER_MIN_PRICE = 15;
+const EERO_FILLER_MAX_PRICE = 100;
+
+function priceBandForPool(pool: FillerPool | undefined): { min: number; max: number } {
+  if (pool === 'eero') return { min: EERO_FILLER_MIN_PRICE, max: EERO_FILLER_MAX_PRICE };
+  return { min: FILLER_MIN_PRICE, max: FILLER_MAX_PRICE };
+}
 
 // Low-risk impulse-item search terms borrowed from AutoG. Shuffled on each
 // run so we don't always hit the same items first (helps avoid rate-limit
@@ -391,10 +404,18 @@ function isBlockedByPool(
     if (re.test(title)) return true;
   }
   if (pool === 'eero') {
-    // Echo, Fire TV, Kindle, and Ring share Amazon-brand search hits
-    // with eero. None of them are eero-family hardware so they don't
-    // belong in the cart for an eero filler run.
-    return /\b(echo|fire\s*tv|kindle|ring|alexa)\b/i.test(title);
+    // Eero pool: positive allowlist. Title MUST contain "eero" (case-
+    // insensitive, word boundary) or it's blocked. Today's surface for
+    // "amazon eero mesh" includes TP-Link Deco, Tenda, Cudy, Linksys,
+    // NETGEAR, ARRIS and other mesh brands via Amazon's loose keyword
+    // match — none belong in an eero-themed filler cart. The old
+    // blocklist enumerated only Amazon-brand siblings (echo / fire tv /
+    // kindle / ring / alexa) and missed every 3p brand. Flipping to an
+    // allowlist shrinks the rule to "eero or skip" and makes the pool
+    // semantically self-describing. Global blocklist still runs first
+    // (`amazon echo`, `echo dot`, `echo pop`) so the rare eero+echo
+    // bundles can't slip through.
+    return !/\beero\b/i.test(title);
   }
   return false;
 }
@@ -407,13 +428,13 @@ function isBlockedByPool(
 const WHEY_FILLER_MIN_COUNT = 6;
 const WHEY_FILLER_MAX_COUNT = 8;
 
-// Narrow-pool filler targets. The eero search now spans the 6 / 6+ /
-// 7 / Pro / Max lines (7 terms) so the pool is wide enough to land 6
-// fillers reliably even after a retry has burned some ASINs into
-// attemptedAsins. Per-buy randomness comes from the global term
-// shuffle. Target 6 (user request 2026-05-10) — was 3 when the pool
-// was just ~4 unique items.
-const EERO_FILLER_COUNT = 6;
+// Narrow-pool filler target. The eero search (after 2026-05-11
+// drop-p_6 + drop-s=review-rank changes) yields ~10 eero candidates
+// from page 1 of "amazon eero 6" alone, so 5 fillers fills without
+// stress. Was 6 before, but lowering to 5 keeps the cart shape
+// distinct from the general pool (8) and trims one round-trip on
+// add-to-cart for slightly faster checkout.
+const EERO_FILLER_COUNT = 5;
 
 /**
  * Wrap the shared logger so every call auto-merges a context bundle
@@ -3208,23 +3229,34 @@ function shuffle<T>(arr: readonly T[]): T[] {
   return a;
 }
 
-function buildFillerSearchUrl(term: string): string {
+function buildFillerSearchUrl(term: string, pool: FillerPool | undefined): string {
   // Search filters (Amazon's `rh=` syntax, comma-joined):
   //   p_85:2470955011  — Prime-eligible
-  //   p_6:ATVPDKIKX0DER — sold by Amazon.com (Amazon's US merchant id);
-  //                        restricts to "Ships from and sold by Amazon"
-  //                        OR "Ships from Amazon" (FBA where Amazon is
-  //                        the seller). 3rd-party-sold listings filtered
-  //                        out, which keeps cancellation flow clean —
-  //                        Amazon-direct cancels are predictable; 3p
-  //                        cancels can stall behind merchant approval.
-  //   p_36:low-high     — price in cents
-  const minCents = Math.round(FILLER_MIN_PRICE * 100);
-  const maxCents = Math.round(FILLER_MAX_PRICE * 100);
-  const rh = encodeURIComponent(
-    `p_85:2470955011,p_6:ATVPDKIKX0DER,p_36:${minCents}-${maxCents}`,
-  );
-  return `https://www.amazon.com/s?k=${encodeURIComponent(term)}&rh=${rh}&s=review-rank`;
+  //   p_6:ATVPDKIKX0DER — sold by Amazon.com (Amazon's US merchant id).
+  //                        EERO POOL OMITS THIS. Eero gear is legitimately
+  //                        resold by 3p sellers via FBA; excluding them
+  //                        collapses the eero candidate pool from ~10 to
+  //                        ~4 per term. Other pools keep p_6 for cancel-
+  //                        flow reliability — 3p cancels can stall behind
+  //                        merchant approval and break the verify phase.
+  //   p_36:low-high     — price in cents, per-pool via priceBandForPool
+  //                       (eero $15–$100, others $20–$100).
+  //
+  // NO `s=review-rank`. We used to append it for "popular items first"
+  // but discovered 2026-05-11 that Amazon applies a hidden minimum-
+  // reviews filter to review-rank sort, which collapses sparse
+  // categories — eero search dropped from 194 results (default sort) to
+  // 6 results (review-rank). Saturated categories (whey/general) hit
+  // page 1's 48-card cap either way, so dropping it is neutral for
+  // them and a 30× unlock for eero.
+  const { min, max } = priceBandForPool(pool);
+  const minCents = Math.round(min * 100);
+  const maxCents = Math.round(max * 100);
+  const rhSegments: string[] = ['p_85:2470955011'];
+  if (pool !== 'eero') rhSegments.push('p_6:ATVPDKIKX0DER');
+  rhSegments.push(`p_36:${minCents}-${maxCents}`);
+  const rh = encodeURIComponent(rhSegments.join(','));
+  return `https://www.amazon.com/s?k=${encodeURIComponent(term)}&rh=${rh}`;
 }
 
 /**
@@ -3325,8 +3357,9 @@ async function fetchSearchPageOnce(
 async function searchFillerCandidatesViaHttp(
   page: Page,
   term: string,
+  pool: FillerPool | undefined,
 ): Promise<{ candidates: SearchResultCandidate[]; diag: SearchFillerDiag }> {
-  const url = buildFillerSearchUrl(term);
+  const url = buildFillerSearchUrl(term, pool);
   let { status, html, metaRefreshDelaySec } = await fetchSearchPageOnce(page, url);
   let retryCount = 0;
   // Amazon's rate-limit interstitial: respect the meta-refresh delay
@@ -3376,11 +3409,12 @@ async function searchFillerCandidatesViaHttp(
   let noPrice = 0;
   let priceBelow = 0;
   let priceAbove = 0;
+  const { min: minPrice, max: maxPrice } = priceBandForPool(pool);
   const candidates = all.filter((c) => {
     if (!c.isPrime) { notPrime++; return false; }
     if (c.price === null) { noPrice++; return false; }
-    if (c.price < FILLER_MIN_PRICE) { priceBelow++; return false; }
-    if (c.price > FILLER_MAX_PRICE) { priceAbove++; return false; }
+    if (c.price < minPrice) { priceBelow++; return false; }
+    if (c.price > maxPrice) { priceAbove++; return false; }
     return true;
   });
   const diag: SearchFillerDiag = {
@@ -3681,6 +3715,7 @@ async function addFillerItems(
     const { candidates: found, diag } = await searchFillerCandidatesViaHttp(
       mainPage,
       term,
+      fillerOpts.pool,
     );
     if (diag.metaRefresh) metaRefreshHits++;
     if (found.length === 0) {
