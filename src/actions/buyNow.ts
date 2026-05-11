@@ -773,39 +773,54 @@ export async function waitForCheckout(
   // row from N to M >= 1). Reported back to the caller so BG sees the
   // corrected qty instead of the cart-add target.
   let qlaAdjustedQty: number | null = null;
-  // One-shot recovery for Amazon's transient /errors/500. Bail on the
-  // second hit so a genuinely-broken checkout farm doesn't infinite-loop.
-  let amazon500Recovered = false;
+  // Amazon's checkout farm sometimes 500s for several seconds before
+  // recovering. Up to 2 recovery attempts: first via the SPC entry
+  // shortcut (fast), second via the /cart → Proceed-to-Checkout click
+  // (more thorough session reset). Backoff between attempts gives the
+  // farm time to settle. Bail after 2 so a genuinely-down checkout
+  // doesn't burn the 30s budget.
+  let amazon500Attempts = 0;
+  const MAX_AMAZON500_RECOVERIES = 2;
 
   while (Date.now() < deadline) {
     iteration += 1;
-    // Recover from Amazon's /errors/* page (checkout-session 500) by
-    // re-entering /spc via the entry shortcut. Same recipe ensureAddress
-    // uses post-address-change, generalized here so any in-flow 500
-    // gets one retry before we time out.
     if (/\/errors\//i.test(page.url())) {
-      if (amazon500Recovered) {
+      if (amazon500Attempts >= MAX_AMAZON500_RECOVERIES) {
         return {
           ok: false,
-          reason: 'amazon /errors/500 persisted after one recovery attempt',
+          reason: `amazon /errors/500 persisted after ${MAX_AMAZON500_RECOVERIES} recovery attempts`,
           detail: `url=${page.url()}`,
         };
       }
+      amazon500Attempts += 1;
+      const attempt = amazon500Attempts;
+      const backoffMs = 2_000 * attempt; // 2s, 4s
       emit?.warn('step.waitForCheckout.amazon500', {
         iteration,
+        attempt,
         stuck: page.url(),
-        action: 'recreating /spc via SPC_ENTRY_URL',
+        action: attempt === 1 ? 'SPC_ENTRY_URL after backoff' : 'cart→PtC click after backoff',
+        backoffMs,
       });
+      await page.waitForTimeout(backoffMs);
       try {
-        await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
+        if (attempt === 1) {
+          await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
+        } else {
+          // Second attempt: full path through /cart so Amazon rebuilds
+          // the checkout session from scratch. SPC entry shortcut
+          // sometimes re-uses the poisoned session; cart→PtC click
+          // forces a fresh purchaseId.
+          await page.goto('https://www.amazon.com/gp/cart/view.html', { waitUntil: 'commit', timeout: 30_000 });
+          await page.locator('input[name="proceedToRetailCheckout"]').click({ timeout: 10_000 });
+        }
       } catch (err) {
         return {
           ok: false,
-          reason: 'amazon /errors/500 recovery failed — spc recreate threw',
+          reason: `amazon /errors/500 recovery attempt ${attempt} threw`,
           detail: String(err).slice(0, 200),
         };
       }
-      amazon500Recovered = true;
       continue;
     }
     const state = await page
