@@ -941,11 +941,9 @@ export async function buyWithFillers(
       warn: (m, d) => logger.warn(m, d, cid),
     },
     {
-      // Banner-driven recovery. Amazon hides the Place Order button
-      // when "Please select a new delivery option" is showing, so
-      // waitForCheckout would time out at 30s unless we re-pick the
-      // unchecked group's option here. pickBestCashbackDelivery's
-      // unchecked-group branch handles 0%-cashback filler groups too.
+      // Re-pick when Amazon hides Place Order behind "select a new
+      // delivery option". Picker's unchecked-group branch covers
+      // 0%-back filler groups.
       onDeliveryOptionsChanged: async () => {
         const re = await pickBestCashbackDelivery(page, opts.minCashbackPct);
         logger.info(

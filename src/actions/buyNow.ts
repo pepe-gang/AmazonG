@@ -818,29 +818,21 @@ export async function waitForCheckout(
         //    first (fast path); if none match, fall back to a text scan
         //    across visible buttons/inputs so new Amazon layouts that
         //    ship with different ids/attributes still resolve.
-        //
-        //    Filter out blocker placeholders: Amazon renders a disabled
-        //    "review-order-continue-blocker" alongside the real button.
-        //    When the order is blocked (delivery error etc.), the real
-        //    button is hidden and the blocker is visible. Checking
-        //    `!disabled` skips the blocker so we don't claim "place
-        //    found" against a button that can't actually submit.
+        //    Skip disabled placeholders — Amazon renders a disabled
+        //    blocker (#review-order-continue-blocker-tooltip-trigger)
+        //    next to the real button whenever the order isn't
+        //    submittable. Returning kind='place' for it would burn
+        //    retries on a click-dead button.
+        const isLivePlace = (el: HTMLElement): boolean =>
+          el.offsetParent !== null && !(el as HTMLInputElement).disabled;
         for (const s of placeSelectors) {
-          const els = document.querySelectorAll(s);
-          for (const candidate of Array.from(els)) {
-            const el = candidate as HTMLElement;
-            if (el.offsetParent === null) continue;
-            if ((el as HTMLInputElement).disabled) continue;
+          if (Array.from(document.querySelectorAll<HTMLElement>(s)).some(isLivePlace)) {
             return { kind: 'place' as const, sel: s };
           }
         }
-        // 1a. "Please select a new delivery option" banner — Amazon
-        //     wiped a shipping group's prior selection after the cart
-        //     changed. The real Place Order button is hidden until
-        //     every group has a selection. Surface this state so the
-        //     caller can run pickBestCashbackDelivery against the
-        //     newly-empty groups instead of waiting 30s for a button
-        //     that won't appear until we click first.
+        // 1a. Banner-driven block. Amazon hides the real Place Order
+        //     button when a shipping group lost its selection. Surface
+        //     this so the caller can re-pick instead of waiting 30s.
         if (document.querySelector('[data-messageid="selectDeliveryOptionMessage"]')) {
           return { kind: 'delivery_options_changed' as const };
         }
@@ -1012,24 +1004,17 @@ export async function waitForCheckout(
     }
 
     if (state.kind === 'delivery_options_changed') {
-      if (emit) emit.step('step.waitForCheckout.delivery_options_changed', { iteration });
-      if (opts.onDeliveryOptionsChanged) {
-        try {
-          await opts.onDeliveryOptionsChanged();
-        } catch (err) {
-          return {
-            ok: false,
-            reason: `delivery-options-changed recovery failed: ${String(err).slice(0, 120)}`,
-          };
-        }
-        // Give Amazon a moment to re-render the place button after the
-        // radio click(s). The next iteration's poll picks it up.
-        await page.waitForTimeout(1_500);
-      } else {
-        // No recovery callback wired — fall through to the generic
-        // poll; the banner will likely persist until timeout.
-        await page.waitForTimeout(500);
+      emit?.step('step.waitForCheckout.delivery_options_changed', { iteration });
+      try {
+        await opts.onDeliveryOptionsChanged?.();
+      } catch (err) {
+        return {
+          ok: false,
+          reason: `delivery-options-changed recovery failed: ${String(err).slice(0, 120)}`,
+        };
       }
+      // Let Amazon re-render the place button after the radio click.
+      await page.waitForTimeout(opts.onDeliveryOptionsChanged ? 1_500 : 500);
       continue;
     }
 
