@@ -180,6 +180,63 @@ export function isDeliveryOptionsChangedBanner(doc: Document): boolean {
 }
 
 /**
+ * Read the target item's effective qty on the "Make updates to your
+ * items" page (rendered after Proceed-to-Checkout when Amazon caps a
+ * line). Used to gate the quantity_limit failure: when Amazon reduces
+ * the target from N to M (>= 1), we want to click Continue and proceed
+ * at M rather than fail the whole buy. M = 0 means the row was removed
+ * (true terminal — fail).
+ *
+ * Returns 0 when the target row isn't on this page.
+ *
+ * Each line-item is wrapped in `<div id="line-item-group-display-<id>">`.
+ * Stepper widget is hidden when Amazon caps the qty ("Maximum quantity
+ * reached" button replaces the [+]), so we can't anchor on the stepper.
+ * Anchor on the group container instead and read the qty digit from
+ * either an `<input>` or the visible step text.
+ */
+export function readTargetQtyOnUpdatesPage(
+  doc: Document,
+  targetAsin: string | null,
+  targetTitle: string | null,
+): number {
+  const findGroup = (): Element | null => {
+    // Locate the target via /dp/<asin> link or title-prefix text-node,
+    // then walk up to the line-item-group-display-* container.
+    let anchor: Element | null = null;
+    if (targetAsin) {
+      anchor =
+        doc.querySelector<HTMLAnchorElement>(`a[href*="/dp/${targetAsin}"]`) ??
+        doc.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${targetAsin}"]`);
+    }
+    if (!anchor && targetTitle && targetTitle.length > 5) {
+      const needle = targetTitle.toLowerCase();
+      const walker = doc.createTreeWalker(doc.body, doc.defaultView!.NodeFilter.SHOW_TEXT, null);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const txt = ((n as Text).textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (txt.length > 5 && txt.startsWith(needle)) {
+          anchor = n.parentElement;
+          break;
+        }
+      }
+    }
+    return anchor?.closest('[id^="line-item-group-display-"]') ?? null;
+  };
+  const group = findGroup();
+  if (!group) return 0;
+  // Amazon ships a dedicated `.a-stepper-value-live` element with just
+  // the qty digit — most reliable. Fall back to an input if present.
+  const live = group.querySelector('.a-stepper-value-live');
+  if (live) {
+    const n = parseInt((live.textContent ?? '').trim(), 10);
+    if (Number.isFinite(n) && n >= 0 && n < 100) return n;
+  }
+  const input = group.querySelector<HTMLInputElement>('input[type="number"], input[type="text"]');
+  if (input && /^\d{1,2}$/.test(input.value || '')) return parseInt(input.value, 10);
+  return 0;
+}
+
+/**
  * Selectors / labels that uniquely identify Amazon's "Verify your card"
  * (PMTS card-address-challenge) interstitial. Amazon renders this in place
  * of the Place Order button when our shipping/billing address change has

@@ -13,6 +13,7 @@ import {
   parseOrderConfirmation,
   readQuantityFromOrderDetailsHtml,
   readTargetCashbackFromDom,
+  readTargetQtyOnUpdatesPage,
   buildTitlePrefix,
   computeCashbackRadioPlans,
   findCancelItemsLinkOnOrderDetails,
@@ -1053,6 +1054,33 @@ describe('readQuantityFromOrderDetailsHtml — per-ASIN', () => {
     it('isDeliveryOptionsChangedBanner: detects the banner in the fixture', () => {
       const doc = docOf(fixture('spc/place-order-delivery-options-error-2026-05-11.html'));
       expect(isDeliveryOptionsChangedBanner(doc)).toBe(true);
+    });
+  });
+
+  describe('readTargetQtyOnUpdatesPage — QLA reduced-qty fixture', () => {
+    // Captured live 2026-05-11. Cart had Apple Watch qty=3; Amazon's
+    // "Make updates to your items" page caps it at qty=1 with the
+    // "Sorry, you've reached the purchase limit" banner. Pre-fix:
+    // AmazonG returned kind='quantity_limit' and failed the buy.
+    // New behavior: gate the failure on this function's return value —
+    // qty>=1 means click Continue and proceed.
+    const APPLE_WATCH_TITLE = 'Apple Watch Series 11';
+
+    it('returns 1 when Amazon reduced the target from qty=3 to qty=1', () => {
+      const doc = docOf(fixture('spc/qla-reduced-qty-2026-05-11.html'));
+      // /dp/ links are stripped on this page variant — title fallback
+      // is the only locator that works.
+      expect(readTargetQtyOnUpdatesPage(doc, null, APPLE_WATCH_TITLE)).toBe(1);
+    });
+
+    it('returns 0 when the target title is not on the page', () => {
+      const doc = docOf(fixture('spc/qla-reduced-qty-2026-05-11.html'));
+      expect(readTargetQtyOnUpdatesPage(doc, null, 'No Such Product')).toBe(0);
+    });
+
+    it('returns 0 when both asin and title are null', () => {
+      const doc = docOf(fixture('spc/qla-reduced-qty-2026-05-11.html'));
+      expect(readTargetQtyOnUpdatesPage(doc, null, null)).toBe(0);
     });
   });
 

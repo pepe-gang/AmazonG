@@ -296,6 +296,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
           const re = await pickBestCashbackDelivery(page, opts.minCashbackPct);
           step('step.buy.spc.delivery_options_changed.repicked', { changes: re.changes });
         },
+        targetAsin: dealAsin,
       },
     );
     if (!checkoutPage.ok) {
@@ -719,7 +720,17 @@ export async function waitForCheckout(
   allowedAddressPrefixes: string[] = [],
   debugDir?: string,
   emit?: { step: StepEmitter; warn: StepEmitter },
-  opts: { onDeliveryOptionsChanged?: () => Promise<void> } = {},
+  opts: {
+    onDeliveryOptionsChanged?: () => Promise<void>;
+    /** Target ASIN — used to gate the quantity_limit failure on whether
+     *  the target row was reduced to qty=0 (true QLA, can't continue) or
+     *  to qty>=1 (Amazon adjusted, click Continue and proceed). */
+    targetAsin?: string | null;
+    /** Target title prefix — fallback when /dp/<asin> link is absent on
+     *  the "Make updates to your items" page (live observed
+     *  2026-05-11 — no /dp/ links at all on this page variant). */
+    targetTitle?: string | null;
+  } = {},
 ): Promise<CheckoutReadyResult> {
   // Poll for either a Place Order button (success — we're on /spc), a
   // Chewbacca interstitial continue button (Amazon parked us at an
@@ -747,7 +758,7 @@ export async function waitForCheckout(
   while (Date.now() < deadline) {
     iteration += 1;
     const state = await page
-      .evaluate(({ placeSelectors, placeLabelPattern }) => {
+      .evaluate(({ placeSelectors, placeLabelPattern, targetAsin, targetTitle }) => {
         const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ');
 
         // 0. Terminal failure — Amazon's "This item is currently
@@ -795,23 +806,57 @@ export async function waitForCheckout(
         ) as HTMLElement | null;
         const PURCHASE_LIMIT_RE =
           /you['’]ve\s+reached\s+the\s+purchase\s+limit\s+for\s+this\s+item/i;
-        if (limitEl) {
-          const text = (limitEl.textContent ?? '').replace(/\s+/g, ' ').trim();
-          return {
-            kind: 'quantity_limit' as const,
-            message:
-              text ||
-              "Sorry, you've reached the purchase limit for this item. Please remove the item to continue.",
-          };
-        }
-        if (PURCHASE_LIMIT_RE.test(body)) {
-          const m = body.match(/sorry,?\s+you['’]ve\s+reached[^.]*\.?/i);
-          return {
-            kind: 'quantity_limit' as const,
-            message:
-              m?.[0]?.trim() ||
-              "Sorry, you've reached the purchase limit for this item. Please remove the item to continue.",
-          };
+        const limitMessage = limitEl
+          ? (limitEl.textContent ?? '').replace(/\s+/g, ' ').trim()
+          : PURCHASE_LIMIT_RE.test(body)
+            ? (body.match(/sorry,?\s+you['’]ve\s+reached[^.]*\.?/i)?.[0] ?? '').trim()
+            : null;
+        if (limitMessage !== null) {
+          // Amazon caps the cart; check if the target row was reduced
+          // to qty>=1 (proceed) vs removed/qty=0 (fail). Mirror the
+          // pure parser `readTargetQtyOnUpdatesPage`. Stepper [+] is
+          // hidden when qty is at max ("Maximum quantity reached"
+          // button replaces it), so anchor on Amazon's
+          // line-item-group-display-* container instead of the stepper.
+          const adjustedQty = (() => {
+            let anchor: Element | null = null;
+            if (targetAsin) {
+              anchor =
+                document.querySelector<HTMLAnchorElement>(`a[href*="/dp/${targetAsin}"]`) ??
+                document.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${targetAsin}"]`);
+            }
+            if (!anchor && targetTitle && targetTitle.length > 5) {
+              const needle = targetTitle.toLowerCase();
+              const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+              for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+                const txt = ((n as Text).textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+                if (txt.length > 5 && txt.startsWith(needle)) {
+                  anchor = n.parentElement;
+                  break;
+                }
+              }
+            }
+            const group = anchor?.closest('[id^="line-item-group-display-"]');
+            if (!group) return 0;
+            const live = group.querySelector('.a-stepper-value-live');
+            if (live) {
+              const n = parseInt((live.textContent ?? '').trim(), 10);
+              if (Number.isFinite(n) && n >= 0 && n < 100) return n;
+            }
+            const input = group.querySelector<HTMLInputElement>('input[type="number"], input[type="text"]');
+            if (input && /^\d{1,2}$/.test(input.value || '')) return parseInt(input.value, 10);
+            return 0;
+          })();
+          if (adjustedQty < 1) {
+            return {
+              kind: 'quantity_limit' as const,
+              message:
+                limitMessage ||
+                "Sorry, you've reached the purchase limit for this item. Please remove the item to continue.",
+            };
+          }
+          // Target still cart-able at reduced qty — fall through so the
+          // 'updates' state catches the page and clicks Continue.
         }
 
         // 1. Place Order — terminal success state. Try selector list
@@ -955,7 +1000,12 @@ export async function waitForCheckout(
           return { kind: 'updates' as const };
         }
         return { kind: 'none' as const };
-      }, { placeSelectors: CHECKOUT_PLACE_SELECTORS, placeLabelPattern: PLACE_ORDER_LABEL_RE.source })
+      }, {
+        placeSelectors: CHECKOUT_PLACE_SELECTORS,
+        placeLabelPattern: PLACE_ORDER_LABEL_RE.source,
+        targetAsin: opts.targetAsin ?? null,
+        targetTitle: opts.targetTitle ?? null,
+      })
       .catch(() => ({ kind: 'none' as const }));
 
     // Per-iteration trace. Lets us see, e.g., "iter 1 kind=deliver …; iter
@@ -1152,34 +1202,43 @@ export async function waitForCheckout(
     if (state.kind === 'updates') {
       const clicked = await page
         .evaluate(() => {
-          // Prefer a submit-input labeled "Continue" (yellow primary
-          // button); fall back to any visible element whose label/value
-          // is exactly "Continue".
+          // Resolve a button's label including `aria-labelledby` →
+          // referenced text. Chewbacca's Continue input has no value /
+          // aria-label / textContent — only an aria-labelledby pointer
+          // to a separate <span>Continue</span>.
+          const readLabel = (el: HTMLElement): string => {
+            const direct = (
+              (el as HTMLInputElement).value ||
+              el.getAttribute('aria-label') ||
+              el.textContent ||
+              ''
+            ).trim();
+            if (direct) return direct;
+            const ref = el.getAttribute('aria-labelledby');
+            if (!ref) return '';
+            return ref
+              .split(/\s+/)
+              .map((id) => document.getElementById(id))
+              .filter((n): n is HTMLElement => n !== null)
+              .map((n) => (n.textContent || '').trim())
+              .filter(Boolean)
+              .join(' ')
+              .trim();
+          };
+          const isContinue = (el: HTMLElement): boolean =>
+            el.offsetParent !== null && /^continue$/i.test(readLabel(el));
           const submit = Array.from(
-            document.querySelectorAll<HTMLInputElement>(
-              'input[type="submit"], button[type="submit"]',
+            document.querySelectorAll<HTMLElement>(
+              'input[type="submit"], button[type="submit"], input[type="button"], button:not([type])',
             ),
-          ).find((el) => {
-            if (el.offsetParent === null) return false;
-            const label = (el.value || el.getAttribute('aria-label') || el.textContent || '').trim();
-            return /^continue$/i.test(label);
-          });
+          ).find(isContinue);
           if (submit) {
             submit.click();
             return true;
           }
           const fallback = Array.from(
             document.querySelectorAll<HTMLElement>('span, button, input, a'),
-          ).find((el) => {
-            if (el.offsetParent === null) return false;
-            const label = (
-              (el as HTMLInputElement).value ||
-              el.getAttribute('aria-label') ||
-              el.textContent ||
-              ''
-            ).trim();
-            return /^continue$/i.test(label);
-          });
+          ).find(isContinue);
           if (!fallback) return false;
           fallback.click();
           return true;

@@ -952,6 +952,11 @@ export async function buyWithFillers(
           cid,
         );
       },
+      // QLA-with-reduced-qty: when Amazon caps the cart, gate the
+      // failure on whether the target row still has qty>=1. If so,
+      // 'updates' state takes over and Continue is clicked.
+      targetAsin,
+      targetTitle: info.title,
     },
   );
   if (!ready.ok) {
