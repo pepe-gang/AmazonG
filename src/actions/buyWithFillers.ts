@@ -940,6 +940,21 @@ export async function buyWithFillers(
       step: (m, d) => logger.info(m, d, cid),
       warn: (m, d) => logger.warn(m, d, cid),
     },
+    {
+      // Banner-driven recovery. Amazon hides the Place Order button
+      // when "Please select a new delivery option" is showing, so
+      // waitForCheckout would time out at 30s unless we re-pick the
+      // unchecked group's option here. pickBestCashbackDelivery's
+      // unchecked-group branch handles 0%-cashback filler groups too.
+      onDeliveryOptionsChanged: async () => {
+        const re = await pickBestCashbackDelivery(page, opts.minCashbackPct);
+        logger.info(
+          'step.fillerBuy.spc.delivery_options_changed.repicked',
+          { changes: re.changes },
+          cid,
+        );
+      },
+    },
   );
   if (!ready.ok) {
     // Both `unavailable` and `quantity_limit` are terminal — the item

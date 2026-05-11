@@ -290,6 +290,13 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       page,
       opts.allowedAddressPrefixes,
       opts.debugDir,
+      undefined,
+      {
+        onDeliveryOptionsChanged: async () => {
+          const re = await pickBestCashbackDelivery(page, opts.minCashbackPct);
+          step('step.buy.spc.delivery_options_changed.repicked', { changes: re.changes });
+        },
+      },
     );
     if (!checkoutPage.ok) {
       // Amazon's "This item is currently unavailable" page is a terminal
@@ -712,6 +719,7 @@ export async function waitForCheckout(
   allowedAddressPrefixes: string[] = [],
   debugDir?: string,
   emit?: { step: StepEmitter; warn: StepEmitter },
+  opts: { onDeliveryOptionsChanged?: () => Promise<void> } = {},
 ): Promise<CheckoutReadyResult> {
   // Poll for either a Place Order button (success — we're on /spc), a
   // Chewbacca interstitial continue button (Amazon parked us at an
@@ -810,11 +818,31 @@ export async function waitForCheckout(
         //    first (fast path); if none match, fall back to a text scan
         //    across visible buttons/inputs so new Amazon layouts that
         //    ship with different ids/attributes still resolve.
+        //
+        //    Filter out blocker placeholders: Amazon renders a disabled
+        //    "review-order-continue-blocker" alongside the real button.
+        //    When the order is blocked (delivery error etc.), the real
+        //    button is hidden and the blocker is visible. Checking
+        //    `!disabled` skips the blocker so we don't claim "place
+        //    found" against a button that can't actually submit.
         for (const s of placeSelectors) {
-          const el = document.querySelector(s) as HTMLElement | null;
-          if (el && el.offsetParent !== null) {
+          const els = document.querySelectorAll(s);
+          for (const candidate of Array.from(els)) {
+            const el = candidate as HTMLElement;
+            if (el.offsetParent === null) continue;
+            if ((el as HTMLInputElement).disabled) continue;
             return { kind: 'place' as const, sel: s };
           }
+        }
+        // 1a. "Please select a new delivery option" banner — Amazon
+        //     wiped a shipping group's prior selection after the cart
+        //     changed. The real Place Order button is hidden until
+        //     every group has a selection. Surface this state so the
+        //     caller can run pickBestCashbackDelivery against the
+        //     newly-empty groups instead of waiting 30s for a button
+        //     that won't appear until we click first.
+        if (document.querySelector('[data-messageid="selectDeliveryOptionMessage"]')) {
+          return { kind: 'delivery_options_changed' as const };
         }
         // Label resolver that also follows aria-labelledby references.
         // Amazon's Chewbacca pipeline commonly ships inputs with no value
@@ -981,6 +1009,28 @@ export async function waitForCheckout(
 
     if (state.kind === 'place') {
       return { ok: true, detected: state.sel };
+    }
+
+    if (state.kind === 'delivery_options_changed') {
+      if (emit) emit.step('step.waitForCheckout.delivery_options_changed', { iteration });
+      if (opts.onDeliveryOptionsChanged) {
+        try {
+          await opts.onDeliveryOptionsChanged();
+        } catch (err) {
+          return {
+            ok: false,
+            reason: `delivery-options-changed recovery failed: ${String(err).slice(0, 120)}`,
+          };
+        }
+        // Give Amazon a moment to re-render the place button after the
+        // radio click(s). The next iteration's poll picks it up.
+        await page.waitForTimeout(1_500);
+      } else {
+        // No recovery callback wired — fall through to the generic
+        // poll; the banner will likely persist until timeout.
+        await page.waitForTimeout(500);
+      }
+      continue;
     }
 
     if (state.kind === 'unavailable') {

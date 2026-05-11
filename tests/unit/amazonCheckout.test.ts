@@ -1049,6 +1049,11 @@ describe('readQuantityFromOrderDetailsHtml — per-ASIN', () => {
       const mainPlan = plans.find((p) => p.name === MAIN_GROUP);
       expect(mainPlan).toBeUndefined();
     });
+
+    it('isDeliveryOptionsChangedBanner: detects the banner in the fixture', () => {
+      const doc = docOf(fixture('spc/place-order-delivery-options-error-2026-05-11.html'));
+      expect(isDeliveryOptionsChangedBanner(doc)).toBe(true);
+    });
   });
 
   describe('against real Amazon order-details HTML', () => {
