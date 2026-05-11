@@ -516,8 +516,8 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       orderId = fastOrderId;
       step('step.buy.orderid.fast', { source: 'thankyou_dom', orderId });
     } else {
-      step('step.buy.orderid.fetch', { url: 'https://www.amazon.com/gp/css/order-history' });
-      orderId = await fetchOrderIdFromHistory(page).catch(() => null);
+      step('step.buy.orderid.fetch', { url: 'https://www.amazon.com/gp/css/order-history', dealAsin });
+      orderId = await fetchOrderIdFromHistory(page, dealAsin).catch(() => null);
       if (!orderId) {
         warn('step.buy.orderid.notfound', {
           note: 'neither thank-you DOM nor order-history page revealed a parseable order id',
@@ -2465,21 +2465,107 @@ async function verifyOrderContainsAsin(
 }
 
 /**
- * Navigate to Amazon Your Orders and extract the most recent order #. Used
- * as a fallback when the confirmation page itself doesn't expose the id
- * (Amazon has several confirmation templates; some hide the id).
+ * Navigate to Amazon Your Orders and extract the order id for `dealAsin`.
+ * Used as a fallback when the confirmation page itself doesn't expose
+ * the id (Amazon has several confirmation templates; some hide it).
+ *
+ * Two readiness gates before scanning (INC-2026-05-10, cpnhuy@gmail.com,
+ * single-buy lost orderId because pre-Siege body-grep ran 3s after
+ * Place Order and matched a STALE order from a prior buy — guard then
+ * correctly nulled it as cross-deal contamination):
+ *
+ *   (a) `csd-encrypted-sensitive` count == 0  → every visible card
+ *       finished Siege client-side decryption. Without this, the
+ *       grep would only match cards that decrypted first.
+ *
+ *   (b) `<a href="/dp/{dealAsin}">` exists inside an `.order-card` →
+ *       the just-placed order has propagated to the listing. Without
+ *       this, the grep matches the TOP card (most recent in
+ *       history), which is a stale order from before this buy.
+ *
+ * Then we ASIN-scope the scan: walk only the `.order-card` elements,
+ * find the one containing a `/dp/{dealAsin}` link, return its
+ * orderId. Returns null on (a) timeout / (b) timeout / no scoped
+ * match — caller's existing cross-deal-contamination guard runs the
+ * same kind of verification, but doing it here avoids the wasted
+ * orderId-untrusted log + null round-trip on a brand-new order that
+ * just hasn't propagated yet.
+ *
+ * Pre-fix used `waitUntil: 'domcontentloaded'` + a regex against
+ * `document.body.innerText` for `Order # {pattern}`. That returned
+ * the topmost order regardless of whose ASIN it contained.
  */
-async function fetchOrderIdFromHistory(page: Page): Promise<string | null> {
-  await page.goto(
-    'https://www.amazon.com/gp/css/order-history?ref_=nav_AccountFlyout_orders',
-    { waitUntil: 'domcontentloaded', timeout: 15_000 },
-  );
+async function fetchOrderIdFromHistory(
+  page: Page,
+  dealAsin: string | null,
+): Promise<string | null> {
+  await page
+    .goto(
+      'https://www.amazon.com/gp/css/order-history?ref_=nav_AccountFlyout_orders',
+      { waitUntil: 'commit', timeout: 15_000 },
+    )
+    .catch(() => undefined);
+
+  // Combined readiness wait — Siege done AND target order propagated.
+  // 15s budget; falls through on timeout so the regex scan still
+  // gets a chance against whatever decrypted.
+  await page
+    .waitForFunction(
+      (asin) => {
+        if (document.querySelectorAll('.csd-encrypted-sensitive').length !== 0) {
+          return false;
+        }
+        if (!asin) return true;
+        const orderCards = document.querySelectorAll('.order-card.js-order-card');
+        for (const card of Array.from(orderCards)) {
+          if (
+            card.querySelector(
+              `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"]`,
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
+      },
+      dealAsin,
+      { timeout: 15_000, polling: 500 },
+    )
+    .catch(() => undefined);
+
   return page
-    .evaluate(() => {
-      const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
-      const m = body.match(/(?:Order\s*#\s*|ORDER\s*#\s*)(\d{3}-\d{7}-\d{7})/i);
-      return m?.[1] ?? null;
-    })
+    .evaluate(
+      ({ asin }) => {
+        // ASIN-scoped scan: prefer the order card that actually
+        // contains our deal's /dp/<asin> link. Falls back to the
+        // topmost card only when asin is null (single-buy without a
+        // parseable ASIN — rare).
+        if (asin) {
+          const cards = Array.from(
+            document.querySelectorAll<HTMLElement>('.order-card.js-order-card'),
+          );
+          for (const card of cards) {
+            if (
+              !card.querySelector(
+                `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"]`,
+              )
+            ) {
+              continue;
+            }
+            const text = (card.innerText || '').replace(/\s+/g, ' ');
+            const m = text.match(/\b(\d{3}-\d{7}-\d{7})\b/);
+            if (m) return m[1] ?? null;
+          }
+          return null;
+        }
+        const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
+        const m = body.match(
+          /(?:Order\s*#\s*|ORDER\s*#\s*)(\d{3}-\d{7}-\d{7})/i,
+        );
+        return m?.[1] ?? null;
+      },
+      { asin: dealAsin },
+    )
     .catch(() => null);
 }
 

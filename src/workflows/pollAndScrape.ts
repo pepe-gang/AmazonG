@@ -542,7 +542,21 @@ async function runFillerBuyWithRetries(
   // before; a cashback_gate failure surfaces the surgical-exhausted
   // result directly.
   const maxAttempts = surgicalCashbackRecovery ? 1 : FILLER_MAX_ATTEMPTS;
+  // Per-pool retry fallback. The eero pool only has ~13 unique items
+  // even at its broadest query, so attempt 1 burns most of them into
+  // `attemptedAsins`. Switching to amazon-basics on retry gives the
+  // picker a fresh ~45-item pool with zero overlap (different brand
+  // surface entirely), letting attempt 2/3 pursue different fillers
+  // without reusing any ASIN. Falls back to the original pool when
+  // no mapping is defined.
+  const retryPoolFallback: Partial<Record<FillerPool, FillerPool>> = {
+    eero: 'amazon-basics',
+  };
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const effectivePool: FillerPool =
+      attempt === 1
+        ? fillerPool
+        : (retryPoolFallback[fillerPool] ?? fillerPool);
     if (attempt > 1) {
       logger.info(
         'step.fillerBuy.retryWhole.start',
@@ -551,6 +565,11 @@ async function runFillerBuyWithRetries(
           maxAttempts,
           priorReason: lastRaw.ok ? null : lastRaw.reason,
           excludedAsinsCount: attemptedAsins.size,
+          originalPool: fillerPool,
+          effectivePool,
+          ...(effectivePool !== fillerPool
+            ? { poolSwitched: true }
+            : {}),
         },
         cid,
       );
@@ -562,7 +581,7 @@ async function runFillerBuyWithRetries(
       minCashbackPct,
       requireMinCashback,
       dryRun: deps.buyDryRun,
-      fillerPool,
+      fillerPool: effectivePool,
       attemptedAsins,
       // Only the first attempt can reuse the verify-phase scrape — by
       // attempt 2 the page state has drifted (we've been to /spc and

@@ -317,21 +317,12 @@ const WHEY_PROTEIN_SEARCH_TERMS: readonly string[] = [
   'gnc whey', 'gold standard whey', 'pure protein whey',
 ];
 
-// Eero (Amazon-owned mesh-WiFi brand). All "mesh"-anchored so the
-// pool surfaces eero routers/extenders/accessories and stays out of
-// Echo / Fire / Kindle bins that Amazon's loose search would
-// otherwise return for bare "eero" queries. Expanded 2026-05-10 to
-// cover the eero 7 line (and other generations) — the eero 6
-// search alone returns ~3 unique items, leaving the filler target
-// short across consecutive buys as attemptedAsins accumulates.
+// Eero (Amazon-owned mesh-WiFi brand). User-curated 2026-05-10 to
+// generation-anchored queries — keeps the surface explicitly eero
+// (no Echo leakage) while spanning both current product lines.
 const EERO_SEARCH_TERMS: readonly string[] = [
-  'amazon eero mesh',
-  'amazon eero mesh charger',
-  'amazon eero 6 mesh',
-  'amazon eero 6+ mesh',
-  'amazon eero 7 mesh',
-  'amazon eero pro mesh',
-  'amazon eero max mesh',
+  'amazon eero 6',
+  'amazon eero 7',
 ];
 
 // Amazon Basics (house-brand commodities). Single broad term per user
@@ -367,6 +358,17 @@ const GLOBAL_FILLER_TITLE_BLOCKLIST: readonly RegExp[] = [
   // targetAsin is pre-seeded into the seen set BEFORE the blocklist
   // runs, so a user buying an Echo deal can still place the order.
   /\bamazon\s+echo\b/i,
+  // 2026-05-10 (user request): hard-anchor on the specific Echo
+  // product names so cards that drop the "Amazon" brand chip in
+  // their title (Layout B variants we've seen in the wild) can't
+  // slip through. The brand-chip concat in extractSearchResultCandidates
+  // usually produces "Amazon Echo Dot…" which the rule above
+  // catches, but Amazon occasionally renders a card without the chip
+  // — those titles would read just "Echo Dot…" and bypass the
+  // `amazon\s+echo` anchor. These belt-and-suspenders rules close
+  // the loop on the two most-leaked variants.
+  /\becho\s+dot\b/i,
+  /\becho\s+pop\b/i,
 ];
 
 /**
@@ -749,12 +751,57 @@ export async function buyWithFillers(
     },
     cid,
   );
-  const fillersResult = await addFillerItems(page, targetAsin, cid, {
+  let fillersResult = await addFillerItems(page, targetAsin, cid, {
     terms: fillerTerms,
     targetCount: fillerTargetCount,
     attemptedAsins: opts.attemptedAsins,
     pool: opts.fillerPool,
   }, logCtx);
+  // In-attempt pool fallback for narrow pools when Amazon rate-limited
+  // every search term. Triggers ONLY when:
+  //   1. The configured pool has a fallback mapping (currently only
+  //      eero → amazon-basics).
+  //   2. The first run added 0 fillers.
+  //   3. Every term we tried got hit with the meta-refresh interstitial
+  //      (metaRefreshHits === termsTried). Confirms the failure was
+  //      rate-limit, not "no candidates" — otherwise switching pools
+  //      wouldn't help.
+  // Distinct from the outer cashback_gate retry-pool-fallback in
+  // runFillerBuyWithRetries — that one runs on a fresh attempt
+  // ~60-90s later; this one runs RIGHT NOW so we don't ship a naked
+  // cart to /spc on attempt 1.
+  const IN_ATTEMPT_FALLBACK: Partial<Record<FillerPool, FillerPool>> = {
+    eero: 'amazon-basics',
+  };
+  if (
+    fillersResult.added === 0 &&
+    opts.fillerPool &&
+    IN_ATTEMPT_FALLBACK[opts.fillerPool] &&
+    fillersResult.metaRefreshHits > 0 &&
+    fillersResult.metaRefreshHits === fillersResult.termsTried
+  ) {
+    const fallbackPool = IN_ATTEMPT_FALLBACK[opts.fillerPool]!;
+    const fallbackTerms = termsForPool(fallbackPool);
+    if (fallbackTerms) {
+      logger.warn(
+        'step.fillerBuy.fillers.inAttemptFallback',
+        {
+          originalPool: opts.fillerPool,
+          fallbackPool,
+          metaRefreshHits: fillersResult.metaRefreshHits,
+          termsTried: fillersResult.termsTried,
+          reason: 'every search term rate-limited; switching pool within this attempt',
+        },
+        cid,
+      );
+      fillersResult = await addFillerItems(page, targetAsin, cid, {
+        terms: fallbackTerms,
+        targetCount: fillerTargetCount,
+        attemptedAsins: opts.attemptedAsins,
+        pool: fallbackPool,
+      }, logCtx);
+    }
+  }
   const fillersAdded = fillersResult.added;
   const fillerAsins = fillersResult.asins;
   if (fillersAdded < fillerTargetCount) {
@@ -3203,6 +3250,14 @@ type SearchFillerDiag = {
   totalCardsParsed: number;
   /** Whether the page looks like a captcha / robot-check intercept. */
   looksLikeCaptcha: boolean;
+  /** True when Amazon returned a meta-refresh interstitial (~2.6KB
+   *  stub with `<meta http-equiv="refresh" content="N; URL=...">`) —
+   *  Amazon's silent edge rate-limit. INC-2026-05-10 (cpnnick rebuy):
+   *  bot fired 7 search terms in <1s, every one came back as a 2.6KB
+   *  meta-refresh stub → 0 candidates → 0 fillers → buy placed naked. */
+  metaRefresh: boolean;
+  /** Whether this result is the OUTCOME of a meta-refresh retry. */
+  retried?: boolean;
   /** Per-filter rejection counts when totalCardsParsed > 0 but
    *  candidates ends up 0 — disambiguates "Amazon returned nothing" from
    *  "Amazon returned items but all got filtered out". */
@@ -3219,11 +3274,19 @@ type SearchFillerDiag = {
   bodyPreview: string;
 };
 
-async function searchFillerCandidatesViaHttp(
+/**
+ * Single-attempt HTTP fetch + parse for a search-results page. The
+ * caller (`searchFillerCandidatesViaHttp`) wraps this in retry logic
+ * when Amazon's rate-limit interstitial fires.
+ */
+async function fetchSearchPageOnce(
   page: Page,
-  term: string,
-): Promise<{ candidates: SearchResultCandidate[]; diag: SearchFillerDiag }> {
-  const url = buildFillerSearchUrl(term);
+  url: string,
+): Promise<{
+  status: number;
+  html: string;
+  metaRefreshDelaySec: number | null;
+}> {
   let res;
   try {
     res = await page.context().request.get(url, {
@@ -3231,24 +3294,76 @@ async function searchFillerCandidatesViaHttp(
       timeout: 15_000,
     });
   } catch {
-    return {
-      candidates: [],
-      diag: { status: -1, bodyLen: 0, totalCardsParsed: 0, looksLikeCaptcha: false, bodyPreview: '' },
-    };
+    return { status: -1, html: '', metaRefreshDelaySec: null };
   }
   if (!res.ok()) {
-    return {
-      candidates: [],
-      diag: { status: res.status(), bodyLen: 0, totalCardsParsed: 0, looksLikeCaptcha: false, bodyPreview: '' },
-    };
+    return { status: res.status(), html: '', metaRefreshDelaySec: null };
   }
   let html: string;
   try {
     html = await res.text();
   } catch {
+    return { status: res.status(), html: '', metaRefreshDelaySec: null };
+  }
+  // Detect Amazon's rate-limit meta-refresh stub. Body is ~2.6KB with
+  // a `<meta http-equiv="refresh" content="5; URL='/s?k=...'">` and
+  // nothing else useful — no search cards. Parse the delay so the
+  // caller can wait the recommended interval before retrying. Limited
+  // to head/<head> region so an article body that contains the words
+  // "http-equiv refresh" can't false-positive.
+  const head = html.slice(0, 4_000);
+  const refreshMatch = head.match(
+    /<meta\s+http-equiv=["']refresh["']\s+content=["'](\d+)\s*;\s*URL=/i,
+  );
+  return {
+    status: res.status(),
+    html,
+    metaRefreshDelaySec: refreshMatch?.[1] ? parseInt(refreshMatch[1]!, 10) : null,
+  };
+}
+
+async function searchFillerCandidatesViaHttp(
+  page: Page,
+  term: string,
+): Promise<{ candidates: SearchResultCandidate[]; diag: SearchFillerDiag }> {
+  const url = buildFillerSearchUrl(term);
+  let { status, html, metaRefreshDelaySec } = await fetchSearchPageOnce(page, url);
+  let retryCount = 0;
+  // Amazon's rate-limit interstitial: respect the meta-refresh delay
+  // and retry. INC-2026-05-10 round 2: even after one 5s retry,
+  // Amazon kept serving the stub on cpnduy/cpnhuy's eero searches
+  // → 0 fillers → naked cart. Now: up to 2 retries with progressive
+  // backoff (1× hint, then 2× hint). If Amazon is STILL throttling
+  // after that, the search is genuinely poisoned and the caller's
+  // pool-fallback (eero → amazon-basics on cashback_gate failure)
+  // OR the in-attempt fallback below is the only escape. Each delay
+  // is clamped to [2s, 12s] so a malicious or absurd refresh hint
+  // can't stall the buy indefinitely.
+  const MAX_RETRIES = 2;
+  while (metaRefreshDelaySec !== null && retryCount < MAX_RETRIES) {
+    const baseSec = Math.min(Math.max(metaRefreshDelaySec, 2), 12);
+    // Progressive backoff: 1x on retry 1, 2x on retry 2.
+    const delayMs = baseSec * 1_000 * (retryCount + 1);
+    await new Promise((r) => setTimeout(r, delayMs));
+    const retry = await fetchSearchPageOnce(page, url);
+    status = retry.status;
+    html = retry.html;
+    metaRefreshDelaySec = retry.metaRefreshDelaySec;
+    retryCount += 1;
+  }
+  const retried = retryCount > 0;
+  if (status < 200 || status >= 300 || html.length === 0) {
     return {
       candidates: [],
-      diag: { status: res.status(), bodyLen: 0, totalCardsParsed: 0, looksLikeCaptcha: false, bodyPreview: '' },
+      diag: {
+        status,
+        bodyLen: 0,
+        totalCardsParsed: 0,
+        looksLikeCaptcha: false,
+        metaRefresh: metaRefreshDelaySec !== null,
+        ...(retried ? { retried: true } : {}),
+        bodyPreview: '',
+      },
     };
   }
   const looksLikeCaptcha =
@@ -3269,10 +3384,12 @@ async function searchFillerCandidatesViaHttp(
     return true;
   });
   const diag: SearchFillerDiag = {
-    status: res.status(),
+    status,
     bodyLen: html.length,
     totalCardsParsed: all.length,
     looksLikeCaptcha,
+    metaRefresh: metaRefreshDelaySec !== null,
+    ...(retried ? { retried: true } : {}),
     bodyPreview: html.replace(/\s+/g, ' ').slice(0, 200),
     ...(all.length > 0 && candidates.length === 0
       ? { rejectedByFilter: { notPrime, noPrice, priceBelow, priceAbove } }
@@ -3529,7 +3646,7 @@ async function addFillerItems(
   // Appended last so existing call-sites that pass fillerOpts as the
   // trailing object literal still parse cleanly.
   logCtx: Record<string, unknown> = {},
-): Promise<{ added: number; asins: string[] }> {
+): Promise<{ added: number; asins: string[]; metaRefreshHits: number; termsTried: number }> {
   // Shadow `logger` so the 7 call sites in this function get the disk-log
   // routing fields (jobId+profile) merged in. See makeBoundLogger above.
   // eslint-disable-next-line @typescript-eslint/no-shadow
@@ -3542,20 +3659,39 @@ async function addFillerItems(
   // 1. Walk through search terms until we have enough fresh candidates.
   //    Most of the time one term is enough (~50 results per page; even
   //    after dedup we usually have 30+ fresh candidates).
+  //
+  //    Pacing — Amazon's edge rate-limiter (INC-2026-05-10) returns a
+  //    ~2.6KB meta-refresh stub when search HTTP requests fire in
+  //    rapid succession (7 terms in <1s triggered it for cpnnick's
+  //    rebuy). Sleeping ~400ms between terms keeps the request rate
+  //    under the threshold without meaningfully extending wall-clock
+  //    (most buys settle on the first term). The PER-CALL meta-refresh
+  //    retry inside `searchFillerCandidatesViaHttp` is the safety net
+  //    if pacing isn't enough.
+  const INTER_TERM_DELAY_MS = 400;
   const candidates: SearchResultCandidate[] = [];
   let csrf: string | null = null;
-  for (const term of terms) {
+  let metaRefreshHits = 0;
+  for (let termIdx = 0; termIdx < terms.length; termIdx++) {
+    const term = terms[termIdx]!;
     if (candidates.length >= targetCount) break;
+    if (termIdx > 0) {
+      await new Promise((r) => setTimeout(r, INTER_TERM_DELAY_MS));
+    }
     const { candidates: found, diag } = await searchFillerCandidatesViaHttp(
       mainPage,
       term,
     );
+    if (diag.metaRefresh) metaRefreshHits++;
     if (found.length === 0) {
       // Enriched diagnostic — disambiguates the empty case:
       //   bodyLen=0 + status=-1 → request threw (network error)
       //   bodyLen<5_000 + status=200 → Amazon returned a near-empty
       //     response (often the lightweight robot-check page)
       //   looksLikeCaptcha=true → caught Amazon's bot challenge
+      //   metaRefresh=true → Amazon's rate-limit interstitial (we
+      //     retried up to 2× per call already; if still set, this
+      //     account is being throttled)
       //   totalCardsParsed>0 + rejectedByFilter → cards parsed but
       //     every one was rejected (Prime/price gate too strict)
       //   totalCardsParsed=0 + bodyLen>50k → parser miss; Amazon
@@ -3603,7 +3739,7 @@ async function addFillerItems(
       { termsTried: terms.length, targetCount },
       cid,
     );
-    return { added: 0, asins: [] };
+    return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };
   }
 
   // 2. Single batch POST. Phantom-commit guard runs against the
@@ -3631,7 +3767,7 @@ async function addFillerItems(
       { error: String(err).slice(0, 120), candidates: items.length },
       cid,
     );
-    return { added: 0, asins: [] };
+    return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };
   }
   const tookMs = Date.now() - t0;
   if (!res.ok()) {
@@ -3640,7 +3776,7 @@ async function addFillerItems(
       { status: res.status(), candidates: items.length, tookMs },
       cid,
     );
-    return { added: 0, asins: [] };
+    return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };
   }
   const respText = await res.text().catch(() => '');
   if (!looksLikeCartResponse(respText)) {
@@ -3649,7 +3785,7 @@ async function addFillerItems(
       { status: res.status(), candidates: items.length, tookMs },
       cid,
     );
-    return { added: 0, asins: [] };
+    return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };
   }
   const committed = asinsCommittedInResponse(
     respText,
@@ -3665,7 +3801,7 @@ async function addFillerItems(
     },
     cid,
   );
-  return { added: committed.length, asins: committed };
+  return { added: committed.length, asins: committed, metaRefreshHits, termsTried: terms.length };
 }
 
 /**
