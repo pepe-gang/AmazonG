@@ -42,9 +42,8 @@ export function retailPrice(a: JobAttempt): number | null {
  * Excluded: queued / in_progress (buy not placed yet) /
  * failed / cancelled / action_required (no successful placement).
  */
-const PROFIT_ELIGIBLE_STATUSES = new Set([
+const PROFIT_ELIGIBLE_STATUSES = new Set<JobAttempt['status']>([
   'awaiting_verification',
-  'pending_tracking',
   'verified',
   'completed',
 ]);

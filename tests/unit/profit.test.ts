@@ -123,16 +123,13 @@ describe('computeProfit', () => {
     expect(computeProfit(attempt({ status }))).toBeNull();
   });
 
-  it.each<JobAttemptStatus>([
-    'awaiting_verification',
-    'pending_tracking',
-  ])('counts projected profit for status=%s (placed, not yet verified)', (status) => {
+  it('counts projected profit for status=awaiting_verification (placed, not yet verified)', () => {
     // BG shows projected profit as soon as the buy places. AmazonG
-    // aligns with that — pending rows compute profit from whatever
-    // data is on file. If Amazon later cancels, the row flips to
-    // cancelled_by_amazon and profit drops to null.
+    // aligns with that — awaiting_verification rows compute profit
+    // from whatever data is on file. If Amazon later cancels, the
+    // row flips to cancelled_by_amazon and profit drops to null.
     const p = computeProfit(
-      attempt({ status, price: 110, cost: '$100.00', cashbackPct: 5, quantity: 1 }),
+      attempt({ status: 'awaiting_verification', price: 110, cost: '$100.00', cashbackPct: 5, quantity: 1 }),
     );
     expect(p).toBeCloseTo(15, 10);
   });

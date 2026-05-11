@@ -941,9 +941,6 @@ export async function buyWithFillers(
       warn: (m, d) => logger.warn(m, d, cid),
     },
     {
-      // Re-pick when Amazon hides Place Order behind "select a new
-      // delivery option". Picker's unchecked-group branch covers
-      // 0%-back filler groups.
       onDeliveryOptionsChanged: async () => {
         const re = await pickBestCashbackDelivery(page, opts.minCashbackPct);
         logger.info(
@@ -952,13 +949,22 @@ export async function buyWithFillers(
           cid,
         );
       },
-      // QLA-with-reduced-qty: when Amazon caps the cart, gate the
-      // failure on whether the target row still has qty>=1. If so,
-      // 'updates' state takes over and Continue is clicked.
       targetAsin,
       targetTitle: info.title,
     },
   );
+  // QLA capped the target row: Amazon reduced our request from N to M.
+  // Use M as the cart-add target downstream so the qty reported to BG
+  // matches the actual placed qty instead of our original intent.
+  let effectiveTargetQuantity = targetQuantity;
+  if (ready.ok && typeof ready.adjustedQty === 'number' && ready.adjustedQty > 0) {
+    logger.warn(
+      'step.fillerBuy.spc.qla.adjusted',
+      { from: targetQuantity, to: ready.adjustedQty, targetAsin },
+      cid,
+    );
+    effectiveTargetQuantity = ready.adjustedQty;
+  }
   if (!ready.ok) {
     // Both `unavailable` and `quantity_limit` are terminal — the item
     // can't be bought from this account right now. Mirror buyNow.ts's
@@ -1655,7 +1661,7 @@ export async function buyWithFillers(
   // shipping-group's item count, not the target's qty).
   const qtyResolution = resolvePlacedQuantity({
     fromSpcDom: placedQuantity,
-    fromCartAddTarget: targetQuantity,
+    fromCartAddTarget: effectiveTargetQuantity,
   });
   const finalPlacedQuantity = qtyResolution.quantity;
   if (qtyResolution.warn === 'spc_disagrees') {

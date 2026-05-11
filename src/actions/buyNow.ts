@@ -317,6 +317,12 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       return fail('checkout_wait', checkoutPage.reason, checkoutPage.detail);
     }
     step('step.buy.checkout', { detected: checkoutPage.detected });
+    // QLA capped the target row: Amazon reduced our request to M >= 1.
+    // Use M downstream so the qty reported to BG matches what shipped.
+    if (typeof checkoutPage.adjustedQty === 'number' && checkoutPage.adjustedQty > 0 && checkoutPage.adjustedQty !== placedQuantity) {
+      warn('step.buy.qla.adjusted', { from: placedQuantity, to: checkoutPage.adjustedQty });
+      placedQuantity = checkoutPage.adjustedQty;
+    }
 
     // 4. Checkout[0]: re-verify item price on /spc (catches taxes/shipping
     //    that push the total past the retail cap).
@@ -712,7 +718,16 @@ async function addToCartThenCheckout(
 }
 
 export type CheckoutReadyResult =
-  | { ok: true; detected: string }
+  | {
+      ok: true;
+      detected: string;
+      /** When Amazon capped the target row on the "Make updates to your
+       *  items" page (QLA banner with qty reduced from N to M), this
+       *  holds M — the qty Amazon will actually place. Buy code uses it
+       *  to correct the cart-add target value on the way to BG, so the
+       *  dashboard shows M rather than N. Absent when no QLA gate fired. */
+      adjustedQty?: number;
+    }
   | { ok: false; reason: string; detail?: string; kind?: 'unavailable' | 'quantity_limit' | 'timeout' };
 
 export async function waitForCheckout(
@@ -754,6 +769,10 @@ export async function waitForCheckout(
   // (address → billing → payment → /spc), each adding one click.
   const MAX_DELIVER_CLICKS = 5;
   let iteration = 0;
+  // Captured on the QLA gate fall-through (when Amazon caps the target
+  // row from N to M >= 1). Reported back to the caller so BG sees the
+  // corrected qty instead of the cart-add target.
+  let qlaAdjustedQty: number | null = null;
 
   while (Date.now() < deadline) {
     iteration += 1;
@@ -818,7 +837,8 @@ export async function waitForCheckout(
           // hidden when qty is at max ("Maximum quantity reached"
           // button replaces it), so anchor on Amazon's
           // line-item-group-display-* container instead of the stepper.
-          const adjustedQty = (() => {
+          // eslint-disable-next-line @typescript-eslint/no-shadow
+          const adjustedQty: number = (() => {
             let anchor: Element | null = null;
             if (targetAsin) {
               anchor =
@@ -850,13 +870,18 @@ export async function waitForCheckout(
           if (adjustedQty < 1) {
             return {
               kind: 'quantity_limit' as const,
+              adjustedQty,
               message:
                 limitMessage ||
                 "Sorry, you've reached the purchase limit for this item. Please remove the item to continue.",
             };
           }
-          // Target still cart-able at reduced qty — fall through so the
-          // 'updates' state catches the page and clicks Continue.
+          // Target still cart-able at reduced qty. Surface the adjusted
+          // qty so the outer loop can pass it back to the caller, then
+          // fall through to let 'updates'/'place' detection handle the
+          // page transition normally.
+          // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+          (window as unknown as { __qlaAdjustedQty?: number }).__qlaAdjustedQty = adjustedQty;
         }
 
         // 1. Place Order — terminal success state. Try selector list
@@ -1008,6 +1033,15 @@ export async function waitForCheckout(
       })
       .catch(() => ({ kind: 'none' as const }));
 
+    // Capture the QLA-adjusted qty from the in-page side-channel.
+    // Set by the QLA fall-through branch when Amazon caps the target;
+    // hangs around on the window until next navigation, but harmless to
+    // read multiple times. Last value wins (later QLA hits would
+    // overwrite — Amazon's caps don't change mid-flow).
+    qlaAdjustedQty = await page
+      .evaluate(() => (window as unknown as { __qlaAdjustedQty?: number }).__qlaAdjustedQty ?? null)
+      .catch(() => qlaAdjustedQty);
+
     // Per-iteration trace. Lets us see, e.g., "iter 1 kind=deliver …; iter
     // 2 kind=deliver (same aria-labelledby) …" — makes a persisted Deliver
     // button vs a real second interstitial click trivially distinguishable.
@@ -1050,7 +1084,11 @@ export async function waitForCheckout(
     }
 
     if (state.kind === 'place') {
-      return { ok: true, detected: state.sel };
+      return {
+        ok: true,
+        detected: state.sel,
+        ...(qlaAdjustedQty !== null ? { adjustedQty: qlaAdjustedQty } : {}),
+      };
     }
 
     if (state.kind === 'delivery_options_changed') {
