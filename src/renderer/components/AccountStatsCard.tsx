@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react';
 import { computeProfit } from '@shared/profit';
 import type { AmazonProfile, JobAttempt } from '../../shared/types.js';
-import { effectiveStatusGroup } from '../lib/jobsColumns.js';
 import { UsersIcon } from './icons.js';
 
 type SortKey = 'account' | 'today' | 'month' | 'lastMonth' | 'year' | 'all';
@@ -69,8 +68,13 @@ export function AccountStatsCard({
       const emailLower = p.email.toLowerCase();
       for (const a of attempts) {
         if (a.amazonEmail.toLowerCase() !== emailLower) continue;
-        if (effectiveStatusGroup(a) !== 'success') continue;
-        const profit = computeProfit(a) ?? 0;
+        // Filter by computeProfit returning non-null (matches the
+        // top-level Profit widget at App.tsx:592). Drops the older
+        // `effectiveStatusGroup === 'success'` gate which excluded
+        // awaiting_verification / pending-tracking rows even though
+        // computeProfit now returns projected profit for those.
+        const profit = computeProfit(a);
+        if (profit === null) continue;
         const t = new Date(a.createdAt).getTime();
 
         stats.allCount += 1;
