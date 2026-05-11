@@ -1016,4 +1016,32 @@ describe('readQuantityFromOrderDetailsHtml — per-ASIN', () => {
     // 1500 > 999 → reject, walk up → no other badge → qty=1
     expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(1);
   });
+
+  describe('against real Amazon order-details HTML', () => {
+    // Captured 2026-05-11 from order 112-5561210-9300211 (filler-only
+    // order containing the EVERYMATE weight plates + the
+    // ASIN-substituted CAT6a 1-pack). Both items in the same order;
+    // the CAT6a has qty=5 badge, the plates has no badge (qty=1
+    // convention). This is the canonical "per-ASIN must isolate to
+    // the target's row" case the pre-2026-05-11 summed parser failed.
+    it('filler order with mixed qty=1 + qty=5 items isolates per ASIN', () => {
+      const html = fixture('orderDetails/filler-order-plates-cat6a-2026-05-11.html');
+      expect(readQuantityFromOrderDetailsHtml(html, 'B0DXPH1YGN')).toBe(1);
+      expect(readQuantityFromOrderDetailsHtml(html, 'B0CGW4HFYN')).toBe(5);
+      // Original cart ASIN (5-pack SKU) — Amazon's order-details page
+      // still surfaces a /dp link to it (probably in metadata). The
+      // parser returns 1 because the row has no badge for that link.
+      expect(readQuantityFromOrderDetailsHtml(html, 'B0CPRSNK53')).toBe(1);
+    });
+
+    // Captured from order 112-5923791-3567463 (target's order). Amazon
+    // auto-cancelled this order after place, and on the cancelled
+    // order-details page the target's /dp/<asin> link is REMOVED.
+    // Parser returns null (target not present) — which is correct:
+    // verify-phase caller treats null as "qty unknown, don't correct".
+    it('returns null when target ASIN link is absent (Amazon-cancelled order)', () => {
+      const html = fixture('orderDetails/target-airpods-cancelled-by-amazon-2026-05-11.html');
+      expect(readQuantityFromOrderDetailsHtml(html, 'B0GSS72GZJ')).toBeNull();
+    });
+  });
 });

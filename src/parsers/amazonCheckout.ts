@@ -50,9 +50,21 @@ export function readQuantityFromOrderDetailsHtml(
   targetAsin: string | null,
 ): number | null {
   if (!targetAsin || html.length === 0) return null;
+  // Amazon embeds line-item HTML inside JSON-encoded strings on the
+  // order-details page (verified live 2026-05-11 on order
+  // 112-5561210-9300211): `class=\"od-item-view-qty\"><span>5</span>`.
+  // Browser JS unescapes this client-side before rendering, but our
+  // HTTP-only `request.get` returns the unrendered string. JSDOM still
+  // parses elements out of it but with literal-backslash attributes —
+  // so `.od-item-view-qty` selector misses. Normalize the JSON escapes
+  // back to plain HTML before JSDOM sees them.
+  const normalized = html
+    .replace(/\\"/g, '"')
+    .replace(/\\\//g, '/')
+    .replace(/\\n/g, ' ');
   let doc: Document;
   try {
-    doc = new JSDOM(html).window.document;
+    doc = new JSDOM(normalized).window.document;
   } catch {
     return null;
   }
