@@ -81,9 +81,10 @@ export type VerifyOrderOutcome =
 export async function verifyOrder(
   page: Page,
   orderId: string,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; targetAsin?: string | null } = {},
 ): Promise<VerifyOrderOutcome> {
   const timeoutMs = opts.timeoutMs ?? 15_000;
+  const targetAsin = opts.targetAsin ?? null;
   const url = `https://www.amazon.com/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`;
 
   let res;
@@ -168,7 +169,7 @@ export async function verifyOrder(
   // Read placed qty from the order details page. Used by the verify
   // caller to forward `purchasedCount` to BG, which corrects any
   // buy-time reporting bug retroactively.
-  const placedQuantity = readQuantityFromOrderDetailsHtml(html);
+  const placedQuantity = readQuantityFromOrderDetailsHtml(html, targetAsin);
   const base = { kind: 'active' as const, orderId };
   return {
     ...base,

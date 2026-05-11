@@ -112,6 +112,7 @@ export function buildBuyJobReport(
       ? { fillerOrderIds: r.fillerOrderIds }
       : {}),
     ...(r.amazonPurchaseId ? { amazonPurchaseId: r.amazonPurchaseId } : {}),
+    ...(r.targetAsin ? { targetAsin: r.targetAsin } : {}),
   }));
 
   return {
@@ -154,5 +155,6 @@ export function syntheticFailedResult(
     dryRun: false,
     fillerOrderIds: [],
     amazonPurchaseId: null,
+    targetAsin: null,
   };
 }

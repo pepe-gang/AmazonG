@@ -1,3 +1,4 @@
+import { JSDOM } from 'jsdom';
 import type { OrderConfirmation } from '../shared/types.js';
 import { parsePrice } from './amazonProduct.js';
 
@@ -19,61 +20,73 @@ export function parseOrderConfirmation(doc: Document, currentUrl: string): Order
 }
 
 /**
- * Read the total quantity Amazon's ORDER-DETAILS page reports. Used
- * by verifyOrder for the post-place qty correction path — the
- * order-details page is the most authoritative source for "how many
- * units did Amazon actually accept" because it reflects the final
- * order state (including any post-checkout adjustments Amazon made).
+ * Read the placed qty for a SPECIFIC target ASIN from Amazon's
+ * order-details HTML. This is the authoritative qty source — verify
+ * phase uses it to correct any buy-time qty reporting drift.
  *
- * Strategies, tried in order:
- *   1. `<div class="od-item-view-qty"><span>N</span></div>` — the
- *      qty badge Amazon overlays on each line-item's product image.
- *      Verified against a real order-details capture (qty=2 iPad,
- *      see tests/fixtures/orderDetails/qty2-single-item.html). Sums
- *      across all matches so multi-line-item orders work too. This
- *      is the primary signal — the empty `data-component="quantity"`
- *      div seen on the page is NOT where the number is rendered.
- *   2. Legacy "Quantity: N" inline-text fallback — kept defensively
- *      in case Amazon ever serves an older template variant.
- *   3. Returns null if neither pattern finds a positive integer.
+ * Per-ASIN, not summed-across-order. Pre-2026-05-11 the function summed
+ * every `od-item-view-qty` badge on the page, which gave the wrong
+ * answer whenever an order contained the target plus fillers at
+ * different qtys (e.g. target qty=1 + filler qty=5 → returned 6).
  *
- * Caller should fall back to whatever value it had before when this
- * returns null (e.g. the buy-time `purchasedCount` already on file).
+ * Convention discovered live 2026-05-11 on order 112-3920218-6945066:
+ *   - Amazon renders `<div class="od-item-view-qty"><span>N</span></div>`
+ *     on each line-item where qty>1.
+ *   - For qty=1 items, the badge is OMITTED entirely.
+ *
+ * Strategy:
+ *   1. Locate the target via `<a href="/dp/{asin}">` or
+ *      `<a href="/gp/product/{asin}">`.
+ *   2. Walk up to the smallest ancestor that contains exactly one
+ *      od-item-view-qty badge → return that badge's number.
+ *   3. If we walk up to a scope containing MULTIPLE badges, the
+ *      target's row had no badge of its own → qty=1.
+ *   4. If we never find any badge → qty=1.
+ *   5. Returns null if targetAsin is null OR target link not present
+ *      in the HTML (caller treats null as "qty unknown").
  */
 export function readQuantityFromOrderDetailsHtml(
   html: string,
+  targetAsin: string | null,
 ): number | null {
-  // Strategy 1: the od-item-view-qty image-badge pattern. Tolerant of
-  // class-attr quoting (single/double), additional classes on the
-  // same element, attribute reordering, and whitespace between the
-  // div and the inner <span>.
-  const badgeRe =
-    /class\s*=\s*["'][^"']*\bod-item-view-qty\b[^"']*["'][^>]*>\s*<span[^>]*>\s*(\d{1,3})\s*<\/span>/gi;
-  const badgeMatches = Array.from(html.matchAll(badgeRe));
-  if (badgeMatches.length > 0) {
-    const total = sumBoundedInts(badgeMatches.map((m) => m[1] ?? ''));
-    if (total > 0) return total;
+  if (!targetAsin || html.length === 0) return null;
+  let doc: Document;
+  try {
+    doc = new JSDOM(html).window.document;
+  } catch {
+    return null;
   }
+  const link =
+    doc.querySelector<HTMLAnchorElement>(`a[href*="/dp/${targetAsin}"]`) ??
+    doc.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${targetAsin}"]`);
+  if (!link) return null;
 
-  // Strategy 2: legacy "Quantity: N" inline text — never observed in
-  // the live capture but cheap to keep as a safety net.
-  const labelRe = /(?:^|>|\s)Quantity[:\s]+(\d{1,3})\b/gi;
-  const labelMatches = Array.from(html.matchAll(labelRe));
-  if (labelMatches.length > 0) {
-    const total = sumBoundedInts(labelMatches.map((m) => m[1] ?? ''));
-    if (total > 0) return total;
+  // Walk up the ancestor chain, stopping the moment we see ANY other
+  // ASIN's /dp/ link inside the scope. That means we've crossed the
+  // row boundary — without an own badge by that point, qty=1.
+  const asinRe = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/;
+  let scope: Element | null = link;
+  for (let d = 0; d < 10 && scope; d++) {
+    const dpLinks = Array.from(
+      scope.querySelectorAll<HTMLAnchorElement>('a[href*="/dp/"], a[href*="/gp/product/"]'),
+    );
+    let crossedBoundary = false;
+    for (const a of dpLinks) {
+      const m = (a.getAttribute('href') ?? '').match(asinRe);
+      if (m && m[1] !== targetAsin) {
+        crossedBoundary = true;
+        break;
+      }
+    }
+    if (crossedBoundary) return 1;
+    const badges = scope.querySelectorAll('.od-item-view-qty span');
+    for (const b of Array.from(badges)) {
+      const n = parseInt((b.textContent ?? '').trim(), 10);
+      if (Number.isFinite(n) && n > 0 && n < 1000) return n;
+    }
+    scope = scope.parentElement;
   }
-
-  return null;
-}
-
-function sumBoundedInts(parts: string[]): number {
-  let total = 0;
-  for (const p of parts) {
-    const n = parseInt(p, 10);
-    if (Number.isFinite(n) && n > 0 && n < 1000) total += n;
-  }
-  return total;
+  return 1;
 }
 
 /**

@@ -927,152 +927,93 @@ describe('isPaymentRevisionRequired (order-details fixture)', () => {
   });
 });
 
-describe('readQuantityFromOrderDetailsHtml', () => {
-  it('extracts qty from a single "Quantity: N" label', () => {
+describe('readQuantityFromOrderDetailsHtml — per-ASIN', () => {
+  // After 2026-05-11 rewrite: takes (html, targetAsin), returns the
+  // target's qty (not summed across the order). Amazon hides the
+  // od-item-view-qty badge when qty=1, so the function treats
+  // "no badge in target's row" as qty=1 — not as a parse failure.
+
+  it('returns the target ASIN row qty (not summed)', () => {
     const html = `<html><body>
-      <div class="line-item">
-        <span>Apple iPad 11-inch</span>
-        <span>Quantity: 2</span>
-        <span>$299.00</span>
-      </div>
-    </body></html>`;
-    expect(readQuantityFromOrderDetailsHtml(html)).toBe(2);
-  });
-
-  it('extracts qty=1 (the most common case)', () => {
-    expect(
-      readQuantityFromOrderDetailsHtml(
-        '<div>Some product <span>Quantity: 1</span></div>',
-      ),
-    ).toBe(1);
-  });
-
-  it('handles "Quantity:N" without space', () => {
-    expect(
-      readQuantityFromOrderDetailsHtml(
-        '<div>Quantity:3</div>',
-      ),
-    ).toBe(3);
-  });
-
-  it('case-insensitive', () => {
-    expect(
-      readQuantityFromOrderDetailsHtml('<div>QUANTITY: 5</div>'),
-    ).toBe(5);
-    expect(
-      readQuantityFromOrderDetailsHtml('<div>quantity: 7</div>'),
-    ).toBe(7);
-  });
-
-  it('SUMS multiple "Quantity: N" matches across the page (multi-line-item order)', () => {
-    // Real-world: an order with 3 different line items each showing
-    // their own qty. We sum because the function returns the TOTAL
-    // unit count for the order.
-    const html = `<html><body>
-      <div>Item A <span>Quantity: 2</span></div>
-      <div>Item B <span>Quantity: 1</span></div>
-      <div>Item C <span>Quantity: 5</span></div>
-    </body></html>`;
-    expect(readQuantityFromOrderDetailsHtml(html)).toBe(8);
-  });
-
-  it('returns null when no "Quantity:" pattern is found', () => {
-    expect(readQuantityFromOrderDetailsHtml('<html></html>')).toBeNull();
-    expect(readQuantityFromOrderDetailsHtml('')).toBeNull();
-    expect(
-      readQuantityFromOrderDetailsHtml('<div>Total: $598.00</div>'),
-    ).toBeNull();
-  });
-
-  it('rejects values outside 1..999 range (defensive)', () => {
-    expect(
-      readQuantityFromOrderDetailsHtml('<div>Quantity: 0</div>'),
-    ).toBeNull();
-    // 4-digit qty wouldn't match the {1,3} bound on the digit count
-    expect(
-      readQuantityFromOrderDetailsHtml('<div>Quantity: 1000</div>'),
-    ).toBeNull();
-  });
-
-  it('does not match "Quantity" inside arbitrary attributes / class names', () => {
-    // The leading look-behind (^|>|\s) ensures we only match plain-text
-    // "Quantity:" not e.g. data-quantity or class names that happen to
-    // contain the word.
-    expect(
-      readQuantityFromOrderDetailsHtml(
-        '<div data-quantity="42">no qty label here</div>',
-      ),
-    ).toBeNull();
-  });
-
-  describe('Strategy 1: od-item-view-qty image-badge (Amazon\'s real markup)', () => {
-    // Verified against a real order-details capture (114-2574765-0161804,
-    // iPad 128GB Pink, qty=2 — the row that exposed the regex mismatch).
-    // Amazon overlays a small qty badge on each line-item's product
-    // image; the data-component="quantity" div seen elsewhere on the
-    // page is empty.
-    it('extracts qty from the real od-item-view-qty image-badge structure', () => {
-      const html = `<html><body>
-        <div data-component="purchasedItems">
-          <div data-component="itemImage">
-            <a href="/dp/B0DZ75TN5F"><img alt="Apple iPad 11-inch" src="..."/></a>
-            <div class="od-item-view-qty"><span>2</span></div>
-          </div>
-        </div>
-      </body></html>`;
-      expect(readQuantityFromOrderDetailsHtml(html)).toBe(2);
-    });
-
-    it('handles whitespace and extra classes on the qty div', () => {
-      const html = `<div class="extra-class od-item-view-qty wrapper">
-        <span class="a-size-mini">  3  </span>
-      </div>`;
-      expect(readQuantityFromOrderDetailsHtml(html)).toBe(3);
-    });
-
-    it('handles single-quoted class attribute', () => {
-      const html = `<div class='od-item-view-qty'><span>4</span></div>`;
-      expect(readQuantityFromOrderDetailsHtml(html)).toBe(4);
-    });
-
-    it('SUMS multiple od-item-view-qty badges for multi-line-item orders', () => {
-      const html = `<html><body>
+      <div class="row">
+        <a href="/dp/B0D3J71RM7"><img/></a>
         <div class="od-item-view-qty"><span>2</span></div>
-        <div class="od-item-view-qty"><span>1</span></div>
+      </div>
+      <div class="row">
+        <a href="/dp/B0CGW4HFYN"><img/></a>
         <div class="od-item-view-qty"><span>5</span></div>
-      </body></html>`;
-      expect(readQuantityFromOrderDetailsHtml(html)).toBe(8);
-    });
-
-    it('prefers Strategy 1 (badge) over Strategy 2 (label) when both present', () => {
-      // Defensive: if Amazon ever renders BOTH, the badge is the
-      // authoritative source — don't double-count.
-      const html = `<html><body>
-        <div class="od-item-view-qty"><span>2</span></div>
-        <span>Quantity: 99</span>
-      </body></html>`;
-      expect(readQuantityFromOrderDetailsHtml(html)).toBe(2);
-    });
-
-    it('does NOT match a class string that merely contains the word "qty"', () => {
-      // od-something-qty (different class) shouldn't match.
-      const html = `<div class="od-other-qty-related"><span>9</span></div>`;
-      expect(readQuantityFromOrderDetailsHtml(html)).toBeNull();
-    });
-  });
-
-  it('reproduces the user-reported case (iPad order, qty=2)', () => {
-    // Approximation of what Amazon's order-details page renders for a
-    // 1-line × qty 2 order. The user-reported bug had AmazonG capturing
-    // qty=1 from the /spc DOM; the order-details page (post-place) shows
-    // 2 — this function makes that visible.
-    const html = `<html><body>
-      <div>
-        Apple iPad 11-inch: A16 chip — Blue
-        <span>Quantity: 2</span>
-        Total: $598.00
       </div>
     </body></html>`;
-    expect(readQuantityFromOrderDetailsHtml(html)).toBe(2);
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(2);
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0CGW4HFYN')).toBe(5);
+  });
+
+  it('returns 1 when target is present but has no badge (Amazon hide-on-qty-1)', () => {
+    // Live-verified 2026-05-11: target Apple Pencil Pro at qty=1 has no
+    // od-item-view-qty badge in its row; only the qty=5 CAT6a line had one.
+    const html = `<html><body>
+      <div class="row">
+        <a href="/dp/B0D3J71RM7"><img/></a>
+        <span>Apple Pencil Pro</span>
+      </div>
+      <div class="row">
+        <a href="/dp/B0CGW4HFYN"><img/></a>
+        <div class="od-item-view-qty"><span>5</span></div>
+      </div>
+    </body></html>`;
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(1);
+  });
+
+  it('returns 1 when target row has no badge AND no other items have badges either', () => {
+    const html = `<html><body>
+      <div class="row">
+        <a href="/dp/B0D3J71RM7"><img/></a>
+      </div>
+    </body></html>`;
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(1);
+  });
+
+  it('returns null when target ASIN is not in the html', () => {
+    const html = `<html><body>
+      <div class="row">
+        <a href="/dp/B0SOMEOTHER"><img/></a>
+        <div class="od-item-view-qty"><span>3</span></div>
+      </div>
+    </body></html>`;
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBeNull();
+  });
+
+  it('returns null when targetAsin is null', () => {
+    expect(
+      readQuantityFromOrderDetailsHtml(
+        '<a href="/dp/B0D3J71RM7"></a><div class="od-item-view-qty"><span>2</span></div>',
+        null,
+      ),
+    ).toBeNull();
+  });
+
+  it('returns null on empty html', () => {
+    expect(readQuantityFromOrderDetailsHtml('', 'B0D3J71RM7')).toBeNull();
+  });
+
+  it('matches /gp/product/<asin> in addition to /dp/<asin>', () => {
+    const html = `<html><body>
+      <div class="row">
+        <a href="/gp/product/B0D3J71RM7"><img/></a>
+        <div class="od-item-view-qty"><span>4</span></div>
+      </div>
+    </body></html>`;
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(4);
+  });
+
+  it('rejects an out-of-range badge value (defensive)', () => {
+    const html = `<html><body>
+      <div class="row">
+        <a href="/dp/B0D3J71RM7"><img/></a>
+        <div class="od-item-view-qty"><span>1500</span></div>
+      </div>
+    </body></html>`;
+    // 1500 > 999 → reject, walk up → no other badge → qty=1
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(1);
   });
 });

@@ -688,6 +688,12 @@ export type ProfileResult = {
    *  fan-out splits. Null when the buy didn't reach Place Order or was
    *  a dry-run. Audit-only — see docs/research/amazon-pipeline.md. */
   amazonPurchaseId: string | null;
+  /** Target ASIN parsed from job.productUrl. Forwarded to BG so each
+   *  purchase row knows which product was bought, and so cancel_fillers
+   *  can re-verify that a candidate filler order does NOT contain it
+   *  before clicking Cancel. Null only when the productUrl lacks a
+   *  parseable ASIN (rare; treated as "no defensive ASIN check"). */
+  targetAsin: string | null;
 };
 
 export function startWorker(deps: Deps): WorkerHandle {
@@ -970,7 +976,9 @@ async function handleVerifyJob(
     // pointing at the order-details page after the verify finishes
     // (closeAndForgetSession skips borrowed sessions by design).
     verifyPage = await session.newPage();
-    const outcome = await verifyOrder(verifyPage, targetOrderId);
+    const outcome = await verifyOrder(verifyPage, targetOrderId, {
+      targetAsin: parseAsinFromUrl(job.productUrl),
+    });
 
     if (outcome.kind === 'active') {
       logger.info(
@@ -2443,6 +2451,7 @@ export async function runForProfile(
       dryRun: buy.dryRun,
       fillerOrderIds,
       amazonPurchaseId: buy.amazonPurchaseId,
+      targetAsin: parseAsinFromUrl(job.productUrl),
     };
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
@@ -2497,6 +2506,7 @@ function failed(email: string, error: string, stage: string | null = null): Prof
     dryRun: false,
     fillerOrderIds: [],
     amazonPurchaseId: null,
+    targetAsin: null,
   };
 }
 
@@ -2523,6 +2533,7 @@ function actionRequired(email: string, error: string, stage: string | null = nul
     dryRun: false,
     fillerOrderIds: [],
     amazonPurchaseId: null,
+    targetAsin: null,
   };
 }
 

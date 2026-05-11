@@ -23,6 +23,7 @@ function res(overrides: Partial<ProfileResult> & { email: string; status: Profil
     dryRun: false,
     fillerOrderIds: [],
     amazonPurchaseId: null,
+    targetAsin: null,
     ...overrides,
   };
 }

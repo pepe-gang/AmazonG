@@ -1631,14 +1631,11 @@ export async function buyWithFillers(
     await page.waitForTimeout(3_000);
   }
 
-  // Resolve the qty value to record on this purchase. See
-  // shared/quantityResolver.ts for the full priority + defense logic.
-  // Critical defense: when the badge is absent on a qty>1 buy, we
-  // refuse to fall back to /spc (the known under-counting source) and
-  // use the cart-add target instead. Any future Amazon markup change
-  // that hides the badge surfaces immediately as a warn log.
+  // Resolve buy-time qty. Best-effort — verify phase re-reads from
+  // order-details and submits `correctPurchasedCount` if it differs.
+  // Confirmation-page badge dropped 2026-05-11 (was returning a
+  // shipping-group's item count, not the target's qty).
   const qtyResolution = resolvePlacedQuantity({
-    fromConfirmationBadge: parsed.quantity,
     fromSpcDom: placedQuantity,
     fromCartAddTarget: targetQuantity,
   });
@@ -1647,22 +1644,9 @@ export async function buyWithFillers(
     logger.warn(
       'step.fillerBuy.qty.mismatch',
       {
-        fromConfirmation: parsed.quantity,
         fromSpc: placedQuantity,
         targetQuantity,
-        note: 'using confirmation badge as authoritative',
-      },
-      cid,
-    );
-  } else if (qtyResolution.warn === 'badge_missing_on_multi') {
-    logger.warn(
-      'step.fillerBuy.qty.badge_missing_on_multi',
-      {
-        targetQuantity,
-        fromSpc: placedQuantity,
-        note:
-          'confirmation badge absent on qty>1 — Amazon may have changed markup; ' +
-          'trusting cart-add target instead of /spc DOM (which has known under-count bug)',
+        note: 'using /spc DOM read; verify phase will correct if order-details disagrees',
       },
       cid,
     );
@@ -1680,7 +1664,6 @@ export async function buyWithFillers(
       targetCashbackPct,
       placedQuantity: finalPlacedQuantity,
       placedQuantityFromSpc: placedQuantity,
-      placedQuantityFromConfirmation: parsed.quantity,
       fillersAdded,
     },
     cid,

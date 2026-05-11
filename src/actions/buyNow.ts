@@ -559,23 +559,13 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     });
 
     // Resolve final qty via the shared resolver. In single-buy mode we
-    // don't have a separate /spc-DOM read — `placedQuantity` here is
-    // the PDP `#quantity` dropdown intent (= cart-add target). The
-    // resolver's third defense (warn on missing badge for qty>1) gives
-    // us the same Amazon-markup-change observability as buyWithFillers.
+    // don't have a separate /spc-DOM read so we just feed cart-add intent.
+    // Verify phase re-reads from order-details and submits
+    // `correctPurchasedCount` to BG if it differs.
     const qtyResolution = resolvePlacedQuantity({
-      fromConfirmationBadge: confirmation.quantity,
       fromSpcDom: null,
       fromCartAddTarget: placedQuantity,
     });
-    if (qtyResolution.warn === 'badge_missing_on_multi') {
-      warn('step.buy.qty.badge_missing_on_multi', {
-        targetQuantity: placedQuantity,
-        note:
-          'confirmation badge absent on qty>1 — Amazon may have changed markup; ' +
-          'using PDP-dropdown intent instead',
-      });
-    }
     return {
       ok: true,
       dryRun: false,

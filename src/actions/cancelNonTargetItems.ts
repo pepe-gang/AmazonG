@@ -56,11 +56,76 @@ export async function cancelNonTargetItems(
       ? target.title.replace(/\s+/g, ' ').trim().slice(0, 40).replace(/["'\\]/g, '')
       : null;
 
-  // Check every item checkbox EXCEPT the one whose row represents the
-  // target. Done in a single evaluate so we can see the DOM atomically.
+  // Select-all-then-uncheck-target. The legacy "walk up from each
+  // checkbox to find its row" approach over-reaches on the Chewbacca
+  // cancel-items layout: the walker grabs an ancestor that contains the
+  // target ASIN's /dp/ link anywhere inside, which causes sibling items'
+  // checkboxes to be wrongly classified as target → skipped → Amazon
+  // rejects the partial cancel (bundle constraint: all bundle items
+  // must cancel together). Live-tested 2026-05-11 on order
+  // 112-3920218-6945066: the new approach succeeds where the legacy one
+  // failed with `Unable to cancel requested items: All discounted
+  // bundle items must be canceled together`.
   const counts = await page
     .evaluate(
       ({ asin, title }) => {
+        const isSelectAllCb = (cb: HTMLInputElement): boolean => {
+          const lbl = cb.id ? document.querySelector(`label[for="${cb.id}"]`) : null;
+          const lblText = (lbl?.textContent ?? '').trim();
+          return /select all/i.test(lblText);
+        };
+
+        // Identify the SINGLE target checkbox first — refuse to proceed
+        // if we can't, to avoid cancelling the target by mistake.
+        const findTargetCheckbox = (): HTMLInputElement | null => {
+          // Strategy A: anchor on /dp/<asin> or /gp/product/<asin> link,
+          // walk up until the smallest scope that contains exactly one
+          // non-select-all checkbox.
+          if (asin) {
+            const link =
+              document.querySelector<HTMLAnchorElement>(`a[href*="/dp/${asin}"]`) ??
+              document.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${asin}"]`);
+            if (link) {
+              let cur: Element | null = link;
+              for (let d = 0; d < 8 && cur; d++) {
+                const cbs = Array.from(
+                  cur.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+                ).filter((cb) => !isSelectAllCb(cb));
+                if (cbs.length === 1) return cbs[0] ?? null;
+                cur = cur.parentElement;
+              }
+            }
+          }
+          // Strategy B: text-prefix match → walk up to nearest scope
+          // with exactly one non-select-all checkbox.
+          if (title && title.length > 5) {
+            const needle = title.toLowerCase();
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+            let n: Node | null = walker.nextNode();
+            while (n) {
+              const txt = ((n as Text).textContent ?? '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase();
+              if (txt.length > 5 && txt.startsWith(needle)) {
+                let cur: Element | null = n.parentElement;
+                for (let d = 0; d < 8 && cur; d++) {
+                  const cbs = Array.from(
+                    cur.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+                  ).filter((cb) => !isSelectAllCb(cb));
+                  if (cbs.length === 1) return cbs[0] ?? null;
+                  cur = cur.parentElement;
+                }
+              }
+              n = walker.nextNode();
+            }
+          }
+          return null;
+        };
+
+        const targetCb = findTargetCheckbox();
+
+        // Collect every per-item checkbox (exclude select-all).
         const forms = Array.from(document.querySelectorAll('form'));
         const primary = forms.find((f) =>
           /cancel/i.test(f.getAttribute('action') || '') ||
@@ -68,64 +133,36 @@ export async function cancelNonTargetItems(
           f.querySelector('input[name*="itemId" i], input[name*="orderItem" i]'),
         );
         const scope: ParentNode = primary ?? document;
-        const boxes = Array.from(
+        const allBoxes = Array.from(
           scope.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
-        );
+        ).filter((cb) => !isSelectAllCb(cb));
+
         let cancelled = 0;
         let kept = 0;
-
-        const rowFor = (cb: HTMLInputElement): Element | null => {
-          // Walk up from the checkbox until we hit an ancestor whose
-          // innerText is bounded (the item row). 2000 chars ≈ one
-          // Amazon cart row with ship date + title + price.
-          let el: Element | null = cb.parentElement;
-          let depth = 0;
-          while (el && depth < 10) {
-            const text =
-              (el as HTMLElement).innerText ?? el.textContent ?? '';
-            if (text.length > 30 && text.length < 2000) return el;
-            el = el.parentElement;
-            depth++;
-          }
-          return cb.parentElement;
-        };
-
-        const rowIsTarget = (row: Element | null): boolean => {
-          if (!row) return false;
-          // Try ASIN link match first.
-          if (asin) {
-            if (row.querySelector(`a[href*="/dp/${asin}"]`)) return true;
-            if (row.querySelector(`a[href*="/gp/product/${asin}"]`)) return true;
-          }
-          // Fallback: visible text startsWith title prefix.
-          if (title) {
-            const text = (row as HTMLElement).innerText ?? row.textContent ?? '';
-            const haystack = text.replace(/\s+/g, ' ').toLowerCase();
-            const needle = title.toLowerCase();
-            if (needle.length > 5 && haystack.includes(needle)) return true;
-          }
-          return false;
-        };
-
-        for (const cb of boxes) {
+        for (const cb of allBoxes) {
           if (cb.disabled) continue;
           if (cb.offsetParent === null && cb.getClientRects().length === 0) continue;
-          const row = rowFor(cb);
-          if (rowIsTarget(row)) {
-            // Keep target — ensure unchecked.
+          if (cb === targetCb) {
             if (cb.checked) cb.click();
             kept += 1;
             continue;
           }
-          // Non-target — ensure checked.
           if (!cb.checked) cb.click();
           cancelled += 1;
         }
-        return { cancelled, kept };
+        return { cancelled, kept, targetFound: targetCb !== null };
       },
       { asin: target.asin, title: titlePrefix },
     )
-    .catch(() => ({ cancelled: 0, kept: 0 }));
+    .catch(() => ({ cancelled: 0, kept: 0, targetFound: false }));
+
+  if (!counts.targetFound) {
+    return {
+      ok: false,
+      reason: 'could not identify target item on cancel page — aborting to avoid cancelling target',
+      detail: `asin=${target.asin}, title=${titlePrefix ?? '(null)'}`,
+    };
+  }
 
   if (counts.cancelled === 0) {
     return {

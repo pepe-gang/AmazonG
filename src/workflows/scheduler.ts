@@ -777,6 +777,7 @@ export class StreamingScheduler {
       dryRun: false,
       fillerOrderIds: [],
       amazonPurchaseId: null,
+      targetAsin: null,
     };
   }
 }
