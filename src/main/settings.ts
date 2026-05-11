@@ -22,7 +22,7 @@ const DEFAULTS: Settings = {
   snapshotOnFailure: false,
   snapshotGroups: [],
   buyWithFillers: false,
-  fillerPool: 'whey',
+  fillerPool: 'eero',
   failedHiddenBeforeTs: null,
   hiddenAttemptIds: [],
   autoEnqueueEnabled: false,
@@ -86,6 +86,17 @@ export async function loadSettings(): Promise<Settings> {
     // forward.
     if (migrated.fillerPool === undefined && parsed.wheyProteinFillerOnly !== undefined) {
       migrated.fillerPool = parsed.wheyProteinFillerOnly ? 'whey' : 'general';
+    }
+
+    // v0.13.39 migration: bump the historical default 'whey' to 'eero'.
+    // 'whey' was the original default (and was inherited from the
+    // v0.13.36 migration above for everyone who had wheyProteinFillerOnly
+    // = true, which itself was the pre-multi-pool default). So almost
+    // every saved 'whey' is a default-by-inheritance, not a deliberate
+    // choice. Users who actively picked 'general' or 'amazon-basics'
+    // keep their choice — only the inherited default gets bumped.
+    if (migrated.fillerPool === 'whey') {
+      migrated.fillerPool = 'eero';
     }
 
     return { ...DEFAULTS, ...migrated };

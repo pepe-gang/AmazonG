@@ -824,6 +824,27 @@ export async function buyWithFillers(
     );
   }
 
+  // 5.5. Pre-buy order-history snapshot. Records every order ID
+  //      currently visible on /gp/css/order-history. After Place Order,
+  //      step 15's post-buy scan diffs against this set and treats
+  //      everything not in it as "this buy's orders" — 100% accurate
+  //      even when:
+  //        - Amazon adds bundle/freebie items in their own order
+  //          (zero cart ASINs in the new card, ASIN-walk would miss it)
+  //        - A filler ASIN we re-used was also in a previous order
+  //          (ASIN-walk's first-occurrence would falsely match the
+  //          old order — the prev-order-bleed bug)
+  //      Verified live 2026-05-11 against a real fan-out
+  //      (purchaseId 106-1251106-4211436): pre snapshot 10 IDs all
+  //      111-XXX, post 12 visible (top 2 = 112-XXX new orders),
+  //      diff returned exactly {target order, filler order} with no
+  //      false matches even though two old orders ALSO contained the
+  //      target ASIN from prior MacBook buys.
+  //
+  //      Returns null on snapshot failure — `fetchOrderIdsForAsins`
+  //      falls back to the legacy ASIN-walk scanner when null.
+  const preBuyOrderIds = await snapshotOrderHistoryIds(page, cid, logger);
+
   // 6. Enter checkout directly. /checkout/entry/cart?proceedToCheckout=1
   //    is the URL Amazon's BYG ("Need anything else?") "Continue to
   //    checkout" button points at — a server-side handler that reads
@@ -1522,7 +1543,7 @@ export async function buyWithFillers(
   const cartAsins = targetAsin ? [targetAsin, ...fillerAsins] : fillerAsins;
   const orderMatches: OrderMatch[] =
     cartAsins.length > 0
-      ? await fetchOrderIdsForAsins(page, cartAsins, targetAsin)
+      ? await fetchOrderIdsForAsins(page, cartAsins, targetAsin, preBuyOrderIds)
       : [];
   const orderId =
     targetAsin !== null
@@ -1587,11 +1608,50 @@ export async function buyWithFillers(
   //     sometimes silently rejects pre-ship cancels or takes a while
   //     to process, so a delayed re-check is our safety net to make
   //     sure nothing ships.
-  const fillerOrderIds = targetAsin
+  // Sanity check: if the post-buy result has implausibly many "non-
+  // target" orders, the pre-buy snapshot probably failed to capture
+  // the historical baseline and the diff is treating everything as
+  // new. Refuse to claim those as fillers — better to miss a real
+  // filler (verify-time rescan picks it up) than to cancel a
+  // historical customer order. Threshold is cartAsins.length + 2:
+  // Amazon's worst-case fan-out is 1 order per cart item + ~1
+  // freebie order; anything beyond that means the diff is wrong.
+  //
+  // Logged incident 2026-05-11 (cmp1ng5p60004pl746onbynhv,
+  // amycpnguyen2): snapshot.empty fired → diff returned 10 "new"
+  // orders → 8 false-positive fillers entered the cancel queue,
+  // some real customer orders got cancel-summary URLs returned. The
+  // snapshot.empty bug is fixed at the source above (the wait
+  // predicate now requires `.order-card` to be present), but this
+  // sanity net catches any future pre-set corruption regardless.
+  const candidateFillerIds = targetAsin
     ? orderMatches
         .filter((m) => !m.matchedAsins.includes(targetAsin))
         .map((m) => m.orderId)
     : [];
+  const SANITY_FILLER_MAX = cartAsins.length + 2;
+  let fillerOrderIds: string[];
+  if (candidateFillerIds.length > SANITY_FILLER_MAX) {
+    logger.warn(
+      'step.fillerBuy.placed.orderid.sanity_failed',
+      {
+        targetAsin,
+        cartAsinsCount: cartAsins.length,
+        candidateCount: candidateFillerIds.length,
+        threshold: SANITY_FILLER_MAX,
+        preBuySnapshotLen: preBuyOrderIds?.length ?? null,
+        discardedOrderIds: candidateFillerIds,
+        note:
+          'too many non-target orders for this cart size — pre-snapshot ' +
+          'likely failed to capture historical baseline. Dropping filler ' +
+          'claims; verify-time rescan will recover any real misses.',
+      },
+      cid,
+    );
+    fillerOrderIds = [];
+  } else {
+    fillerOrderIds = candidateFillerIds;
+  }
   let sweepCancelled = 0;
   let sweepFailed = 0;
   const MAX_CANCEL_TRIES = 3;
@@ -1750,10 +1810,118 @@ export async function buyWithFillers(
  * Best-coverage result wins across iterations so a flaky reload
  * doesn't regress earlier matches.
  */
+/**
+ * Snapshot every order ID currently visible on /gp/css/order-history.
+ * Captured BEFORE Place Order so that step 15's post-buy scan can
+ * compute `post - pre = this buy's fan-out` with 100% accuracy —
+ * regardless of whether Amazon strips/swaps cart items, adds bundle
+ * freebies, or whether a filler ASIN we re-used appears in a previous
+ * order.
+ *
+ * Validated live 2026-05-11 against a real fan-out (purchaseId
+ * 106-1251106-4211436): pre snapshot = 10 IDs all 111-XXX. After Place
+ * Order, post = 12 distinct IDs visible (top 2 = 112-XXX new orders,
+ * 10 old, 2 fell off the page). Diff returned exactly
+ * `{112-8592597-3848244 (target), 112-8275660-6027465 (filler)}` even
+ * though two old orders in post ALSO contained the target's ASIN from
+ * prior MacBook buys — those were correctly filtered out by being
+ * present in pre.
+ *
+ * Returns null on navigation failure or empty page. Caller falls back
+ * to the legacy ASIN-walker; degraded behavior but doesn't fail the
+ * buy.
+ */
+async function snapshotOrderHistoryIds(
+  page: Page,
+  cid: string | undefined,
+  logger: ReturnType<typeof makeBoundLogger>,
+): Promise<string[] | null> {
+  try {
+    await page.goto(
+      'https://www.amazon.com/gp/css/order-history?ref_=nav_AccountFlyout_orders',
+      { waitUntil: 'commit', timeout: 30_000 },
+    );
+  } catch (err) {
+    logger.warn(
+      'step.fillerBuy.preBuy.snapshot.nav.failed',
+      { error: String(err) },
+      cid,
+    );
+    return null;
+  }
+  // CRITICAL: wait for at least one `.order-card.js-order-card` to be
+  // rendered. The OLD condition was `csd-encrypted-sensitive == 0`
+  // alone, which is ALSO TRUE before any DOM has rendered (0 == 0).
+  // That race caused snapshot.empty to fire on a perfectly fine
+  // account with 10+ historical orders — the page had committed but
+  // not painted yet when we scanned. With an empty pre-set, the
+  // post-buy diff then treated every visible order as new, generating
+  // a long fillerOrderIds list and (catastrophically) trying to cancel
+  // historical real-customer orders.
+  //
+  // Logged incident 2026-05-11 attempt cmp1ng5p60004pl746onbynhv on
+  // amycpnguyen2: snapshot.empty fired, post-buy scan returned 10
+  // orders, 8 false-positive fillers entered the cancel queue.
+  await page
+    .waitForFunction(
+      () => {
+        if (document.querySelectorAll('.csd-encrypted-sensitive').length !== 0) {
+          return false;
+        }
+        return (
+          document.querySelectorAll('.order-card.js-order-card').length > 0
+        );
+      },
+      undefined,
+      { timeout: 10_000, polling: 300 },
+    )
+    .catch(() => undefined);
+
+  const ids = await page
+    .evaluate(() => {
+      const cards = Array.from(
+        document.querySelectorAll<HTMLElement>('.order-card.js-order-card'),
+      );
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const card of cards) {
+        const m = (card.textContent ?? '').match(/\b(\d{3}-\d{7}-\d{7})\b/);
+        const id = m?.[1];
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          out.push(id);
+        }
+      }
+      return out;
+    })
+    .catch(() => null);
+
+  if (ids === null) {
+    logger.warn('step.fillerBuy.preBuy.snapshot.eval.failed', {}, cid);
+    return null;
+  }
+  if (ids.length === 0) {
+    // After the wait above, 0 IDs means either (a) genuine brand-new
+    // account with no order history, or (b) the page rendered
+    // something unexpected (sign-in redirect, captcha, error). Either
+    // way return null — refuse to use diff mode. Legacy ASIN-walker
+    // is safer than risking a "diff = all of post" cancel storm.
+    logger.warn('step.fillerBuy.preBuy.snapshot.empty', {}, cid);
+    return null;
+  }
+  logger.info(
+    'step.fillerBuy.preBuy.snapshot.ok',
+    { idsLen: ids.length, sample: ids.slice(0, 3) },
+    cid,
+  );
+  return ids;
+}
+
 async function fetchOrderIdsForAsins(
   page: Page,
   asins: string[],
   primaryAsin: string | null,
+  preBuyOrderIds: string[] | null,
 ): Promise<OrderMatch[]> {
   if (asins.length === 0) return [];
   try {
@@ -1857,21 +2025,29 @@ async function fetchOrderIdsForAsins(
   // See docs/research/amazon-pipeline.md for the live test that
   // produced this fix.
   const raw = await page
-    .evaluate(scanOrderHistoryDOMFn, { asinList: asins })
+    .evaluate(scanOrderHistoryDOMFn, { asinList: asins, preBuyOrderIds })
     .catch(() => [] as OrderMatch[]);
 
-  // The first-occurrence-per-ASIN algorithm above only emits orderIds
-  // that ended up with at least one cart ASIN matched, so no zero-match
-  // filtering is needed (and the previous "no_asins" warning is dead
-  // code under the new algorithm).
-
   // Poll for fuller coverage. The initial scan often catches only the
-  // target order (which propagates first). Filler-only orders may
-  // still be settling on Amazon's side. Reload + re-scan every ~800ms
-  // until full coverage OR budget expires (~5s). Keep the
-  // best-coverage result across iterations so a reload that happens
-  // to render fewer cart ASINs doesn't regress earlier matches.
+  // target order (which propagates first); filler-only orders may still
+  // be settling on Amazon's side. Reload + re-scan every ~800ms until
+  // good enough OR budget expires (~5s). Best-result wins across
+  // iterations so a flaky reload doesn't regress earlier matches.
+  //
+  // "Good enough" depends on mode:
+  //   - DIFF mode (preBuyOrderIds provided): keep polling until we've
+  //     seen at least `asins.length` new orders OR all cart ASINs are
+  //     accounted for. Typical case: cart has N items, fan-out is 1-N
+  //     orders; once we've found N new orders the diff is settled.
+  //   - LEGACY mode: keep polling until every cart ASIN is matched.
   const countCovered = (matches: OrderMatch[]): number => {
+    if (preBuyOrderIds !== null) {
+      // Diff mode: each entry is a distinct new order. Coverage is the
+      // count of new orders found. Once we hit asins.length new orders
+      // (one per item, the most fanned-out case), stop polling.
+      return matches.length;
+    }
+    // Legacy mode: coverage = number of distinct cart ASINs matched.
     const seen = new Set<string>();
     for (const m of matches) for (const a of m.matchedAsins) seen.add(a);
     return seen.size;
@@ -1917,7 +2093,7 @@ async function fetchOrderIdsForAsins(
       )
       .catch(() => undefined);
     const next = await page
-      .evaluate(scanOrderHistoryDOMFn, { asinList: asins })
+      .evaluate(scanOrderHistoryDOMFn, { asinList: asins, preBuyOrderIds })
       .catch(() => [] as OrderMatch[]);
     const nextCovered = countCovered(next);
     if (nextCovered > bestCovered) {
@@ -1931,10 +2107,59 @@ async function fetchOrderIdsForAsins(
 /**
  * Document-walker eval extracted as a named function so the polling
  * loop in fetchOrderIdsForAsins can re-run it on each reload without
- * duplicating the body. Same algorithm as the inlined version above
- * — see that comment block for the why.
+ * duplicating the body.
+ *
+ * Two modes:
+ *
+ *   DIFF MODE (preBuyOrderIds !== null): walk `.order-card.js-order-card`
+ *     elements, return any card whose order ID is NOT in the pre-buy
+ *     snapshot. Those are guaranteed to be this buy's fan-out. For each
+ *     new card, also return the intersection of its /dp/ links with
+ *     the cart ASIN list so the caller can identify target vs filler.
+ *     Mathematically clean — no false positives from previous orders
+ *     even when filler ASINs were re-used. This is the normal path.
+ *
+ *   LEGACY MODE (preBuyOrderIds === null): document-order walker with
+ *     first-occurrence-per-ASIN. Used as a safety net by
+ *     `rescanFillerOrderIds` (verify-time, no snapshot available) and
+ *     as a fallback when the pre-buy snapshot navigation failed.
+ *     Same algorithm as the inlined version above — see that comment
+ *     block for the why.
  */
-const scanOrderHistoryDOMFn = ({ asinList }: { asinList: string[] }) => {
+const scanOrderHistoryDOMFn = ({
+  asinList,
+  preBuyOrderIds,
+}: {
+  asinList: string[];
+  preBuyOrderIds: string[] | null;
+}) => {
+  if (preBuyOrderIds !== null) {
+    const preSet = new Set(preBuyOrderIds);
+    const cards = Array.from(
+      document.querySelectorAll<HTMLElement>('.order-card.js-order-card'),
+    );
+    const out: { orderId: string; matchedAsins: string[] }[] = [];
+    for (const card of cards) {
+      const m = (card.textContent ?? '').match(/\b(\d{3}-\d{7}-\d{7})\b/);
+      const orderId = m?.[1];
+      if (!orderId || preSet.has(orderId)) continue;
+      const cardAsins = new Set<string>();
+      const links = card.querySelectorAll<HTMLAnchorElement>(
+        'a[href*="/dp/"], a[href*="/gp/product/"]',
+      );
+      for (const a of Array.from(links)) {
+        const am = (a.getAttribute('href') ?? '').match(
+          /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i,
+        );
+        const asin = am?.[1];
+        if (asin && asinList.includes(asin)) cardAsins.add(asin);
+      }
+      out.push({ orderId, matchedAsins: Array.from(cardAsins) });
+    }
+    return out;
+  }
+
+  // Legacy ASIN-walker fallback.
   type Event = { kind: 'id'; id: string } | { kind: 'link'; asin: string };
   const events: Event[] = [];
 
@@ -2113,8 +2338,15 @@ export async function rescanFillerOrderIds(
       { timeout: 10_000, polling: 500 },
     )
     .catch(() => undefined);
+  // Legacy mode at verify time — we don't have a pre-buy snapshot
+  // here. Falls back to the ASIN-walker; the target is filtered out
+  // explicitly below so the previous-order-bleed risk is bounded to
+  // filler ASINs we re-used.
   const matches = await page
-    .evaluate(scanOrderHistoryDOMFn, { asinList: cartAsins })
+    .evaluate(scanOrderHistoryDOMFn, {
+      asinList: cartAsins,
+      preBuyOrderIds: null,
+    })
     .catch(() => [] as OrderMatch[]);
   return matches
     .map((m) => m.orderId)
