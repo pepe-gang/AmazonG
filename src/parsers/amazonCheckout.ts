@@ -404,18 +404,33 @@ export function computeCashbackRadioPlans(
   }
   const plans: CashbackRadioPlan[] = [];
   for (const [name, opts] of byName.entries()) {
-    if (opts.length < 2) continue;
     const best = opts.reduce((a, b) => (b.pct > a.pct ? b : a));
     const current = opts.find((o) => o.r.checked);
-    const currentPct = current?.pct ?? 0;
-    if (best.pct >= minPct && best.pct > currentPct) {
+    // Group with no selection — Amazon wiped the prior choice (the
+    // "Please select a new delivery option" recovery case). Pick the
+    // highest-cashback option (or any if all 0%) so Place Order
+    // re-enables. Skip the minPct/upgrade gate here; the cashback
+    // gate downstream re-verifies the target's row anyway.
+    if (!current) {
       plans.push({
         name,
         value: best.r.value,
         label: best.label.slice(0, 120),
         pickedPct: best.pct,
-        currentPct,
-        currentValue: current?.r.value ?? null,
+        currentPct: 0,
+        currentValue: null,
+      });
+      continue;
+    }
+    if (opts.length < 2) continue;
+    if (best.pct >= minPct && best.pct > current.pct) {
+      plans.push({
+        name,
+        value: best.r.value,
+        label: best.label.slice(0, 120),
+        pickedPct: best.pct,
+        currentPct: current.pct,
+        currentValue: current.r.value,
       });
     }
   }

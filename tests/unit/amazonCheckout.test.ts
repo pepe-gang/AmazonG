@@ -1017,6 +1017,40 @@ describe('readQuantityFromOrderDetailsHtml — per-ASIN', () => {
     expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(1);
   });
 
+  describe('computeCashbackRadioPlans — "Please select a new delivery option" recovery', () => {
+    // Captured live 2026-05-11. /spc shows the
+    // selectDeliveryOptionMessage banner with two groups:
+    //   - main group (3 options, Amazon Day 6%-back ALREADY checked)
+    //   - filler group (1 option "Saturday May 16 FREE", NOT checked)
+    // Pre-fix bug: planner skipped groups with `opts.length < 2` AND
+    // groups where best.pct < minPct. So the single-option unchecked
+    // filler group got NO plan → Place Order stayed disabled forever.
+    const MAIN_GROUP =
+      'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-9752679-3751457:3991a577-4524-4381-8ed1-9abe9673fe03';
+    const FILLER_GROUP =
+      'miq://document:1.0/Ordering/amazon:1.0/Unit:1.0/106-9752679-3751457:da70087e-b418-4b68-8199-c016609e7893';
+
+    it('plans a click for the filler group even though it has only one 0%-back option', () => {
+      const doc = docOf(fixture('spc/place-order-delivery-options-error-2026-05-11.html'));
+      const plans = computeCashbackRadioPlans(doc, 6);
+      const fillerPlan = plans.find((p) => p.name === FILLER_GROUP);
+      expect(fillerPlan).toBeDefined();
+      expect(fillerPlan!.value).toBe('next-1dc');
+      expect(fillerPlan!.pickedPct).toBe(0);
+      expect(fillerPlan!.currentValue).toBeNull();
+      expect(fillerPlan!.label).toMatch(/Saturday, May 16/i);
+    });
+
+    it('does NOT re-plan the main group when its 6%-back radio is already checked', () => {
+      const doc = docOf(fixture('spc/place-order-delivery-options-error-2026-05-11.html'));
+      const plans = computeCashbackRadioPlans(doc, 6);
+      // Main group's Amazon Day (6%) was already selected by the user
+      // before the error. No upgrade target → no plan for that group.
+      const mainPlan = plans.find((p) => p.name === MAIN_GROUP);
+      expect(mainPlan).toBeUndefined();
+    });
+  });
+
   describe('against real Amazon order-details HTML', () => {
     // Captured 2026-05-11 from order 112-5561210-9300211 (filler-only
     // order containing the EVERYMATE weight plates + the

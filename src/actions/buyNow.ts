@@ -2316,11 +2316,23 @@ export async function pickBestCashbackDelivery(
           pickedPct: number;
         }[] = [];
         for (const [name, opts] of byName.entries()) {
-          if (opts.length < 2) continue;
           const best = opts.reduce((a, b) => (b.pct > a.pct ? b : a));
           const current = opts.find((o) => o.checked);
-          const currentPct = current?.pct ?? 0;
-          if (best.pct >= minPct && best.pct > currentPct) {
+          // Group with no selection — Amazon wiped the prior choice (the
+          // "Please select a new delivery option" recovery case).
+          // Pick the highest-cashback option, or any if all 0%.
+          if (!current) {
+            out.push({
+              name,
+              value: best.value,
+              label: best.label.slice(0, 120),
+              pickedPct: best.pct,
+            });
+            continue;
+          }
+          // Existing behavior: swap to a higher-cashback option only.
+          if (opts.length < 2) continue;
+          if (best.pct >= minPct && best.pct > current.pct) {
             out.push({
               name,
               value: best.value,
