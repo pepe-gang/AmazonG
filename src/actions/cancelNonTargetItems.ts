@@ -71,53 +71,43 @@ export async function cancelNonTargetItems(
       ({ asin, title }) => {
         const isSelectAllCb = (cb: HTMLInputElement): boolean => {
           const lbl = cb.id ? document.querySelector(`label[for="${cb.id}"]`) : null;
-          const lblText = (lbl?.textContent ?? '').trim();
-          return /select all/i.test(lblText);
+          return /select all/i.test((lbl?.textContent ?? '').trim());
         };
 
-        // Identify the SINGLE target checkbox first — refuse to proceed
-        // if we can't, to avoid cancelling the target by mistake.
+        // Walk up from a starting element looking for the smallest
+        // ancestor scope containing exactly one per-item checkbox.
+        // That's the target's row.
+        const findUniqueCbInAncestors = (start: Element | null): HTMLInputElement | null => {
+          for (let cur = start, d = 0; d < 8 && cur; cur = cur.parentElement, d++) {
+            const cbs = Array.from(
+              cur.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+            ).filter((cb) => !isSelectAllCb(cb));
+            if (cbs.length === 1) return cbs[0] ?? null;
+          }
+          return null;
+        };
+
+        // Identify the SINGLE target checkbox. Refuse to proceed if we
+        // can't, to avoid cancelling the target by mistake.
         const findTargetCheckbox = (): HTMLInputElement | null => {
-          // Strategy A: anchor on /dp/<asin> or /gp/product/<asin> link,
-          // walk up until the smallest scope that contains exactly one
-          // non-select-all checkbox.
+          // Strategy A: /dp/<asin> or /gp/product/<asin> link.
           if (asin) {
             const link =
               document.querySelector<HTMLAnchorElement>(`a[href*="/dp/${asin}"]`) ??
               document.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${asin}"]`);
-            if (link) {
-              let cur: Element | null = link;
-              for (let d = 0; d < 8 && cur; d++) {
-                const cbs = Array.from(
-                  cur.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
-                ).filter((cb) => !isSelectAllCb(cb));
-                if (cbs.length === 1) return cbs[0] ?? null;
-                cur = cur.parentElement;
-              }
-            }
+            const cb = findUniqueCbInAncestors(link);
+            if (cb) return cb;
           }
-          // Strategy B: text-prefix match → walk up to nearest scope
-          // with exactly one non-select-all checkbox.
+          // Strategy B: title-prefix text-node match.
           if (title && title.length > 5) {
             const needle = title.toLowerCase();
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-            let n: Node | null = walker.nextNode();
-            while (n) {
-              const txt = ((n as Text).textContent ?? '')
-                .replace(/\s+/g, ' ')
-                .trim()
-                .toLowerCase();
+            for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+              const txt = ((n as Text).textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
               if (txt.length > 5 && txt.startsWith(needle)) {
-                let cur: Element | null = n.parentElement;
-                for (let d = 0; d < 8 && cur; d++) {
-                  const cbs = Array.from(
-                    cur.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
-                  ).filter((cb) => !isSelectAllCb(cb));
-                  if (cbs.length === 1) return cbs[0] ?? null;
-                  cur = cur.parentElement;
-                }
+                const cb = findUniqueCbInAncestors(n.parentElement);
+                if (cb) return cb;
               }
-              n = walker.nextNode();
             }
           }
           return null;

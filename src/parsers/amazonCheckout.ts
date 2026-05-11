@@ -62,32 +62,24 @@ export function readQuantityFromOrderDetailsHtml(
   if (!link) return null;
 
   // Walk up the ancestor chain, stopping the moment we see ANY other
-  // ASIN's /dp/ link inside the scope. That means we've crossed the
-  // row boundary — without an own badge by that point, qty=1.
-  const asinRe = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/;
-  let scope: Element | null = link;
-  for (let d = 0; d < 10 && scope; d++) {
-    const dpLinks = Array.from(
-      scope.querySelectorAll<HTMLAnchorElement>('a[href*="/dp/"], a[href*="/gp/product/"]'),
-    );
-    let crossedBoundary = false;
-    for (const a of dpLinks) {
-      const m = (a.getAttribute('href') ?? '').match(asinRe);
-      if (m && m[1] !== targetAsin) {
-        crossedBoundary = true;
-        break;
-      }
-    }
-    if (crossedBoundary) return 1;
-    const badges = scope.querySelectorAll('.od-item-view-qty span');
-    for (const b of Array.from(badges)) {
-      const n = parseInt((b.textContent ?? '').trim(), 10);
+  // ASIN's /dp/ link inside the scope — that means we've crossed the
+  // row boundary, so the target's row had no own badge → qty=1.
+  for (let scope: Element | null = link, d = 0; d < 10 && scope; scope = scope.parentElement, d++) {
+    const links = scope.querySelectorAll<HTMLAnchorElement>('a[href*="/dp/"], a[href*="/gp/product/"]');
+    const crossed = Array.from(links).some((a) => {
+      const m = (a.getAttribute('href') ?? '').match(DP_LINK_ASIN_RE);
+      return m !== null && m[1] !== targetAsin;
+    });
+    if (crossed) return 1;
+    for (const badge of Array.from(scope.querySelectorAll('.od-item-view-qty span'))) {
+      const n = parseInt((badge.textContent ?? '').trim(), 10);
       if (Number.isFinite(n) && n > 0 && n < 1000) return n;
     }
-    scope = scope.parentElement;
   }
   return 1;
 }
+
+const DP_LINK_ASIN_RE = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/;
 
 /**
  * Amazon's thankyou page renders a small badge over each line-item's
