@@ -2020,6 +2020,52 @@ const scanOrderHistoryDOMFn = ({ asinList }: { asinList: string[] }) => {
     matchedByOrder.get(orderId)!.add(asin);
   }
 
+  // Capture top-of-history order IDs the ASIN-walk missed. When Amazon
+  // adds bundle/freebie items in their own shipment, the resulting
+  // filler-only order contains zero cartAsins and falls out of the
+  // ASIN-walk results (real case 2026-05-11 on cpnnhu, purchaseId
+  // 106-8052632-4781854: target order 114-3299436-7172244 captured,
+  // separate filler order 114-2185017-2556240 missed because its items
+  // weren't in our cart). Order-history is reverse-chronological and
+  // the bot reached it within seconds of clicking Place Order, so this
+  // buy's fan-out is the cluster at positions 0..maxMatchedIdx.
+  // Anything UNMATCHED inside that cluster is a freebie/bundle order
+  // that belongs to this buy. Cards below maxMatchedIdx are older —
+  // never grab those (would falsely cancel historical orders).
+  //
+  // Only runs when we have >=2 ASINs in cartAsins (i.e., we actually
+  // added fillers). Pure single-buy has no fan-out and a single ASIN
+  // can't be split into multiple cards, so historical "Buy it again"
+  // would slip in otherwise.
+  if (asinList.length >= 2) {
+    const cards = Array.from(
+      document.querySelectorAll<HTMLElement>('.order-card.js-order-card'),
+    );
+    const cardOrderId = (card: HTMLElement): string | null => {
+      const m = (card.textContent ?? '').match(/\b(\d{3}-\d{7}-\d{7})\b/);
+      return m?.[1] ?? null;
+    };
+    let maxMatchedIdx = -1;
+    for (let i = 0; i < cards.length; i++) {
+      const id = cardOrderId(cards[i]!);
+      if (id && matchedByOrder.has(id)) maxMatchedIdx = i;
+    }
+    if (maxMatchedIdx >= 0) {
+      // +1 buffer below the deepest match — Amazon's order-history sort
+      // for orders placed in the same millisecond isn't strictly
+      // chronological, so a freebie order from this buy can land just
+      // below the matched ones. Risk is bounded: at most one
+      // non-fan-out card slips in, the existing cancelFillerOrder logic
+      // is best-effort and returns terminal if it can't cancel.
+      const endIdx = Math.min(maxMatchedIdx + 1, cards.length - 1);
+      for (let i = 0; i <= endIdx; i++) {
+        const id = cardOrderId(cards[i]!);
+        if (!id || matchedByOrder.has(id)) continue;
+        matchedByOrder.set(id, new Set<string>());
+      }
+    }
+  }
+
   const out: { orderId: string; matchedAsins: string[] }[] = [];
   for (const [orderId, asinSet] of matchedByOrder) {
     out.push({ orderId, matchedAsins: Array.from(asinSet) });
