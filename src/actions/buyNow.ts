@@ -1291,12 +1291,16 @@ export async function waitForCheckout(
     }
 
     if (state.kind === 'updates') {
-      const clicked = await page
+      // Identify the Continue button via aria-labelledby resolution
+      // (Chewbacca's input has no value/aria-label/textContent of its
+      // own — only a pointer to a separate <span>Continue</span>).
+      // Tag it with a unique data attribute so Playwright's native
+      // locator click finds it. Native click dispatches a real mouse
+      // sequence (scroll-into-view, focus, mousedown, mouseup) — more
+      // realistic than evaluate().click() for Amazon's bot-detection
+      // heuristics on the cart-item-select submit.
+      const tagged = await page
         .evaluate(() => {
-          // Resolve a button's label including `aria-labelledby` →
-          // referenced text. Chewbacca's Continue input has no value /
-          // aria-label / textContent — only an aria-labelledby pointer
-          // to a separate <span>Continue</span>.
           const readLabel = (el: HTMLElement): string => {
             const direct = (
               (el as HTMLInputElement).value ||
@@ -1318,26 +1322,34 @@ export async function waitForCheckout(
           };
           const isContinue = (el: HTMLElement): boolean =>
             el.offsetParent !== null && /^continue$/i.test(readLabel(el));
-          const submit = Array.from(
+          const target = Array.from(
             document.querySelectorAll<HTMLElement>(
               'input[type="submit"], button[type="submit"], input[type="button"], button:not([type])',
             ),
-          ).find(isContinue);
-          if (submit) {
-            submit.click();
-            return true;
-          }
-          const fallback = Array.from(
-            document.querySelectorAll<HTMLElement>('span, button, input, a'),
-          ).find(isContinue);
-          if (!fallback) return false;
-          fallback.click();
+          ).find(isContinue)
+            ?? Array.from(
+              document.querySelectorAll<HTMLElement>('span, button, input, a'),
+            ).find(isContinue);
+          if (!target) return false;
+          target.setAttribute('data-amazong-continue', '1');
           return true;
         })
         .catch(() => false);
-      if (!clicked) {
+      if (!tagged) {
         await page.waitForTimeout(500);
         continue;
+      }
+      try {
+        await page.locator('[data-amazong-continue="1"]').click({ timeout: 5_000 });
+      } catch {
+        // Native click failed (element detached, etc.) — fall back to
+        // JS click so we don't get stuck on a flaky page.
+        await page
+          .evaluate(() => {
+            const el = document.querySelector<HTMLElement>('[data-amazong-continue="1"]');
+            el?.click();
+          })
+          .catch(() => undefined);
       }
       await page.waitForLoadState('domcontentloaded').catch(() => undefined);
       await page.waitForTimeout(1_000);
