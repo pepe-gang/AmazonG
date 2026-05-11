@@ -773,9 +773,41 @@ export async function waitForCheckout(
   // row from N to M >= 1). Reported back to the caller so BG sees the
   // corrected qty instead of the cart-add target.
   let qlaAdjustedQty: number | null = null;
+  // One-shot recovery for Amazon's transient /errors/500. Bail on the
+  // second hit so a genuinely-broken checkout farm doesn't infinite-loop.
+  let amazon500Recovered = false;
 
   while (Date.now() < deadline) {
     iteration += 1;
+    // Recover from Amazon's /errors/* page (checkout-session 500) by
+    // re-entering /spc via the entry shortcut. Same recipe ensureAddress
+    // uses post-address-change, generalized here so any in-flow 500
+    // gets one retry before we time out.
+    if (/\/errors\//i.test(page.url())) {
+      if (amazon500Recovered) {
+        return {
+          ok: false,
+          reason: 'amazon /errors/500 persisted after one recovery attempt',
+          detail: `url=${page.url()}`,
+        };
+      }
+      emit?.warn('step.waitForCheckout.amazon500', {
+        iteration,
+        stuck: page.url(),
+        action: 'recreating /spc via SPC_ENTRY_URL',
+      });
+      try {
+        await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
+      } catch (err) {
+        return {
+          ok: false,
+          reason: 'amazon /errors/500 recovery failed — spc recreate threw',
+          detail: String(err).slice(0, 200),
+        };
+      }
+      amazon500Recovered = true;
+      continue;
+    }
     const state = await page
       .evaluate(({ placeSelectors, placeLabelPattern, targetAsin, targetTitle }) => {
         const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ');
