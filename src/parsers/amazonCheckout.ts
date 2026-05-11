@@ -27,11 +27,28 @@ export function parseOrderConfirmation(doc: Document, currentUrl: string): Order
  * buy-time qty reporting drift.
  *
  * Amazon renders `<div class="od-item-view-qty"><span>N</span></div>`
- * per line-item when qty>1, and OMITS the badge when qty=1. We locate
- * the target's `/dp/<asin>` (or `/gp/product/<asin>`) link, then walk
- * up the ancestor chain. The first scope containing a badge wins;
- * walking into a scope that holds another ASIN's link means we left
- * the target's row → no own badge → qty=1.
+ * per line-item when qty>1, and OMITS the badge when qty=1. The same
+ * ASIN can appear in MULTIPLE rows when Amazon fans a qty=N order
+ * into N separate single-qty shipments (each row gets its own
+ * `[data-component="purchasedItems"]` block, no badge). Live fixture
+ * 2026-05-11: amycpnguyen2 placed qty=3 of B0DGHMNQ5Z (AirPods 4) —
+ * order-details rendered 3 purchasedItems rows, each with one /dp/
+ * link and no badge. The pre-fan-out parser stopped at the first
+ * link, found no badge, returned 1 → BG saw qty=1 against an actual
+ * qty=3 shipment.
+ *
+ * Algorithm:
+ *  1. Find every /dp/<targetAsin> (and /gp/product/<targetAsin>) link.
+ *  2. Bucket them by row container. Prefer Amazon's
+ *     `[data-component="purchasedItems"]` ancestor when present
+ *     (real order-details); fall back to the largest ancestor that
+ *     doesn't cross into another ASIN (test fixtures + legacy
+ *     layouts).
+ *  3. For each unique row, read its badge (`.od-item-view-qty span`)
+ *     or default to 1.
+ *  4. Sum across rows. Same ASIN in one row with badge=3 → 3. Same
+ *     ASIN fanned to 3 rows of qty=1 → 3. Either way the total
+ *     reflects what BG should see.
  *
  * Returns null when targetAsin is null OR not present in the HTML
  * (caller treats null as "qty unknown, don't correct").
@@ -52,23 +69,89 @@ export function readQuantityFromOrderDetailsHtml(
   } catch {
     return null;
   }
-  const link =
-    doc.querySelector<HTMLAnchorElement>(`a[href*="/dp/${targetAsin}"]`) ??
-    doc.querySelector<HTMLAnchorElement>(`a[href*="/gp/product/${targetAsin}"]`);
-  if (!link) return null;
+  const allLinks = Array.from(
+    doc.querySelectorAll<HTMLAnchorElement>(
+      `a[href*="/dp/${targetAsin}"], a[href*="/gp/product/${targetAsin}"]`,
+    ),
+  );
+  if (allLinks.length === 0) return null;
 
-  for (let scope: Element | null = link, d = 0; d < 10 && scope; scope = scope.parentElement, d++) {
-    const crossed = Array.from(
-      scope.querySelectorAll<HTMLAnchorElement>('a[href*="/dp/"], a[href*="/gp/product/"]'),
+  // When Amazon's order-details page rendered `purchasedItems` blocks
+  // AND the target appears inside at least one, restrict to those
+  // blocks. Order-details pages also sprinkle the same ASIN into
+  // "Recently viewed" / "Customers who bought" carousels in the
+  // sidebar/footer (verified live 2026-05-11 fixture
+  // filler-order-plates-cat6a — the plate ASIN appears once in the
+  // row + once in a /rvi carousel). Those carousel links would
+  // otherwise be counted as extra rows.
+  //
+  // If the target appears ONLY outside purchasedItems (e.g. as a
+  // substitution-detail metadata link to the cart's original SKU,
+  // case B0CPRSNK53 in the same fixture), keep the legacy behavior —
+  // qty=1 from the metadata link's scope — so this isn't a regression
+  // for non-purchased-item ASIN lookups.
+  const inItems = allLinks.filter(
+    (a) => a.closest('[data-component="purchasedItems"]') !== null,
+  );
+  const links = inItems.length > 0 ? inItems : allLinks;
+
+  const seenRows = new Set<Element>();
+  const orderedRows: Element[] = [];
+  for (const link of links) {
+    const row = findOrderDetailsRow(link, targetAsin);
+    if (row && !seenRows.has(row)) {
+      seenRows.add(row);
+      orderedRows.push(row);
+    }
+  }
+
+  let total = 0;
+  for (const row of orderedRows) {
+    total += readRowQty(row);
+  }
+  // Floor at 1 — if we found at least one link but failed to derive
+  // any row qty (shouldn't happen with the fallback below, but
+  // defensive), the caller still gets a usable number.
+  return total > 0 ? total : 1;
+}
+
+/**
+ * Identify the row container for an order-details line-item link.
+ * Prefers Amazon's explicit per-item wrapper. Falls back to the
+ * largest ancestor that doesn't cross into another ASIN — keeps test
+ * fixtures with simple `<div class="row">` wrappers working.
+ */
+function findOrderDetailsRow(
+  link: HTMLAnchorElement,
+  targetAsin: string,
+): Element {
+  const explicit = link.closest('[data-component="purchasedItems"]');
+  if (explicit) return explicit;
+
+  let row: Element = link;
+  for (
+    let scope: Element | null = link.parentElement, d = 0;
+    d < 10 && scope;
+    scope = scope.parentElement, d++
+  ) {
+    const hasOtherAsin = Array.from(
+      scope.querySelectorAll<HTMLAnchorElement>(
+        'a[href*="/dp/"], a[href*="/gp/product/"]',
+      ),
     ).some((a) => {
       const m = (a.getAttribute('href') ?? '').match(DP_LINK_ASIN_RE);
       return m !== null && m[1] !== targetAsin;
     });
-    if (crossed) return 1;
-    for (const badge of Array.from(scope.querySelectorAll('.od-item-view-qty span'))) {
-      const n = parseInt((badge.textContent ?? '').trim(), 10);
-      if (Number.isFinite(n) && n > 0 && n < 1000) return n;
-    }
+    if (hasOtherAsin) break;
+    row = scope;
+  }
+  return row;
+}
+
+function readRowQty(row: Element): number {
+  for (const badge of Array.from(row.querySelectorAll('.od-item-view-qty span'))) {
+    const n = parseInt((badge.textContent ?? '').trim(), 10);
+    if (Number.isFinite(n) && n > 0 && n < 1000) return n;
   }
   return 1;
 }

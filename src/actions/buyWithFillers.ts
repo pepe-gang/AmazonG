@@ -87,10 +87,9 @@ type BuyWithFillersOptions = {
    */
   dryRun: boolean;
   /**
-   * Filler-search-term pool. 'whey' / 'eero' / 'amazon-basics' use
-   * narrow brand-specific term lists; 'general' (default) uses the
-   * broad impulse mix. Whey randomises the count to 6–8 (vs the fixed
-   * 8 for general). Prime + $20–$100 rules unchanged across pools.
+   * Filler-search-term pool. 'eero' / 'amazon-basics' use narrow
+   * brand-specific term lists; 'general' (default) uses the broad
+   * impulse mix. Prime + $20–$100 rules unchanged across pools.
    * Undefined / 'general' falls through to the legacy term generator.
    */
   fillerPool?: FillerPool;
@@ -312,21 +311,6 @@ const FILLER_SEARCH_TERMS: readonly string[] = [
 ];
 
 // Whey-protein-only pool. Used when the user opts in via Settings →
-// Buy with Fillers → "Whey Protein Filler only". Same Prime + $20–$100
-// gating as the general pool; just a narrower term list so the cart
-// looks like a sports/nutrition shop instead of a general-merch run.
-// Brand + flavour variants are intentional — Amazon's search rankings
-// for "whey protein" alone tend to surface the same handful of bestsellers
-// every time, which would defeat the no-duplicates-on-retry rule.
-const WHEY_PROTEIN_SEARCH_TERMS: readonly string[] = [
-  'whey protein', 'whey protein powder', 'whey isolate', 'whey concentrate',
-  'whey protein vanilla', 'whey protein chocolate', 'whey protein strawberry',
-  'optimum nutrition whey', 'dymatize iso100', 'muscle milk powder',
-  'body fortress whey', 'six star whey', 'cellucor whey',
-  'isopure protein', 'naked whey', 'muscletech whey',
-  'gnc whey', 'gold standard whey', 'pure protein whey',
-];
-
 // Eero (Amazon-owned mesh-WiFi brand). User-curated 2026-05-10 to
 // generation-anchored queries — keeps the surface explicitly eero
 // (no Echo leakage) while spanning both current product lines.
@@ -343,7 +327,6 @@ const AMAZON_BASICS_SEARCH_TERMS: readonly string[] = [
 
 /** Resolve the search-term pool for a given fillerPool setting. */
 function termsForPool(pool: FillerPool | undefined): readonly string[] | null {
-  if (pool === 'whey') return WHEY_PROTEIN_SEARCH_TERMS;
   if (pool === 'eero') return EERO_SEARCH_TERMS;
   if (pool === 'amazon-basics') return AMAZON_BASICS_SEARCH_TERMS;
   // 'general' / undefined → null tells caller to fall through to the
@@ -408,14 +391,6 @@ function isBlockedByPool(
   }
   return false;
 }
-
-// When wheyProteinFillerOnly is on, the count is randomised in this
-// inclusive range — adds a touch of variation per buy on top of the
-// shuffled term order so two consecutive whey-mode buys aren't
-// fingerprintably identical. Range scaled proportionally with the
-// general FILLER_COUNT drop from 12 → 8.
-const WHEY_FILLER_MIN_COUNT = 6;
-const WHEY_FILLER_MAX_COUNT = 8;
 
 // Eero pool yields ~10 candidates per term under the current filters;
 // 5 fills cleanly with margin.
@@ -731,23 +706,16 @@ export async function buyWithFillers(
   //    search is worse than a slightly smaller cover.
   //
   // Pool + count picked here so log lines downstream can attribute
-  // results to the active mode. Whey-only randomises 6–8 to add a bit
-  // of cart-shape variation across runs; eero uses a smaller target
-  // (~3) because the search pool only yields ~4 unique items —
-  // FILLER_COUNT=8 would guarantee 0-filler buys after a retry
-  // exhausts attemptedAsins (INC-2026-05-10). amazon-basics + general
-  // stay at the historical fixed count since their search pools are
-  // wide enough.
+  // results to the active mode. Eero uses a smaller target (~5)
+  // because the search pool only yields ~10 unique items under the
+  // current filters; FILLER_COUNT=8 would guarantee 0-filler buys
+  // after a retry exhausts attemptedAsins (INC-2026-05-10).
+  // amazon-basics + general stay at the historical fixed count since
+  // their search pools are wide enough.
   const poolOverride = termsForPool(opts.fillerPool);
   const fillerTerms = poolOverride ?? FILLER_SEARCH_TERMS;
-  const useWheyPool = opts.fillerPool === 'whey';
   const useEeroPool = opts.fillerPool === 'eero';
-  const fillerTargetCount = useWheyPool
-    ? WHEY_FILLER_MIN_COUNT +
-      Math.floor(Math.random() * (WHEY_FILLER_MAX_COUNT - WHEY_FILLER_MIN_COUNT + 1))
-    : useEeroPool
-    ? EERO_FILLER_COUNT
-    : FILLER_COUNT;
+  const fillerTargetCount = useEeroPool ? EERO_FILLER_COUNT : FILLER_COUNT;
   logger.info(
     'step.fillerBuy.fillers.config',
     {

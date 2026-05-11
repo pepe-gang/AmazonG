@@ -2,7 +2,7 @@ import { app } from 'electron';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeJsonAtomic } from './atomicJson.js';
-import type { Settings } from '../shared/ipc.js';
+import type { FillerPool, Settings } from '../shared/ipc.js';
 
 const DEFAULTS: Settings = {
   headless: true,
@@ -81,21 +81,23 @@ export async function loadSettings(): Promise<Settings> {
     }
 
     // v0.13.36 migration: wheyProteinFillerOnly (boolean) →
-    // fillerPool (enum). true → 'whey' (preserve previous behavior),
-    // false → 'general'. The new field is the source of truth going
-    // forward.
+    // fillerPool (enum). Pre-v0.13.40 this set 'whey' when true /
+    // 'general' when false. v0.13.40 removed the 'whey' pool entirely
+    // (food items are non-refundable, so they were unusable as
+    // cancellable fillers), so true now maps to 'eero' — the current
+    // default — instead.
     if (migrated.fillerPool === undefined && parsed.wheyProteinFillerOnly !== undefined) {
-      migrated.fillerPool = parsed.wheyProteinFillerOnly ? 'whey' : 'general';
+      migrated.fillerPool = parsed.wheyProteinFillerOnly ? 'eero' : 'general';
     }
 
-    // v0.13.39 migration: bump the historical default 'whey' to 'eero'.
-    // 'whey' was the original default (and was inherited from the
-    // v0.13.36 migration above for everyone who had wheyProteinFillerOnly
-    // = true, which itself was the pre-multi-pool default). So almost
-    // every saved 'whey' is a default-by-inheritance, not a deliberate
-    // choice. Users who actively picked 'general' or 'amazon-basics'
-    // keep their choice — only the inherited default gets bumped.
-    if (migrated.fillerPool === 'whey') {
+    // v0.13.40 migration: 'whey' is no longer a valid FillerPool.
+    // Move any existing 'whey' value to 'eero'. (v0.13.39 already did
+    // this once as a soft default-bump, but a saved settings.json
+    // can still hold 'whey' if it was last written before v0.13.39 or
+    // if the bump migration ever fails to apply.)
+    if (
+      (migrated.fillerPool as FillerPool | 'whey' | undefined) === 'whey'
+    ) {
       migrated.fillerPool = 'eero';
     }
 

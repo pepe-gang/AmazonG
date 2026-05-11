@@ -79,9 +79,9 @@ export type Deps = {
    */
   loadParallelism: () => Promise<{
     maxConcurrentBuys: number;
-    /** Filler-mode search-term pool ('general' | 'whey' | 'eero' |
-     *  'amazon-basics'). Read every claim so a Settings change takes
-     *  effect on the next deal without restarting the worker. */
+    /** Filler-mode search-term pool ('general' | 'eero' | 'amazon-basics').
+     *  Read every claim so a Settings change takes effect on the next
+     *  deal without restarting the worker. */
     fillerPool: FillerPool;
     /** Experimental: when true AND the buy is in filler mode AND the
      *  cashback gate fails with B1 (target's group has no "% back"

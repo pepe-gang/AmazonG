@@ -1018,6 +1018,50 @@ describe('readQuantityFromOrderDetailsHtml — per-ASIN', () => {
     expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(1);
   });
 
+  it('sums fan-out rows: qty=N fanned into N single-qty shipments returns N', () => {
+    // Live-captured 2026-05-11 from amycpnguyen2's order of qty=3
+    // AirPods 4 (B0DGHMNQ5Z). Amazon fanned the order into 3
+    // separate purchasedItems rows, each rendered with one /dp/
+    // link and NO od-item-view-qty badge (qty=1 hides the badge).
+    // Pre-fix the parser returned 1 from the first row; BG then
+    // recorded qty=1 against an actual qty=3 shipment.
+    const html = fixture('orderDetails/fanout-qty-airpods-2026-05-11.html');
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0DGHMNQ5Z')).toBe(3);
+  });
+
+  it('sums fan-out rows in synthetic fixture (purchasedItems wrapper)', () => {
+    // Same shape as the live fixture, distilled. Three
+    // purchasedItems blocks, same ASIN, no badge → expect 3.
+    const html = `<html><body>
+      <div data-component="purchasedItems">
+        <a href="/dp/B0D3J71RM7?ref_=ppx_hzod_image_dt_b_fed_asin_title_0_0"><img/></a>
+        <a href="/dp/B0D3J71RM7?ref_=ppx_hzod_title_dt_b_fed_asin_title_0_0">title</a>
+      </div>
+      <div data-component="purchasedItems">
+        <a href="/dp/B0D3J71RM7?ref_=ppx_hzod_image_dt_b_fed_asin_title_1_0"><img/></a>
+        <a href="/dp/B0D3J71RM7?ref_=ppx_hzod_title_dt_b_fed_asin_title_1_0">title</a>
+      </div>
+      <div data-component="purchasedItems">
+        <a href="/dp/B0D3J71RM7?ref_=ppx_hzod_image_dt_b_fed_asin_title_2_0"><img/></a>
+        <a href="/dp/B0D3J71RM7?ref_=ppx_hzod_title_dt_b_fed_asin_title_2_0">title</a>
+      </div>
+    </body></html>`;
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(3);
+  });
+
+  it('one row with badge=3 still returns 3 (single shipment, no fan-out)', () => {
+    // The single-row qty>1 case must keep working. One
+    // purchasedItems block, badge=3.
+    const html = `<html><body>
+      <div data-component="purchasedItems">
+        <a href="/dp/B0D3J71RM7"><img/></a>
+        <a href="/dp/B0D3J71RM7">title</a>
+        <div class="od-item-view-qty"><span>3</span></div>
+      </div>
+    </body></html>`;
+    expect(readQuantityFromOrderDetailsHtml(html, 'B0D3J71RM7')).toBe(3);
+  });
+
   describe('computeCashbackRadioPlans — "Please select a new delivery option" recovery', () => {
     // Captured live 2026-05-11. /spc shows the
     // selectDeliveryOptionMessage banner with two groups:

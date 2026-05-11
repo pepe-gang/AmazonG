@@ -250,9 +250,9 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
           </div>
           <div className="text-[11px] text-muted-foreground leading-snug mt-0.5 max-w-md">
             Which search-term pool the filler picker rotates through.
-            Whey runs 6&ndash;8 fillers (random), other pools run the
-            standard count. Same Prime + $20&ndash;$100 rules across all
-            pools. No effect when Buy with Fillers is off.
+            Eero / Amazon Basics use narrow brand-specific term lists;
+            General uses the broad impulse mix. Same Prime + $20&ndash;$100
+            rules across all pools. No effect when Buy with Fillers is off.
           </div>
         </div>
         <select
@@ -262,7 +262,6 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
             void update({
               fillerPool: e.target.value as
                 | 'general'
-                | 'whey'
                 | 'eero'
                 | 'amazon-basics',
             })
@@ -275,7 +274,6 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
           }
         >
           <option value="general">General mix</option>
-          <option value="whey">Whey Protein</option>
           <option value="eero">Amazon Eero</option>
           <option value="amazon-basics">Amazon Basics</option>
         </select>

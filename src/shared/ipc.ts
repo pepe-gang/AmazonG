@@ -157,10 +157,10 @@ export const IPC = {
 /**
  * Filler-mode search-term pool. Drives which Amazon-search keywords
  * the filler picker rotates through when adding cart items as fillers.
- * See WHEY_PROTEIN_SEARCH_TERMS / EERO_SEARCH_TERMS / AMAZON_BASICS_SEARCH_TERMS
- * in src/actions/buyWithFillers.ts for the per-pool term lists.
+ * See EERO_SEARCH_TERMS / AMAZON_BASICS_SEARCH_TERMS in
+ * src/actions/buyWithFillers.ts for the per-pool term lists.
  */
-export type FillerPool = 'general' | 'whey' | 'eero' | 'amazon-basics';
+export type FillerPool = 'general' | 'eero' | 'amazon-basics';
 
 export type Settings = {
   headless: boolean;
@@ -221,12 +221,13 @@ export type Settings = {
   /**
    * Which search-term pool the filler picker uses (filler-mode only).
    *   - 'general'        — broad mix (legacy default behavior pre-v0.13.x)
-   *   - 'whey'           — whey-protein only (18 brand+flavor variants)
-   *   - 'eero'           — eero / Amazon Eero networking gear
+   *   - 'eero'           — eero / Amazon Eero networking gear (default)
    *   - 'amazon-basics'  — Amazon Basics house brand
    * No effect when filler mode is off. Pre-v0.13.36 setting was a
-   * boolean `wheyProteinFillerOnly`; loadSettings migrates true→'whey'
-   * and false→'general'.
+   * boolean `wheyProteinFillerOnly`; the 'whey' pool itself was
+   * removed in v0.13.40 (food items are non-refundable, so they
+   * weren't usable as cancellable fillers). Existing 'whey' values
+   * are migrated to 'eero' on load.
    */
   fillerPool: FillerPool;
   /**
