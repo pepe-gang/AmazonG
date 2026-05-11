@@ -33,23 +33,24 @@ export function retailPrice(a: JobAttempt): number | null {
  *   profit = payout - retail × (1 - cashback%)
  * Multiplied by quantity (units we ordered).
  *
- * Only computes for verified ("Success") orders — that's the one status
- * where we know:
- *   - the buy actually placed (vs queued / in_progress / failed)
- *   - Amazon didn't auto-cancel (vs awaiting_verification / cancelled)
- *   - real money moved (vs dry_run_success)
- * For every other status the cell shows "—" so we don't pretend to know
- * profit for a row whose outcome isn't final.
+ * Shown for any row where the buy successfully placed (orderId on
+ * file) — `awaiting_verification`, `pending_tracking`, `verified`,
+ * `completed`. Projected, not realized: if Amazon later cancels or
+ * the user returns the item, the actual P&L differs. Matches BG's
+ * dashboard which shows projected profit as soon as the buy places.
+ *
+ * Excluded: queued / in_progress (buy not placed yet) /
+ * failed / cancelled / action_required (no successful placement).
  */
+const PROFIT_ELIGIBLE_STATUSES = new Set([
+  'awaiting_verification',
+  'pending_tracking',
+  'verified',
+  'completed',
+]);
+
 export function computeProfit(a: JobAttempt): number | null {
-  // Both 'verified' (AmazonG-local terminology after the verify-phase
-  // pass succeeds) and 'completed' (BG's terminology for the same final
-  // state, persisted on AutoBuyPurchase.status and what comes back via
-  // listMergedAttempts) count as the success terminal. The two
-  // vocabularies exist for historical reasons; until the BG-side enum
-  // is unified to AmazonG's, treat both as Success here so server-merged
-  // rows aren't silently excluded from profit totals.
-  if (a.status !== 'verified' && a.status !== 'completed') return null;
+  if (!PROFIT_ELIGIBLE_STATUSES.has(a.status)) return null;
   const retail = retailPrice(a);
   const payout = typeof a.price === 'number' ? a.price : null;
   const qty = typeof a.quantity === 'number' && a.quantity > 0 ? a.quantity : null;
