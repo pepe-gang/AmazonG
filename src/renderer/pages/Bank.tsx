@@ -57,6 +57,11 @@ function ChaseAccountsPanel() {
   const [profiles, setProfiles] = useState<ChaseProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
+  // Global Chase auto-redeem time, mirrors Settings.chaseAutoRedeemTime.
+  // Pre-v0.13.42 each profile carried its own time; now one schedule
+  // drives every enabled profile so the user only sets it once.
+  // Loaded on mount; updated optimistically on each picker change.
+  const [globalRedeemTime, setGlobalRedeemTime] = useState<string>('15:00');
   // Per-profile transient state. busy ids = login in flight; row id
   // → 'pending' / 'ok' / 'error: …' so each card can render its own
   // banner without sharing a global error slot.
@@ -77,6 +82,37 @@ function ChaseAccountsPanel() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Hydrate the global auto-redeem time from settings on mount.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const s = await window.autog.settingsGet();
+        if (cancelled) return;
+        if (typeof s.chaseAutoRedeemTime === 'string') {
+          setGlobalRedeemTime(s.chaseAutoRedeemTime);
+        }
+      } catch {
+        // Keep default. The picker still works locally; persisting just
+        // fails until the IPC recovers.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onGlobalRedeemTimeChange = useCallback(async (next: string) => {
+    if (!/^\d{1,2}:\d{2}$/.test(next)) return;
+    setGlobalRedeemTime(next);
+    try {
+      await window.autog.settingsSet({ chaseAutoRedeemTime: next });
+    } catch {
+      // Optimistic update stays — the next settingsGet poll will
+      // reconcile if the write actually failed.
+    }
+  }, []);
 
   const onAdd = async (
     label: string,
@@ -610,6 +646,25 @@ function ChaseAccountsPanel() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
+          {/* Global auto-redeem time picker. Writes to
+              Settings.chaseAutoRedeemTime; every profile with
+              autoRedeem.enabled=true fires at this time daily. Replaces
+              the pre-v0.13.42 per-profile time inputs that lived
+              inside each card. */}
+          <label
+            className="inline-flex items-center gap-1.5 text-[11px] text-white/70 select-none"
+            title="Single daily fire time for Chase auto-redeem, shared across every enabled Chase profile."
+          >
+            <span>Auto redeem at</span>
+            <input
+              type="time"
+              value={globalRedeemTime}
+              onChange={(e) => {
+                void onGlobalRedeemTimeChange(e.target.value);
+              }}
+              className="bg-white/[0.05] border border-white/10 rounded px-1.5 py-0.5 text-[11px] tabular-nums text-white/90 focus:outline-none focus:border-blue-400/40 [color-scheme:dark]"
+            />
+          </label>
           {profiles.some((p) => p.cardAccountId) && (
             <button
               type="button"
@@ -794,6 +849,7 @@ function ChaseAccountsPanel() {
                   }));
                 }
               }}
+              globalRedeemTime={globalRedeemTime}
             />
           );
         })}
@@ -834,6 +890,7 @@ function ChaseBankCard({
   onPayCancel,
   onRefreshSnapshot,
   onSetAutoRedeem,
+  globalRedeemTime,
 }: {
   profile: ChaseProfile;
   isPending: boolean;
@@ -861,6 +918,7 @@ function ChaseBankCard({
   onPayCancel: () => void;
   onRefreshSnapshot: () => void;
   onSetAutoRedeem: (patch: { enabled: boolean; time?: string }) => void;
+  globalRedeemTime: string;
 }) {
   const isRedeeming = redeem === 'pending';
   const redeemSuccess =
@@ -1208,7 +1266,11 @@ function ChaseBankCard({
           when a card is linked (auto-redeem is meaningless without
           a captured cardAccountId). */}
       {p.cardAccountId && (
-        <AutoRedeemRow profile={p} onChange={onSetAutoRedeem} />
+        <AutoRedeemRow
+          profile={p}
+          onChange={onSetAutoRedeem}
+          globalRedeemTime={globalRedeemTime}
+        />
       )}
 
       {/* Action row. Keep the surface small: Pay-balance is the
@@ -1287,9 +1349,11 @@ function ChaseBankCard({
 function AutoRedeemRow({
   profile,
   onChange,
+  globalRedeemTime,
 }: {
   profile: ChaseProfile;
   onChange: (patch: { enabled: boolean; time?: string }) => void;
+  globalRedeemTime: string;
 }) {
   const ar = profile.autoRedeem ?? {
     enabled: false,
@@ -1310,7 +1374,10 @@ function AutoRedeemRow({
     if (ar.lastRunResult === 'ok' && ar.lastRunAt) {
       return `On — last redeemed ${relDate(ar.lastRunAt)}`;
     }
-    return `On — fires daily at ${formatTimeForDisplay(ar.time)}`;
+    // Show the global time so every enabled card's status line says
+    // the same fire time. Pre-v0.13.42 each card displayed its own
+    // per-profile time; now there's one schedule.
+    return `On — fires daily at ${formatTimeForDisplay(globalRedeemTime)}`;
   })();
 
   const statusClass = !ar.enabled
@@ -1332,18 +1399,6 @@ function AutoRedeemRow({
         />
         <span className="text-white/85">Auto redeem</span>
       </label>
-      <span className="text-white/40">at</span>
-      <input
-        type="time"
-        value={ar.time}
-        onChange={(e) => {
-          const v = e.target.value;
-          if (/^\d{1,2}:\d{2}$/.test(v)) {
-            onChange({ enabled: ar.enabled, time: v });
-          }
-        }}
-        className="bg-white/[0.05] border border-white/10 rounded px-1.5 py-0.5 text-[11px] tabular-nums text-white/90 focus:outline-none focus:border-blue-400/40 [color-scheme:dark]"
-      />
       <span className={`${statusClass} truncate min-w-0 flex-1`} title={statusText}>
         {statusText}
       </span>

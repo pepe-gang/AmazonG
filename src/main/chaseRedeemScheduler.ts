@@ -53,23 +53,25 @@ export function parseScheduleTime(s: string): { h: number; m: number } | null {
  * The decision: should this profile fire its auto-redeem on the
  * current tick?
  *
- *   1. autoRedeem must be enabled
+ *   1. autoRedeem must be enabled (per-profile flag)
  *   2. profile must be ready to act on (has a card linked) — defended
  *      so a freshly-added profile that hasn't logged in yet can't get
  *      a run scheduled against a null cardAccountId
- *   3. parsed time valid
+ *   3. parsed GLOBAL time valid (Settings.chaseAutoRedeemTime, single
+ *      schedule shared by every enabled profile as of v0.13.42)
  *   4. now >= scheduled-instant-today
- *   5. lastRunAt is missing OR not today (local)
+ *   5. lastRunAt (per-profile) is missing OR not today (local)
  */
 export function isProfileDueNow(
   profile: ChaseProfile,
+  globalTime: string,
   now: Date = new Date(),
 ): boolean {
   const ar = profile.autoRedeem;
   if (!ar?.enabled) return false;
   if (!profile.cardAccountId) return false;
 
-  const t = parseScheduleTime(ar.time);
+  const t = parseScheduleTime(globalTime);
   if (!t) return false;
 
   const scheduledToday = new Date(now);
@@ -118,9 +120,10 @@ export function lastRunAtForFreshEnable(
  */
 export function selectDueProfiles(
   profiles: readonly ChaseProfile[],
+  globalTime: string,
   now: Date = new Date(),
 ): ChaseProfile[] {
-  return profiles.filter((p) => isProfileDueNow(p, now));
+  return profiles.filter((p) => isProfileDueNow(p, globalTime, now));
 }
 
 /**
@@ -133,12 +136,13 @@ export function selectDueProfiles(
  */
 export function nextFireAt(
   profile: ChaseProfile,
+  globalTime: string,
   now: Date = new Date(),
 ): Date | null {
   const ar = profile.autoRedeem;
   if (!ar?.enabled) return null;
   if (!profile.cardAccountId) return null;
-  const t = parseScheduleTime(ar.time);
+  const t = parseScheduleTime(globalTime);
   if (!t) return null;
 
   const scheduledToday = new Date(now);

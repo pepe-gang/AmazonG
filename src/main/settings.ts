@@ -40,6 +40,14 @@ const DEFAULTS: Settings = {
   // typical Apple Silicon Macs. Customers on older / fanless laptops
   // can dial down to 1.
   maxConcurrentBuys: 3,
+  // Single daily fire time for Chase auto-redeem, shared across every
+  // Chase profile that has `autoRedeem.enabled = true`. Pre-v0.13.42
+  // each profile carried its own time; users found this surprising
+  // and wanted one schedule that drives all accounts. HH:MM 24h, local
+  // timezone. Default 15:00 (3 PM local) — matches the legacy default
+  // on per-profile time so first-load behavior is unchanged for
+  // anyone who never customised the time.
+  chaseAutoRedeemTime: '15:00',
 };
 
 function filePath(): string {

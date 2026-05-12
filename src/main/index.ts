@@ -154,8 +154,10 @@ let bgRelayHandle: { stop: () => Promise<void> } | null = null;
 async function chaseAutoRedeemTick(): Promise<void> {
   if (!triggerChaseRedeem) return;
   const { selectDueProfiles } = await import('./chaseRedeemScheduler.js');
+  const settings = await loadSettings().catch(() => null);
+  const globalTime = settings?.chaseAutoRedeemTime ?? '15:00';
   const profiles = await loadChaseProfiles().catch(() => []);
-  const due = selectDueProfiles(profiles);
+  const due = selectDueProfiles(profiles, globalTime);
   if (due.length === 0) return;
   logger.info('chase.autoRedeem.tick', {
     count: due.length,
@@ -2033,30 +2035,24 @@ function registerIpcHandlers(): void {
         lastRunResult: null,
         lastRunError: null,
       };
-      // Validate time when caller provides one. Reject malformed
-      // strings so the scheduler never reads a corrupt schedule.
-      let nextTime = current.time;
-      if (typeof patch.time === 'string') {
-        const { parseScheduleTime } = await import(
-          './chaseRedeemScheduler.js'
-        );
-        if (!parseScheduleTime(patch.time)) {
-          throw new Error(`invalid time "${patch.time}" — expected HH:MM 24h`);
-        }
-        nextTime = patch.time;
-      }
+      // v0.13.42: the schedule TIME moved to global settings
+      // (Settings.chaseAutoRedeemTime). Per-profile `time` is no
+      // longer authoritative — we keep the field on the row for
+      // backward compat with persisted profiles but ignore any
+      // `patch.time` here. The renderer's global time picker calls
+      // settingsSet directly. Per-profile patch is now enabled-only.
       // Skip-today-on-enable: when the user flips false → true and
       // today's window has already passed, stamp lastRunAt to start-
       // of-today so the natural fire-today path is short-circuited.
-      // Without this, enabling at 11 PM with a 3 PM time would fire
-      // on the next 60s tick and redeem the user's whole points
-      // balance — almost certainly not what they meant.
+      // Reads the global time from settings.
       let nextLastRunAt: string | null = current.lastRunAt;
       if (patch.enabled && !current.enabled) {
+        const settings = await loadSettings().catch(() => null);
+        const globalTime = settings?.chaseAutoRedeemTime ?? '15:00';
         const { lastRunAtForFreshEnable } = await import(
           './chaseRedeemScheduler.js'
         );
-        const skipStamp = lastRunAtForFreshEnable(nextTime);
+        const skipStamp = lastRunAtForFreshEnable(globalTime);
         if (skipStamp) {
           nextLastRunAt = skipStamp.toISOString();
         }
@@ -2064,7 +2060,9 @@ function registerIpcHandlers(): void {
       const updated = await updateChaseProfile(id, {
         autoRedeem: {
           enabled: patch.enabled,
-          time: nextTime,
+          // Carry forward the persisted time so older row shape
+          // stays well-formed; not read by the scheduler anymore.
+          time: current.time,
           lastRunAt: nextLastRunAt,
           lastRunResult: current.lastRunResult,
           lastRunError: current.lastRunError,
@@ -2073,7 +2071,6 @@ function registerIpcHandlers(): void {
       logger.info('chase.autoRedeem.updated', {
         id,
         enabled: patch.enabled,
-        time: nextTime,
         skippedToday: nextLastRunAt !== current.lastRunAt,
       });
       return updated;

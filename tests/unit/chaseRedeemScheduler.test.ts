@@ -82,40 +82,43 @@ describe('isSameLocalDay', () => {
 // ── isProfileDueNow ──────────────────────────────────────────────
 
 describe('isProfileDueNow', () => {
+  // v0.13.42: schedule TIME moved to global settings — every test
+  // passes "15:00" as the globalTime parameter to match the legacy
+  // per-profile default that the tests previously relied on.
   test('disabled → never due', () => {
     const p: ChaseProfile = {
       ...baseProfile,
       autoRedeem: { ...baseProfile.autoRedeem!, enabled: false },
     };
-    expect(isProfileDueNow(p, new Date(2026, 4, 8, 16, 0))).toBe(false);
+    expect(isProfileDueNow(p, '15:00', new Date(2026, 4, 8, 16, 0))).toBe(false);
   });
 
   test('autoRedeem missing → never due (older profile)', () => {
     const p: ChaseProfile = { ...baseProfile, autoRedeem: undefined };
-    expect(isProfileDueNow(p, new Date(2026, 4, 8, 16, 0))).toBe(false);
+    expect(isProfileDueNow(p, '15:00', new Date(2026, 4, 8, 16, 0))).toBe(false);
   });
 
   test('no cardAccountId → never due (defensive — nothing to act on)', () => {
     const p: ChaseProfile = { ...baseProfile, cardAccountId: null };
-    expect(isProfileDueNow(p, new Date(2026, 4, 8, 16, 0))).toBe(false);
+    expect(isProfileDueNow(p, '15:00', new Date(2026, 4, 8, 16, 0))).toBe(false);
   });
 
   test('time before window today → not due', () => {
-    expect(isProfileDueNow(baseProfile, new Date(2026, 4, 8, 14, 59))).toBe(
-      false,
-    );
+    expect(
+      isProfileDueNow(baseProfile, '15:00', new Date(2026, 4, 8, 14, 59)),
+    ).toBe(false);
   });
 
   test('time exactly at window → due', () => {
-    expect(isProfileDueNow(baseProfile, new Date(2026, 4, 8, 15, 0))).toBe(
-      true,
-    );
+    expect(
+      isProfileDueNow(baseProfile, '15:00', new Date(2026, 4, 8, 15, 0)),
+    ).toBe(true);
   });
 
   test('time past window today, never run → due', () => {
-    expect(isProfileDueNow(baseProfile, new Date(2026, 4, 8, 16, 30))).toBe(
-      true,
-    );
+    expect(
+      isProfileDueNow(baseProfile, '15:00', new Date(2026, 4, 8, 16, 30)),
+    ).toBe(true);
   });
 
   test('already ran today → not due', () => {
@@ -124,7 +127,7 @@ describe('isProfileDueNow', () => {
       ...baseProfile,
       autoRedeem: { ...baseProfile.autoRedeem!, lastRunAt: ranToday },
     };
-    expect(isProfileDueNow(p, new Date(2026, 4, 8, 16, 30))).toBe(false);
+    expect(isProfileDueNow(p, '15:00', new Date(2026, 4, 8, 16, 30))).toBe(false);
   });
 
   test('ran yesterday → due (day rollover allows next run)', () => {
@@ -133,15 +136,13 @@ describe('isProfileDueNow', () => {
       ...baseProfile,
       autoRedeem: { ...baseProfile.autoRedeem!, lastRunAt: ranYesterday },
     };
-    expect(isProfileDueNow(p, new Date(2026, 4, 8, 15, 30))).toBe(true);
+    expect(isProfileDueNow(p, '15:00', new Date(2026, 4, 8, 15, 30))).toBe(true);
   });
 
-  test('malformed time → not due (defensive — no scheduler crash)', () => {
-    const p: ChaseProfile = {
-      ...baseProfile,
-      autoRedeem: { ...baseProfile.autoRedeem!, time: 'banana' },
-    };
-    expect(isProfileDueNow(p, new Date(2026, 4, 8, 16, 0))).toBe(false);
+  test('malformed global time → not due (defensive — no scheduler crash)', () => {
+    expect(
+      isProfileDueNow(baseProfile, 'banana', new Date(2026, 4, 8, 16, 0)),
+    ).toBe(false);
   });
 
   test('malformed lastRunAt → treated as never run, fires', () => {
@@ -152,16 +153,12 @@ describe('isProfileDueNow', () => {
         lastRunAt: 'not-a-date',
       },
     };
-    expect(isProfileDueNow(p, new Date(2026, 4, 8, 16, 0))).toBe(true);
+    expect(isProfileDueNow(p, '15:00', new Date(2026, 4, 8, 16, 0))).toBe(true);
   });
 
-  test('schedule edge: time set past midnight (00:00)', () => {
-    const p: ChaseProfile = {
-      ...baseProfile,
-      autoRedeem: { ...baseProfile.autoRedeem!, time: '00:00' },
-    };
+  test('schedule edge: globalTime set past midnight (00:00)', () => {
     // 00:01 → past 00:00 today, never run → due
-    expect(isProfileDueNow(p, new Date(2026, 4, 8, 0, 1))).toBe(true);
+    expect(isProfileDueNow(baseProfile, '00:00', new Date(2026, 4, 8, 0, 1))).toBe(true);
   });
 });
 
@@ -185,6 +182,7 @@ describe('selectDueProfiles', () => {
     };
     const result = selectDueProfiles(
       [due, notDue, ranToday],
+      '15:00',
       new Date(2026, 4, 8, 16, 0),
     );
     expect(result).toHaveLength(1);
@@ -192,7 +190,7 @@ describe('selectDueProfiles', () => {
   });
 
   test('empty input → empty output', () => {
-    expect(selectDueProfiles([], new Date())).toEqual([]);
+    expect(selectDueProfiles([], '15:00', new Date())).toEqual([]);
   });
 });
 
@@ -240,7 +238,7 @@ describe('lastRunAtForFreshEnable (skip-today-on-enable)', () => {
 describe('nextFireAt', () => {
   test('window in future → today at scheduled', () => {
     const now = new Date(2026, 4, 8, 10, 0);
-    const next = nextFireAt(baseProfile, now);
+    const next = nextFireAt(baseProfile, '15:00', now);
     expect(next).not.toBeNull();
     expect(next!.getDate()).toBe(8);
     expect(next!.getHours()).toBe(15);
@@ -254,14 +252,14 @@ describe('nextFireAt', () => {
       ...baseProfile,
       autoRedeem: { ...baseProfile.autoRedeem!, lastRunAt: ranToday },
     };
-    const next = nextFireAt(p, now);
+    const next = nextFireAt(p, '15:00', now);
     expect(next!.getDate()).toBe(9);
     expect(next!.getHours()).toBe(15);
   });
 
   test('window passed but unfired today → today (about to fire)', () => {
     const now = new Date(2026, 4, 8, 16, 0);
-    const next = nextFireAt(baseProfile, now);
+    const next = nextFireAt(baseProfile, '15:00', now);
     expect(next!.getDate()).toBe(8);
     expect(next!.getHours()).toBe(15);
   });
@@ -271,19 +269,15 @@ describe('nextFireAt', () => {
       ...baseProfile,
       autoRedeem: { ...baseProfile.autoRedeem!, enabled: false },
     };
-    expect(nextFireAt(p, new Date())).toBeNull();
+    expect(nextFireAt(p, '15:00', new Date())).toBeNull();
   });
 
   test('no card linked → null', () => {
     const p: ChaseProfile = { ...baseProfile, cardAccountId: null };
-    expect(nextFireAt(p, new Date())).toBeNull();
+    expect(nextFireAt(p, '15:00', new Date())).toBeNull();
   });
 
-  test('malformed time → null', () => {
-    const p: ChaseProfile = {
-      ...baseProfile,
-      autoRedeem: { ...baseProfile.autoRedeem!, time: 'three pm' },
-    };
-    expect(nextFireAt(p, new Date())).toBeNull();
+  test('malformed global time → null', () => {
+    expect(nextFireAt(baseProfile, 'three pm', new Date())).toBeNull();
   });
 });
