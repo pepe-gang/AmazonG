@@ -387,7 +387,13 @@ function isBlockedByPool(
     // Amazon's loose match for "amazon eero mesh" surfaces non-eero
     // mesh brands (TP-Link, NETGEAR, Tenda, Linksys, etc.). A positive
     // "eero or skip" allowlist handles them in one rule.
-    return !/\beero\b/i.test(title);
+    if (!/\beero\b/i.test(title)) return true;
+    // Per user request 2026-05-11: exclude eero-branded ethernet
+    // cables. They're cheap accessory SKUs that surface in the same
+    // search as the routers, but as fillers they don't carry the
+    // cart-shape we want (router-priced gear ~$100+).
+    if (/\bethernet\s+cable/i.test(title)) return true;
+    return false;
   }
   return false;
 }
