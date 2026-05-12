@@ -978,6 +978,28 @@ async function startWorkerNow(): Promise<void> {
         return a;
       },
       get: storeGetAttempt,
+      async recentOrderIdsForEmail(amazonEmail, withinMs) {
+        try {
+          const all = await storeListAttempts();
+          const cutoffMs = Date.now() - withinMs;
+          const emailLower = amazonEmail.toLowerCase();
+          const ids: string[] = [];
+          for (const a of all) {
+            if (a.amazonEmail?.toLowerCase() !== emailLower) continue;
+            const created = new Date(a.createdAt).getTime();
+            if (!Number.isFinite(created) || created < cutoffMs) continue;
+            if (a.orderId) ids.push(a.orderId);
+            if (Array.isArray(a.fillerOrderIds)) {
+              for (const f of a.fillerOrderIds) {
+                if (typeof f === 'string' && f) ids.push(f);
+              }
+            }
+          }
+          return Array.from(new Set(ids));
+        } catch {
+          return [];
+        }
+      },
     },
   });
   lastError = null;

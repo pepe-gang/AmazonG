@@ -48,6 +48,27 @@ export type JobAttemptStore = {
     opts?: { forceFlush?: boolean },
   ): Promise<JobAttempt | null>;
   get(attemptId: string): Promise<JobAttempt | null>;
+  /**
+   * Collect every Amazon order id our prior buys produced on this
+   * amazon account within the last `withinMs` ms. Includes both the
+   * target `orderId` and every `fillerOrderIds` entry.
+   *
+   * Used by `buyWithFillers`'s pre-buy snapshot (v0.13.43) to defeat
+   * Amazon's order-history propagation race: when buy A finishes and
+   * buy B starts shortly after on the same account, the order-history
+   * page sometimes hasn't surfaced A's new order by the time B
+   * snapshots. Without this seed, B's `post − pre` diff falsely
+   * attributes A's order to B's fan-out. With this seed, A's orderIds
+   * are pre-added to the pre-set even when the page didn't show them
+   * yet — the diff filters them out correctly.
+   *
+   * Returns an empty array on store-read failure (defensive). Caller
+   * treats empty as "no seed available, page snapshot is authoritative."
+   */
+  recentOrderIdsForEmail(
+    amazonEmail: string,
+    withinMs: number,
+  ): Promise<string[]>;
 };
 
 export type Deps = {
@@ -574,6 +595,18 @@ async function runFillerBuyWithRetries(
         cid,
       );
     }
+    // Seed for the pre-buy snapshot: orderIds from prior buys on this
+    // amazon account in the last 10 min. Defeats Amazon's order-history
+    // propagation race — a recently-completed prior buy whose orderId
+    // hasn't yet appeared on /gp/css/order-history would otherwise
+    // sneak into the post-buy diff and false-attribute as this buy's
+    // filler. Caller-side lookup keeps the layering clean (action
+    // code doesn't reach into the local attempts store directly).
+    const RECENT_ORDER_WINDOW_MS = 10 * 60 * 1000;
+    const recentOrderIds = await deps.jobAttempts
+      .recentOrderIdsForEmail(profile, RECENT_ORDER_WINDOW_MS)
+      .catch(() => [] as string[]);
+
     lastRaw = await buyWithFillers(page, {
       productUrl: job.productUrl,
       maxPrice: job.maxPrice,
@@ -583,6 +616,7 @@ async function runFillerBuyWithRetries(
       dryRun: deps.buyDryRun,
       fillerPool: effectivePool,
       attemptedAsins,
+      recentOrderIds,
       // Only the first attempt can reuse the verify-phase scrape — by
       // attempt 2 the page state has drifted (we've been to /spc and
       // back, /cart, etc.) and a fresh scrape is needed anyway.

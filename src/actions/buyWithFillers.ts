@@ -165,6 +165,22 @@ type BuyWithFillersOptions = {
    */
   surgicalCashbackRecovery?: boolean;
   /**
+   * Order ids the caller already knows are pre-existing on this
+   * amazon account (e.g. recently-completed prior buys whose orders
+   * may not have propagated to /gp/css/order-history yet). Merged
+   * into the pre-buy snapshot set so the post-buy diff filters them
+   * out correctly even when Amazon's order-history index hasn't
+   * caught up with the most recent prior buy.
+   *
+   * Fixes the propagation-race bug discovered 2026-05-12: buy A
+   * finishes, buy B starts ~5-30s later on the same account, B's
+   * pre-snapshot misses A's order (not yet indexed), B's post-snapshot
+   * sees it (now indexed), diff falsely attributes A's order to B's
+   * filler fan-out. Caller (pollAndScrape) fetches these from the
+   * local attempts store via `JobAttemptStore.recentOrderIdsForEmail`.
+   */
+  recentOrderIds?: string[];
+  /**
    * Called immediately before the Place Order click ('placing') and
    * after Amazon's confirmation page parses (null). Used by the
    * worker to flag the narrow critical window where a stop / crash
@@ -817,7 +833,12 @@ export async function buyWithFillers(
   //
   //      Returns null on snapshot failure — `fetchOrderIdsForAsins`
   //      falls back to the legacy ASIN-walk scanner when null.
-  const preBuyOrderIds = await snapshotOrderHistoryIds(page, cid, logger);
+  const preBuyOrderIds = await snapshotOrderHistoryIds(
+    page,
+    cid,
+    logger,
+    opts.recentOrderIds ?? [],
+  );
 
   // 6. Enter checkout directly. /checkout/entry/cart?proceedToCheckout=1
   //    is the URL Amazon's BYG ("Need anything else?") "Continue to
@@ -1809,6 +1830,7 @@ async function snapshotOrderHistoryIds(
   page: Page,
   cid: string | undefined,
   logger: ReturnType<typeof makeBoundLogger>,
+  recentOrderIds: readonly string[] = [],
 ): Promise<string[] | null> {
   try {
     await page.goto(
@@ -1882,6 +1904,21 @@ async function snapshotOrderHistoryIds(
     // is safer than risking a "diff = all of post" cancel storm.
     logger.warn('step.fillerBuy.preBuy.snapshot.empty', {}, cid);
     return null;
+  }
+  // Union scanned IDs with locally-known recent orderIds. The seed
+  // covers Amazon's order-history propagation lag: a buy that just
+  // finished may not yet be in the rendered list, but its orderId
+  // lives in the local attempts store and we want it in the pre-set
+  // so the post-buy diff doesn't false-attribute it. See the
+  // recentOrderIds docstring in BuyWithFillersOptions for the race.
+  const seedAdded = recentOrderIds.filter((rid) => !ids.includes(rid));
+  if (seedAdded.length > 0) {
+    ids.push(...seedAdded);
+    logger.info(
+      'step.fillerBuy.preBuy.snapshot.seed_added',
+      { seedAddedLen: seedAdded.length, sample: seedAdded.slice(0, 3) },
+      cid,
+    );
   }
   logger.info(
     'step.fillerBuy.preBuy.snapshot.ok',

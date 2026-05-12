@@ -60,8 +60,15 @@ function ChaseAccountsPanel() {
   // Global Chase auto-redeem time, mirrors Settings.chaseAutoRedeemTime.
   // Pre-v0.13.42 each profile carried its own time; now one schedule
   // drives every enabled profile so the user only sets it once.
-  // Loaded on mount; updated optimistically on each picker change.
+  // `committed` is the value last persisted to settings. `draft` is
+  // what the picker is currently showing — they diverge when the
+  // user adjusts the picker but hasn't clicked Set yet. Splitting the
+  // two lets us show a Set button that's only enabled when there's
+  // an unsaved change (per user request: "allow user to select time
+  // and click Set").
   const [globalRedeemTime, setGlobalRedeemTime] = useState<string>('15:00');
+  const [redeemTimeDraft, setRedeemTimeDraft] = useState<string>('15:00');
+  const [savingRedeemTime, setSavingRedeemTime] = useState(false);
   // Per-profile transient state. busy ids = login in flight; row id
   // → 'pending' / 'ok' / 'error: …' so each card can render its own
   // banner without sharing a global error slot.
@@ -84,6 +91,8 @@ function ChaseAccountsPanel() {
   }, [refresh]);
 
   // Hydrate the global auto-redeem time from settings on mount.
+  // Mirrors `committed` into `draft` so the picker shows the saved
+  // value on first paint.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -92,6 +101,7 @@ function ChaseAccountsPanel() {
         if (cancelled) return;
         if (typeof s.chaseAutoRedeemTime === 'string') {
           setGlobalRedeemTime(s.chaseAutoRedeemTime);
+          setRedeemTimeDraft(s.chaseAutoRedeemTime);
         }
       } catch {
         // Keep default. The picker still works locally; persisting just
@@ -103,16 +113,25 @@ function ChaseAccountsPanel() {
     };
   }, []);
 
-  const onGlobalRedeemTimeChange = useCallback(async (next: string) => {
-    if (!/^\d{1,2}:\d{2}$/.test(next)) return;
-    setGlobalRedeemTime(next);
+  // Click-Set handler: validates the draft then writes to settings.
+  // Optimistic local commit so the Set button can immediately go back
+  // to disabled (draft === committed); the next settings poll would
+  // reconcile if the write failed.
+  const onSaveRedeemTime = useCallback(async () => {
+    if (!/^\d{1,2}:\d{2}$/.test(redeemTimeDraft)) return;
+    if (redeemTimeDraft === globalRedeemTime) return;
+    setSavingRedeemTime(true);
     try {
-      await window.autog.settingsSet({ chaseAutoRedeemTime: next });
+      await window.autog.settingsSet({ chaseAutoRedeemTime: redeemTimeDraft });
+      setGlobalRedeemTime(redeemTimeDraft);
     } catch {
-      // Optimistic update stays — the next settingsGet poll will
-      // reconcile if the write actually failed.
+      // Keep draft as-is so the user can retry. Could surface a toast
+      // here but the field staying "dirty" is already a clear signal
+      // that the change hasn't landed.
+    } finally {
+      setSavingRedeemTime(false);
     }
-  }, []);
+  }, [redeemTimeDraft, globalRedeemTime]);
 
   const onAdd = async (
     label: string,
@@ -647,24 +666,48 @@ function ChaseAccountsPanel() {
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
           {/* Global auto-redeem time picker. Writes to
-              Settings.chaseAutoRedeemTime; every profile with
-              autoRedeem.enabled=true fires at this time daily. Replaces
-              the pre-v0.13.42 per-profile time inputs that lived
-              inside each card. */}
+              Settings.chaseAutoRedeemTime on Set click; every profile
+              with autoRedeem.enabled=true fires at this time daily.
+              Replaces the pre-v0.13.42 per-profile time inputs that
+              lived inside each card. Set button stays disabled until
+              the user actually changes the time — saves a useless IPC
+              hop when the picker is just reflecting the current value. */}
           <label
             className="inline-flex items-center gap-1.5 text-[11px] text-white/70 select-none"
-            title="Single daily fire time for Chase auto-redeem, shared across every enabled Chase profile."
+            title="Single daily fire time for Chase auto-redeem, shared across every enabled Chase profile. Adjust then click Set to save."
           >
             <span>Auto redeem at</span>
             <input
               type="time"
-              value={globalRedeemTime}
+              value={redeemTimeDraft}
               onChange={(e) => {
-                void onGlobalRedeemTimeChange(e.target.value);
+                const v = e.target.value;
+                if (/^\d{1,2}:\d{2}$/.test(v)) setRedeemTimeDraft(v);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void onSaveRedeemTime();
+                }
               }}
               className="bg-white/[0.05] border border-white/10 rounded px-1.5 py-0.5 text-[11px] tabular-nums text-white/90 focus:outline-none focus:border-blue-400/40 [color-scheme:dark]"
             />
           </label>
+          <button
+            type="button"
+            onClick={() => void onSaveRedeemTime()}
+            disabled={
+              savingRedeemTime || redeemTimeDraft === globalRedeemTime
+            }
+            className="px-2 py-0.5 rounded text-[11px] font-medium border border-emerald-400/40 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            title={
+              redeemTimeDraft === globalRedeemTime
+                ? 'Time matches the saved value — nothing to save'
+                : 'Save the new auto-redeem time'
+            }
+          >
+            {savingRedeemTime ? '…' : 'Set'}
+          </button>
           {profiles.some((p) => p.cardAccountId) && (
             <button
               type="button"

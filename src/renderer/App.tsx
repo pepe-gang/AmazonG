@@ -750,40 +750,109 @@ function DashboardView(props: {
  * the Bank tab. Hidden completely when no profile has it on so it
  * doesn't take up header real-estate users won't recognize.
  *
- * Tooltip shows per-profile next-fire times so the user can see at
- * a glance "personal at 3 PM, business at 4 PM" etc.
+ * Clickable: clicking the pill fires `chaseRedeemAll` against every
+ * enabled profile in parallel — a "force redeem now" shortcut so the
+ * user can trigger the redemption immediately instead of waiting for
+ * the daily schedule. On hover the label flips to "Redeem now" so
+ * the affordance is obvious without crowding the idle state.
+ *
+ * Reads the schedule TIME from global Settings.chaseAutoRedeemTime
+ * (v0.13.42 — was per-profile pre-v0.13.42). Tooltip lists each
+ * enabled profile so the user knows what gets fired.
  */
 function AutoRedeemHeaderIndicator({ profiles }: { profiles: ChaseProfile[] }) {
+  const [globalTime, setGlobalTime] = useState<string>('15:00');
+  const [redeeming, setRedeeming] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const s = await window.autog.settingsGet();
+        if (!cancelled && typeof s.chaseAutoRedeemTime === 'string') {
+          setGlobalTime(s.chaseAutoRedeemTime);
+        }
+      } catch {
+        // Keep default; the chip stays readable even if settingsGet fails.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const enabledProfiles = profiles.filter(
     (p) => p.autoRedeem?.enabled && p.cardAccountId,
   );
   if (enabledProfiles.length === 0) return null;
 
-  // Build the tooltip — list each enabled profile with its time.
-  const tooltipLines = enabledProfiles.map((p) => {
-    const time = p.autoRedeem?.time ?? '15:00';
-    const formatted = formatTime12h(time);
-    return `${p.label}: ${formatted}`;
-  });
+  // Tooltip — list each enabled profile with the shared global time.
+  const tooltipLines = enabledProfiles.map(
+    (p) => `${p.label}: ${formatTime12h(globalTime)}`,
+  );
   const tooltip =
     `Auto-redeem on for ${enabledProfiles.length} ${enabledProfiles.length === 1 ? 'profile' : 'profiles'}\n` +
-    tooltipLines.join('\n');
+    tooltipLines.join('\n') +
+    '\n\nClick to force redeem now.';
 
-  // Single-profile case shows the time inline; multi-profile case
-  // shows a count to keep the chip compact.
   const inline =
     enabledProfiles.length === 1
-      ? `Auto-redeem ${formatTime12h(enabledProfiles[0]!.autoRedeem!.time)}`
+      ? `Auto-redeem ${formatTime12h(globalTime)}`
       : `Auto-redeem ${enabledProfiles.length} cards`;
 
+  const onForceRedeem = async () => {
+    if (redeeming) return;
+    setRedeeming(true);
+    try {
+      const results = await Promise.all(
+        enabledProfiles.map(async (p) => {
+          try {
+            const r = await window.autog.chaseRedeemAll(p.id);
+            return { p, r, error: null as string | null };
+          } catch (err) {
+            return {
+              p,
+              r: null,
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
+        }),
+      );
+      const ok = results.filter((x) => x.r && x.r.ok).length;
+      const noPoints = results.filter(
+        (x) => x.r && !x.r.ok && (x.r as { kind?: string }).kind === 'no_points',
+      ).length;
+      const failed = results.length - ok - noPoints;
+      if (failed === 0 && noPoints === 0) {
+        toast.success(`Redeemed ${ok} ${ok === 1 ? 'card' : 'cards'}`);
+      } else if (ok === 0 && noPoints > 0 && failed === 0) {
+        toast.info(`No points to redeem on ${noPoints} ${noPoints === 1 ? 'card' : 'cards'}`);
+      } else {
+        toast(
+          `Redeemed ${ok}${noPoints > 0 ? `, ${noPoints} had no points` : ''}${failed > 0 ? `, ${failed} failed` : ''}`,
+        );
+      }
+    } finally {
+      setRedeeming(false);
+    }
+  };
+
   return (
-    <div
-      className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border border-emerald-400/30 bg-emerald-500/[0.08] text-emerald-200"
+    <button
+      type="button"
+      onClick={() => void onForceRedeem()}
+      disabled={redeeming}
+      className="group flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border border-emerald-400/30 bg-emerald-500/[0.08] text-emerald-200 hover:bg-emerald-500/15 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait"
       title={tooltip}
     >
       <span className="size-2 rounded-full bg-emerald-400 shadow-[0_0_4px_0_oklch(0.75_0.18_150_/_0.7)]" />
-      <span>{inline}</span>
-    </div>
+      <span className="inline group-hover:hidden">
+        {redeeming ? 'Redeeming…' : inline}
+      </span>
+      <span className="hidden group-hover:inline">
+        {redeeming ? 'Redeeming…' : 'Redeem now'}
+      </span>
+    </button>
   );
 }
 
