@@ -1054,6 +1054,12 @@ async function handleVerifyJob(
       // cleanup failure doesn't knock the verified status back — the
       // order is successfully placed regardless, we just logged what
       // went wrong with the cancellations.
+      //
+      // `verifyFillerCleanup` captured here so the post-cleanup
+      // `reportSafe` call below can forward `targetOrderCleanupOutcome`
+      // to BG (v0.13.44+ — drives the dashboard "Uncancelled filler
+      // orders" list's in-target-order row type).
+      let verifyFillerCleanup: Awaited<ReturnType<typeof runVerifyFillerCleanup>> | null = null;
       if (job.viaFiller) {
         const { fillerOrderIds, productTitle } = await loadFillerBuyContext(
           deps,
@@ -1080,6 +1086,7 @@ async function handleVerifyJob(
           { asin: targetAsin, title: productTitle },
           cid,
         );
+        verifyFillerCleanup = cleanup;
         logger.info(
           'job.verify.filler.cleanup.done',
           {
@@ -1141,6 +1148,21 @@ async function handleVerifyJob(
           // either codes arrive or Amazon eventually cancels.
           ...(outcome.kind === 'active' && outcome.paymentRevisionRequired
             ? { paymentRevisionRequired: true }
+            : {}),
+          // Forward the verify-phase in-target-order cleanup outcome to
+          // BG so the dashboard's "Uncancelled filler orders" list can
+          // surface a row for target orders that still have filler
+          // items inside them after cleanup. Only sent when cleanup
+          // actually ran (filler-mode + outcome.kind === 'active' —
+          // verifyFillerCleanup is null on non-filler buys + the
+          // cancelled / error / timeout branches don't run cleanup).
+          ...(verifyFillerCleanup
+            ? {
+                targetOrderCleanupOutcome: {
+                  cleaned: verifyFillerCleanup.targetOrderCleaned,
+                  error: verifyFillerCleanup.targetCleanError,
+                },
+              }
             : {}),
         },
         cid,

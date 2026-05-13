@@ -206,6 +206,21 @@ export type JobStatusReport = {
    *  bucket — Amazon won't ship → no tracking will arrive → don't show
    *  it as Success on the back of a passing verify alone. */
   paymentRevisionRequired?: boolean;
+  /** Outcome of the verify-phase `cancelNonTargetItems` call against the
+   *  target order. Reported when `runVerifyFillerCleanup` actually ran
+   *  (i.e. target survived verify as 'active' and filler-mode buy). BG
+   *  persists `targetOrderHasUncancelledFillers = !cleaned` and the
+   *  reason on AutoBuyPurchase; the dashboard surfaces target orders
+   *  with `cleaned=false` in the "Uncancelled filler orders" list so
+   *  the user knows to return the bundled fillers manually.
+   *
+   *  Omit (undefined) when cleanup didn't run — non-filler buy, target
+   *  was already cancelled, verify errored/timed out. BG handler treats
+   *  undefined as no-op (preserves prior state). */
+  targetOrderCleanupOutcome?: {
+    cleaned: boolean;
+    error: string | null;
+  };
   purchases?: {
     amazonEmail: string;
     status: 'queued' | 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'failed' | 'cancelled' | 'action_required';
