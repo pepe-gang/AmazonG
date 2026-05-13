@@ -293,12 +293,34 @@ export type FetchTrackingOutcome =
   | { kind: 'partial'; trackingIds: string[]; paymentRevisionRequired?: boolean }
   | { kind: 'not_shipped'; paymentRevisionRequired?: boolean }
   | { kind: 'retry'; reason: 'verify_error' | 'verify_timeout' }
+  /** verifyOrder (or this function's order-details fetch) was redirected
+   *  to /ap/signin — the account's session is dead. Caller flips the
+   *  profile's loggedIn flag and surfaces the cause; nothing to retry
+   *  until the user re-signs-in. */
+  | { kind: 'signed_out'; landedUrl: string }
   | { kind: 'cancelled'; reason: string };
 
 export type IdentityInfo = {
   userEmail: string;
   last4: string;
   keyCreatedAt: string;
+};
+
+/** A BG receiving address saved against a specific Amazon profile.
+ *  AutoG types these values into Amazon's /a/addresses/add form when
+ *  the user clicks "Add BG Address" on the profile row, or when a
+ *  buy-flow's address picker can't find a matching saved address.
+ *  Per-Amazon-account — different accounts often ship to different
+ *  BG receivers. All fields required except `street2` (apartment /
+ *  suite number — usually empty for BG warehouses). */
+export type BGAddress = {
+  fullName: string;
+  phone: string;
+  street1: string;
+  street2: string | null;
+  city: string;
+  state: string;
+  zip: string;
 };
 
 export type AmazonProfile = {
@@ -349,6 +371,13 @@ export type AmazonProfile = {
    * settings screen cascades this field across every profile.
    */
   buyWithFillers: boolean;
+  /**
+   * BG receiving address to type into Amazon's /a/addresses/add form
+   * for this account. Null when the user hasn't configured an address
+   * for this profile — the "Add BG Address" button is hidden and
+   * auto-recovery on address-picker fail is skipped.
+   */
+  bgAddress: BGAddress | null;
 };
 
 /**

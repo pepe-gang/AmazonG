@@ -39,6 +39,9 @@ export async function fetchTracking(
   if (verify.kind === 'cancelled') {
     return { kind: 'cancelled', reason: 'order was cancelled by Amazon' };
   }
+  if (verify.kind === 'signed_out') {
+    return { kind: 'signed_out', landedUrl: verify.landedUrl };
+  }
   if (verify.kind === 'error') {
     return { kind: 'retry', reason: 'verify_error' };
   }
@@ -59,6 +62,12 @@ export async function fetchTracking(
       timeout: 15_000,
     });
     if (!res.ok()) return { kind: 'retry', reason: 'verify_error' };
+    // Defense-in-depth: even after verifyOrder OK'd, Amazon can
+    // expire the cookie between requests. Catch the redirect here
+    // too instead of returning a confused 'retry'.
+    if (/\/ap\/signin\b/i.test(res.url())) {
+      return { kind: 'signed_out', landedUrl: res.url() };
+    }
     orderHtml = await res.text();
   } catch {
     return { kind: 'retry', reason: 'verify_error' };

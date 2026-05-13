@@ -1,5 +1,6 @@
 import type {
   AmazonProfile,
+  BGAddress,
   ChaseAccountSnapshot,
   ChaseLoginResult,
   ChaseProfile,
@@ -38,6 +39,14 @@ export const IPC = {
   profilesOpenOrders: 'profiles:open-orders',
   profilesOpenOrder: 'profiles:open-order',
   profilesReorder: 'profiles:reorder',
+  /** Open a session for one profile, navigate to /a/addresses/add, fill
+   *  the BG receiving address (saved on the profile itself), submit.
+   *  Used by the "Add BG Address" button on each Amazon-account row. */
+  profilesAddBgAddress: 'profiles:add-bg-address',
+  /** Save or clear the BG receiving address on one AmazonProfile.
+   *  Pass null to clear. Returns the updated profile list so the
+   *  renderer can reconcile its local state. */
+  profilesSetBgAddress: 'profiles:set-bg-address',
   /** Fetch the current live Amazon deals catalog from BetterBG's
    *  public endpoint (x-api-key: pepe-gang). The renderer re-fetches
    *  on user click; no polling. */
@@ -390,6 +399,13 @@ export type AutoGBridge = {
   profilesOpenOrders(email: string): Promise<void>;
   profilesOpenOrder(email: string, orderId: string): Promise<void>;
   profilesReorder(orderedEmails: string[]): Promise<AmazonProfile[]>;
+  /** Open a session for one profile, navigate to /a/addresses/add,
+   *  fill the profile's saved BG address, submit. Result contains
+   *  `ok` and a `reason` string on failure (e.g. `validation_error`,
+   *  `no_bg_address_configured`, `form_not_rendered`). */
+  profilesAddBgAddress(email: string): Promise<{ ok: boolean; reason?: string; detail?: string }>;
+  /** Save or clear the BG receiving address on one AmazonProfile. */
+  profilesSetBgAddress(email: string, address: BGAddress | null): Promise<AmazonProfile[]>;
   dealsList(): Promise<AmazonDeal[]>;
   dealsTrigger(dealId: string): Promise<{
     jobId: string;

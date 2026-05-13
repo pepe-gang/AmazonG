@@ -318,6 +318,11 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   const [bgAccounts, setBgAccounts] = useState<
     { id: string; label: string; username: string }[]
   >([]);
+  // Per-Amazon-account BG address editing. Each profile has its own
+  // optional `bgAddress` field stored in profiles.json; clicking "Edit
+  // Address" opens a modal pre-filled with the saved values.
+  const [addingAddrEmail, setAddingAddrEmail] = useState<string | null>(null);
+  const [editAddrEmail, setEditAddrEmail] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -337,6 +342,24 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
       cancelled = true;
     };
   }, []);
+
+  const doAddBgAddress = async (email: string) => {
+    if (addingAddrEmail) return;
+    setAddingAddrEmail(email);
+    try {
+      const r = await window.autog.profilesAddBgAddress(email);
+      if (r.ok) {
+        showToast(`BG address added to ${email}`);
+      } else {
+        const detail = r.detail ? ` — ${r.detail}` : '';
+        showToast(`Add BG address failed: ${r.reason ?? 'unknown'}${detail}`);
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAddingAddrEmail(null);
+    }
+  };
 
   const toggleRequireMinCashback = async (email: string) => {
     const key = email.toLowerCase();
@@ -858,6 +881,27 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                       </button>
                     )}
                     <button
+                      className="ghost-btn"
+                      title={
+                        p.bgAddress
+                          ? `Edit the BG receiving address saved for this account.\n\n${p.bgAddress.fullName}\n${p.bgAddress.street1}\n${p.bgAddress.city}, ${p.bgAddress.state} ${p.bgAddress.zip}`
+                          : 'No address saved. Click to add one.'
+                      }
+                      onClick={() => setEditAddrEmail(p.email)}
+                    >
+                      {p.bgAddress ? 'Edit Address' : 'Set Address'}
+                    </button>
+                    {p.loggedIn && p.bgAddress && (
+                      <button
+                        className="ghost-btn"
+                        disabled={addingAddrEmail === p.email}
+                        title={`Add this saved BG address to Amazon's address book for this account.\n\n${p.bgAddress.fullName}\n${p.bgAddress.street1}\n${p.bgAddress.city}, ${p.bgAddress.state} ${p.bgAddress.zip}`}
+                        onClick={() => void doAddBgAddress(p.email)}
+                      >
+                        {addingAddrEmail === p.email ? 'Adding…' : 'Add to Amazon'}
+                      </button>
+                    )}
+                    <button
                       className="ghost-btn danger-text"
                       disabled={busyEmail === p.email}
                       onClick={() => void doRemove(p.email)}
@@ -874,6 +918,196 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
 
       {confirmDialog}
       {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
+      {editAddrEmail && (
+        <BGAddressDialog
+          email={editAddrEmail}
+          initial={
+            profiles.find((p) => p.email.toLowerCase() === editAddrEmail.toLowerCase())
+              ?.bgAddress ?? null
+          }
+          onClose={() => setEditAddrEmail(null)}
+          onError={(msg) => showToast(msg)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Per-account BG address edit dialog. Holds form state locally, saves
+ *  via profiles:set-bg-address. Empty all-required-fields clears the
+ *  saved address (passes null to the IPC). */
+function BGAddressDialog(props: {
+  email: string;
+  initial: import('../../shared/types.js').BGAddress | null;
+  onClose: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [fullName, setFullName] = useState(props.initial?.fullName ?? '');
+  const [phone, setPhone] = useState(props.initial?.phone ?? '');
+  const [street1, setStreet1] = useState(props.initial?.street1 ?? '');
+  const [street2, setStreet2] = useState(props.initial?.street2 ?? '');
+  const [city, setCity] = useState(props.initial?.city ?? '');
+  const [state, setState] = useState(props.initial?.state ?? '');
+  const [zip, setZip] = useState(props.initial?.zip ?? '');
+  const [saving, setSaving] = useState(false);
+
+  const canSave =
+    fullName.trim().length > 0 &&
+    phone.trim().length > 0 &&
+    street1.trim().length > 0 &&
+    city.trim().length > 0 &&
+    state.trim().length === 2 &&
+    zip.trim().length >= 5;
+
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await window.autog.profilesSetBgAddress(props.email, {
+        fullName: fullName.trim(),
+        phone: phone.trim(),
+        street1: street1.trim(),
+        street2: street2.trim() ? street2.trim() : null,
+        city: city.trim(),
+        state: state.trim().toUpperCase(),
+        zip: zip.trim(),
+      });
+      // Profiles state refreshes via evt:profiles broadcast — just close.
+      props.onClose();
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clear = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await window.autog.profilesSetBgAddress(props.email, null);
+      props.onClose();
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onClick={props.onClose}
+    >
+      <div
+        className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 w-[420px] max-w-[95vw] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-sm font-semibold text-zinc-100 mb-1">BG receiving address</div>
+        <div className="text-xs text-zinc-500 mb-3 break-all">{props.email}</div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="col-span-2">
+            <label className="block text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+              Full name *
+            </label>
+            <input
+              className="w-full bg-black/40 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-zinc-600"
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              placeholder="Thi Ngoc Nguyen (BG1)"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="block text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Phone *</label>
+            <input
+              className="w-full bg-black/40 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-zinc-600"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              placeholder="(503) 555-0100"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="block text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+              Street address *
+            </label>
+            <input
+              className="w-full bg-black/40 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-zinc-600"
+              value={street1}
+              onChange={(e) => setStreet1(e.target.value)}
+              placeholder="13130 NE AIRPORT WAY"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="block text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Unit / suite</label>
+            <input
+              className="w-full bg-black/40 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-zinc-600"
+              value={street2}
+              onChange={(e) => setStreet2(e.target.value)}
+              placeholder="(optional)"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] uppercase tracking-wide text-zinc-500 mb-1">City *</label>
+            <input
+              className="w-full bg-black/40 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-zinc-600"
+              value={city}
+              onChange={(e) => setCity(e.target.value)}
+              placeholder="Portland"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+                State *
+              </label>
+              <input
+                className="w-full bg-black/40 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-200 uppercase focus:outline-none focus:border-zinc-600"
+                value={state}
+                onChange={(e) => setState(e.target.value.toUpperCase().slice(0, 2))}
+                placeholder="OR"
+                maxLength={2}
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wide text-zinc-500 mb-1">ZIP *</label>
+              <input
+                className="w-full bg-black/40 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-zinc-600"
+                value={zip}
+                onChange={(e) => setZip(e.target.value)}
+                placeholder="97230"
+              />
+            </div>
+          </div>
+        </div>
+        <div className="mt-4 flex items-center justify-between gap-2">
+          <button
+            type="button"
+            className="text-xs text-zinc-500 hover:text-rose-300 underline-offset-2 hover:underline"
+            disabled={saving || !props.initial}
+            onClick={() => void clear()}
+          >
+            Clear saved address
+          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="px-3 py-1.5 rounded-full text-xs border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+              onClick={props.onClose}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="px-3 py-1.5 rounded-full text-xs border bg-amber-500/10 border-amber-500/30 text-amber-200 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={!canSave || saving}
+              onClick={() => void save()}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

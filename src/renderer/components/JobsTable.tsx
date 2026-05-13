@@ -44,6 +44,16 @@ export function JobsTable({
     for (const p of profiles) m.set(p.email.toLowerCase(), p.displayName);
     return m;
   }, [profiles]);
+  // email → loggedIn lookup. Verify and fetch_tracking phases hit
+  // Amazon's order pages which require a live session — rows whose
+  // account is signed out will fail until the user re-signs-in.
+  // Render a "Signed out" pill next to the account so the cause is
+  // obvious before scrolling to the error column.
+  const loggedInByEmail = useMemo(() => {
+    const m = new Map<string, boolean>();
+    for (const p of profiles) m.set(p.email.toLowerCase(), p.loggedIn);
+    return m;
+  }, [profiles]);
   const [sortKey, setSortKey] = useState<SortKey>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   // Empty set = all accounts. Non-empty = only show rows whose
@@ -773,6 +783,7 @@ export function JobsTable({
                         id={id}
                         a={a}
                         accountLabel={accountLabelByEmail.get(a.amazonEmail.toLowerCase()) ?? null}
+                        accountLoggedIn={loggedInByEmail.get(a.amazonEmail.toLowerCase()) ?? null}
                         onOpenProductUrl={(url) => void window.autog.openExternal(url)}
                         onOpenOrder={() => void openOrderInProfile(a.amazonEmail, a.orderId!)}
                         onOpenFillerOrder={(oid) => void openOrderInProfile(a.amazonEmail, oid)}
@@ -1064,6 +1075,7 @@ function JobsCell({
   id,
   a,
   accountLabel,
+  accountLoggedIn,
   onOpenProductUrl,
   onOpenOrder,
   onOpenFillerOrder,
@@ -1071,6 +1083,10 @@ function JobsCell({
   id: JobColumnId;
   a: JobAttempt;
   accountLabel: string | null;
+  /** null = profile not in current list (deleted? renamed?), don't
+   *  render the signed-out pill in that case. true/false = render
+   *  status from profiles.json. */
+  accountLoggedIn: boolean | null;
   onOpenProductUrl: (url: string) => void;
   onOpenOrder: () => void;
   /** Open a specific filler order id in this row's Amazon profile
@@ -1127,7 +1143,17 @@ function JobsCell({
     case 'account':
       return (
         <td className="cell-account">
-          <span className="account-pill">{a.amazonEmail}</span>
+          <div className="account-pill-row">
+            <span className="account-pill">{a.amazonEmail}</span>
+            {accountLoggedIn === false && (
+              <span
+                className="signed-out-pill"
+                title="This Amazon account is signed out. Verify and fetch-tracking will fail until you sign in again on the Accounts tab."
+              >
+                ⚠ Signed out
+              </span>
+            )}
+          </div>
           {accountLabel && <div className="cell-account-name">{accountLabel}</div>}
         </td>
       );

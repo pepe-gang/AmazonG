@@ -114,6 +114,12 @@ export type Deps = {
   }>;
   /** Returns every enabled+loggedIn profile we should fan out the job to. */
   listEligibleProfiles: () => Promise<AmazonProfile[]>;
+  /** Mark a profile signed-out and broadcast the change. Called by the
+   *  verify/fetch_tracking phases when Amazon redirects an authenticated
+   *  request to /ap/signin — the session is dead, the JobsTable's
+   *  "Signed out" pill should flip on without waiting for a manual
+   *  refresh. Best-effort; never blocks worker progress. */
+  markProfileSignedOut?: (email: string) => Promise<void>;
   /** Persistence for the jobs table — created on fan-out, updated as profiles run. */
   jobAttempts: JobAttemptStore;
   /**
@@ -1340,6 +1346,26 @@ async function handleVerifyJob(
       return;
     }
 
+    if (outcome.kind === 'signed_out') {
+      // Amazon redirected the order-details fetch to /ap/signin —
+      // the account's session is expired. Flip the local loggedIn
+      // flag so the Accounts tab + JobsTable "Signed out" pill
+      // update immediately, mark the row failed with a recognizable
+      // error, and propagate to BG so the dashboard shows the cause.
+      const error = `account signed out — re-sign-in on the Accounts tab to resume verify and tracking for this profile`;
+      logger.error(
+        'job.verify.signed_out',
+        { ...logCtx, orderId: targetOrderId, landedUrl: outcome.landedUrl },
+        cid,
+      );
+      await deps.markProfileSignedOut?.(profile.email).catch(() => undefined);
+      await deps.jobAttempts
+        .update(activeAttemptId, { status: 'failed', error })
+        .catch(() => undefined);
+      await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+      return;
+    }
+
     // timeout — we don't know whether the order is alive or dead. Leave
     // the row in 'awaiting_verification' so BG's next verify retry can
     // resolve it; don't mark it failed.
@@ -1657,6 +1683,24 @@ async function handleFetchTrackingJob(
         },
         cid,
       );
+      return;
+    }
+
+    if (outcome.kind === 'signed_out') {
+      // Same handling as verify-phase signed_out: flip the local
+      // loggedIn flag, surface a clean error, propagate to BG. No
+      // BG retry — re-sign-in is a manual user action.
+      const error = `account signed out — re-sign-in on the Accounts tab to resume verify and tracking for this profile`;
+      logger.error(
+        'job.fetchTracking.signed_out',
+        { ...logCtx, orderId: targetOrderId, landedUrl: outcome.landedUrl },
+        cid,
+      );
+      await deps.markProfileSignedOut?.(profile.email).catch(() => undefined);
+      await deps.jobAttempts
+        .update(activeAttemptId, { status: 'failed', error })
+        .catch(() => undefined);
+      await reportSafe(deps, job.id, { status: 'failed', error }, cid);
       return;
     }
 
@@ -2224,7 +2268,18 @@ export async function runForProfile(
       ? clearCartHttpOnly(page, { correlationId: cid })
       : undefined;
 
-    const info = await scrapeProduct(page, job.productUrl);
+    const info = await scrapeProduct(page, job.productUrl).catch(async (err) => {
+      // Stale-pipeline recovery: a prior abandoned checkout on this
+      // profile left items in the cart, so Amazon server-redirects
+      // /gp/product/<asin> into /checkout/p/.../spc mid-commit and
+      // page.goto aborts. Detect by the wedged URL, drain via HTTP
+      // (ctx.request — no tab nav), retry once. clearCartHttpOnly
+      // logs its own outcome internally and never throws.
+      if (!/\/(?:checkout\/p\/[^/]+\/spc|gp\/buy)\b/i.test(page!.url())) throw err;
+      logger.warn('step.scrape.redirected_to_spc', { jobId: job.id, profile, landedUrl: page!.url() }, cid);
+      await clearCartHttpOnly(page!, { correlationId: cid });
+      return scrapeProduct(page!, job.productUrl);
+    });
     logger.info(
       'job.scrape.ok',
       {

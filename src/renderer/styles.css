@@ -1352,6 +1352,29 @@ a,
   white-space: nowrap;
   vertical-align: middle;
 }
+.account-pill-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* "⚠ Signed out" pill on JobsTable rows whose Amazon account session
+   has lapsed. Sign-in lives in profiles.json; verify and fetch_tracking
+   phases need a live session, so the row will fail until the user
+   re-signs-in on the Accounts tab. Surfaced inline so the cause is
+   obvious without scrolling to the error column. */
+.signed-out-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  background: hsl(0 75% 60% / 0.12);
+  border: 1px solid hsl(0 75% 60% / 0.40);
+  border-radius: 999px;
+  color: hsl(0 80% 80%);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: help;
+}
 .cell-account-name {
   margin-top: 3px;
   font-size: 11px;

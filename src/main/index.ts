@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IPC, type Settings } from '../shared/ipc.js';
 import { createBGClient, type ServerPurchase } from '../bg/client.js';
+import { addAmazonAddress } from '../actions/addAddress.js';
+import type { BGAddress } from '../shared/types.js';
 import { startWorker, type WorkerHandle } from '../workflows/pollAndScrape.js';
 import { startBgRelay } from './bgRelay.js';
 import { addLogSink, logger } from '../shared/logger.js';
@@ -957,6 +959,16 @@ async function startWorkerNow(): Promise<void> {
       // `enabled` accounts, lifecycle phases use this list as-is.
       const list = await loadProfiles();
       return list.filter((p) => p.loggedIn);
+    },
+    markProfileSignedOut: async (email: string) => {
+      // Worker → main bridge: verify / fetch_tracking phases detected
+      // Amazon's /ap/signin redirect on this profile's HTTP requests,
+      // so the cached `loggedIn: true` flag is stale. Flip it and
+      // broadcast so the renderer's "Signed out" pill appears
+      // immediately on the JobsTable + Accounts tab — same channel
+      // the manual Refresh and Sign-in flows use.
+      await updateProfile(email, { loggedIn: false });
+      await broadcastProfiles();
     },
     // Lets the worker see Chromium contexts opened elsewhere in the
     // app (currently just the "View Order" click). Without this, a
@@ -3023,6 +3035,49 @@ function registerIpcHandlers(): void {
       }
     }
   });
+
+  ipcMain.handle(
+    IPC.profilesSetBgAddress,
+    async (_e, email: string, address: BGAddress | null): Promise<AmazonProfile[]> => {
+      const list = await updateProfile(email, { bgAddress: address });
+      await broadcastProfiles();
+      return list;
+    },
+  );
+
+  ipcMain.handle(
+    IPC.profilesAddBgAddress,
+    async (_e, email: string): Promise<{ ok: boolean; reason?: string; detail?: string }> => {
+      const profiles = await loadProfiles();
+      const profile = profiles.find((p) => p.email.toLowerCase() === email.toLowerCase());
+      if (!profile) return { ok: false, reason: 'profile_not_found' };
+      if (!profile.bgAddress) return { ok: false, reason: 'no_bg_address_configured' };
+      logger.info('amazon.addAddress.start', { email });
+      const session = await openSession(email, {
+        userDataRoot: profileDir(),
+        headless: false,
+      });
+      const page = await session.newPage();
+      try {
+        const result = await addAmazonAddress(page, profile.bgAddress);
+        logger.info('amazon.addAddress.done', { email, ok: result.ok, ...result });
+        return result.ok
+          ? { ok: true }
+          : { ok: false, reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) };
+      } finally {
+        try {
+          await page.close();
+        } catch {
+          // ignore
+        }
+        try {
+          await session.close();
+        } catch (err) {
+          logger.warn('amazon.addAddress.session.close', { email, error: String(err) });
+        }
+      }
+    },
+  );
 }
 
 function friendlyConnectError(err: unknown): Error {

@@ -869,19 +869,17 @@ export async function buyWithFillers(
   //    used to ship — full cart-page render, Proceed click,
   //    waitForSpcOrHandleByg. Worst case: same wall-clock as before.
   let usedShortcut = false;
-  try {
-    // 'commit' = ~50ms vs ~300ms for DCL. Next op (page.url() check)
-    // works at commit; downstream waitForCheckout polls for the Place
-    // Order button.
-    await page.goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 });
-  } catch (err) {
-    return {
-      ok: false,
-      stage: 'proceed_checkout',
-      reason: 'failed to enter checkout via shortcut',
-      detail: String(err),
-    };
-  }
+  // 'commit' = ~50ms vs ~300ms for DCL. Next op (page.url() check)
+  // works at commit; downstream waitForCheckout polls for the Place
+  // Order button. Swallow the goto error and decide via landed URL —
+  // Amazon's Chewbacca pipeline server-redirects /checkout/entry/cart
+  // → /checkout/p/.../spc fast enough to race past 'commit' and throw
+  // ERR_ABORTED even though the page actually lands on a valid /spc.
+  // Same pattern as the CART_URL goto in the fallback path below and
+  // in clearCart.ts:78.
+  await page
+    .goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 })
+    .catch(() => undefined);
   if (SPC_URL_MATCH.test(page.url())) {
     usedShortcut = true;
     logger.info(

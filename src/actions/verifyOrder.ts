@@ -27,6 +27,12 @@ export type VerifyOrderOutcome =
     }
   | { kind: 'cancelled'; orderId: string }
   | { kind: 'timeout'; orderId: string }
+  /** The order-details URL redirected to Amazon's sign-in page —
+   *  this account's session is expired. Verify and fetch_tracking
+   *  cannot proceed until the user re-signs-in on the Accounts tab.
+   *  Distinct from `timeout` because the caller can mark the profile
+   *  as signed-out + surface a clean error instead of retrying. */
+  | { kind: 'signed_out'; orderId: string; landedUrl: string }
   | { kind: 'error'; orderId: string; message: string };
 
 
@@ -106,6 +112,18 @@ export async function verifyOrder(
       orderId,
       message: `HTTP ${res.status()}`,
     };
+  }
+
+  // Signed-out detection — Amazon HTTP-redirects /gp/your-account/...
+  // to /ap/signin when the session cookies are missing/expired.
+  // APIRequestContext follows redirects transparently, so we read the
+  // final URL via res.url(). Before this check the signed-out HTML
+  // (no order content) used to fall through to the `timeout` branch
+  // below, which masked the real cause — verify timeouts piled up
+  // until the user noticed in the Accounts tab.
+  const landedUrl = res.url();
+  if (/\/ap\/signin\b/i.test(landedUrl)) {
+    return { kind: 'signed_out', orderId, landedUrl };
   }
 
   let html: string;
