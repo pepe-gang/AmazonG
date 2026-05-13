@@ -271,6 +271,16 @@ export type BuyWithFillersResult =
        * `cartAsins` doc.
        */
       cartAsins: string[];
+      /**
+       * Pre-buy order-history snapshot — every order id visible on
+       * /gp/css/order-history BEFORE this buy's Place Order click. The
+       * worker persists this on the JobAttempt so the verify-phase
+       * rescan (10 min later) can use snapshot-diff to identify
+       * filler-only orders, avoiding the prev-order-bleed bug where
+       * the ASIN-walker would falsely match an old order whose target
+       * ASIN happened to coincide with one of today's filler ASINs.
+       */
+      preBuyOrderIds: string[];
       finalPrice: number | null;
       finalPriceText: string | null;
     })
@@ -1792,6 +1802,10 @@ export async function buyWithFillers(
     orderIds: orderMatches,
     fillerOrderIds,
     cartAsins,
+    // Snapshot from step 5.5 — empty array fallback if snapshot
+    // capture returned null (still safe; verify rescan will see []
+    // and fall back to the ASIN-walker the same as today).
+    preBuyOrderIds: preBuyOrderIds ?? [],
     finalPrice: parsed.finalPrice,
     finalPriceText: parsed.finalPriceText,
   };
@@ -2360,6 +2374,19 @@ export async function rescanFillerOrderIds(
   cartAsins: string[],
   targetOrderId: string,
   _cid: string,
+  /**
+   * Pre-buy order-history snapshot from buy time, persisted on the
+   * JobAttempt. When provided (non-null and non-empty), the scanner
+   * uses snapshot-diff: only orders that appear in order-history NOW
+   * but were NOT in the pre-buy snapshot count as this buy's orders.
+   * Defeats the prev-order-bleed bug — a 2-day-old order with one of
+   * today's filler ASINs WAS in the pre-buy snapshot, so it's
+   * filtered out as not-from-this-buy. When null/empty, the scanner
+   * falls back to the legacy ASIN-walker (which has the bleed risk).
+   * Default null so older callers that don't pass it stay
+   * backwards-compatible.
+   */
+  preBuyOrderIds: string[] | null = null,
 ): Promise<string[]> {
   if (cartAsins.length === 0) return [];
   try {
@@ -2383,14 +2410,15 @@ export async function rescanFillerOrderIds(
       { timeout: 10_000, polling: 500 },
     )
     .catch(() => undefined);
-  // Legacy mode at verify time — we don't have a pre-buy snapshot
-  // here. Falls back to the ASIN-walker; the target is filtered out
-  // explicitly below so the previous-order-bleed risk is bounded to
-  // filler ASINs we re-used.
+  // Use snapshot-diff when we have the pre-buy IDs (defeats cross-deal
+  // contamination — see the doc above). Falls back to ASIN-walker
+  // when the snapshot is missing (pre-feature attempts in the local
+  // store, or capture failed at buy time).
   const matches = await page
     .evaluate(scanOrderHistoryDOMFn, {
       asinList: cartAsins,
-      preBuyOrderIds: null,
+      preBuyOrderIds:
+        preBuyOrderIds && preBuyOrderIds.length > 0 ? preBuyOrderIds : null,
     })
     .catch(() => [] as OrderMatch[]);
   return matches

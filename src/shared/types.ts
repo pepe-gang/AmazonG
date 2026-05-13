@@ -634,6 +634,19 @@ export type JobAttempt = {
    */
   cartAsins: string[] | null;
   /**
+   * For filler-mode buys: the pre-buy order-history snapshot — every
+   * order id visible on /gp/css/order-history BEFORE Place Order was
+   * clicked. Captured at buy time and persisted so the verify-phase
+   * rescan (~10 min later) can use snapshot-DIFF instead of the legacy
+   * ASIN-walker that bled cross-deal contamination (a 2-day-old order
+   * containing the same ASIN as today's filler would be falsely
+   * attributed to today's buy). Empty array OK — means snapshot was
+   * captured but order history was empty. Null = no snapshot saved
+   * (pre-feature attempt or non-filler buy), rescan falls back to
+   * the ASIN-walker.
+   */
+  preBuyOrderIds: string[] | null;
+  /**
    * Per-filler-order cancel state from BG's FillerCancelTask table.
    * Each task tracks one filler order id through cancel_fillers's
    * state machine. JobsTable colors each chip per status. Null on

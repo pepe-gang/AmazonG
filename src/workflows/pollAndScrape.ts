@@ -446,6 +446,10 @@ async function loadFillerBuyContext(
   fillerOrderIds: string[];
   cartAsins: string[];
   productTitle: string | null;
+  /** Pre-buy order-history snapshot. Null when not captured (pre-feature
+   *  attempts in the local store) — caller falls back to the legacy
+   *  ASIN-walker in that case. */
+  preBuyOrderIds: string[] | null;
 }> {
   const buyAttemptId = job.buyJobId
     ? makeAttemptId(job.buyJobId, profileEmail)
@@ -456,6 +460,7 @@ async function loadFillerBuyContext(
     fillerOrderIds: attempt?.fillerOrderIds ?? [],
     cartAsins: attempt?.cartAsins ?? [],
     productTitle: attempt?.productTitle ?? null,
+    preBuyOrderIds: attempt?.preBuyOrderIds ?? null,
   };
 }
 
@@ -521,6 +526,14 @@ type FillerRunResult = {
    * yet at buy-time. Empty on dry-run / failure / single-mode.
    */
   cartAsins: string[];
+  /**
+   * Pre-buy order-history snapshot. Persisted on the JobAttempt so the
+   * verify rescan can use snapshot-diff instead of the ASIN-walker
+   * (defeats the prev-order-bleed bug where today's filler ASIN
+   * matches a 2-day-old order with the same ASIN). Empty on
+   * non-filler / dry-run / failure.
+   */
+  preBuyOrderIds: string[];
   /**
    * Amazon's actual product title for the target (from /spc scraping).
    * Persisted so verify phase can locate the target on the cancel-
@@ -685,6 +698,8 @@ async function runFillerBuyWithRetries(
       lastRaw.ok && 'fillerOrderIds' in lastRaw ? lastRaw.fillerOrderIds : [],
     cartAsins:
       lastRaw.ok && 'cartAsins' in lastRaw ? lastRaw.cartAsins : [],
+    preBuyOrderIds:
+      lastRaw.ok && 'preBuyOrderIds' in lastRaw ? lastRaw.preBuyOrderIds : [],
     productTitle: lastRaw.ok ? lastRaw.productInfo.title : null,
   };
 }
@@ -1229,7 +1244,7 @@ async function handleVerifyJob(
       // have caught it.
       let cancelledFillerError: string | null = null;
       if (job.viaFiller) {
-        const { fillerOrderIds: persistedFillerOrderIds, cartAsins } =
+        const { fillerOrderIds: persistedFillerOrderIds, cartAsins, preBuyOrderIds: persistedPreBuyOrderIds } =
           await loadFillerBuyContext(deps, job, profile.email, activeAttemptId);
         let mergedFillerOrderIds = persistedFillerOrderIds;
         if (cartAsins.length > 0) {
@@ -1238,6 +1253,7 @@ async function handleVerifyJob(
             cartAsins,
             targetOrderId,
             cid,
+            persistedPreBuyOrderIds,
           );
           const known = new Set(persistedFillerOrderIds);
           const newlyFound = rescan.filter((id) => !known.has(id));
@@ -2413,6 +2429,7 @@ export async function runForProfile(
     let buy: BuyResult;
     let fillerOrderIds: string[] = [];
     let cartAsins: string[] = [];
+    let preBuyOrderIds: string[] = [];
     let productTitle: string | null = null;
     // Persist the Place-Order stage on the attempt so the recovery
     // sweep can tell "stopped in a safe re-runnable phase" from
@@ -2433,6 +2450,7 @@ export async function runForProfile(
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       cartAsins = r.cartAsins;
+      preBuyOrderIds = r.preBuyOrderIds;
       productTitle = r.productTitle;
     } else {
       buy = await buyNow(page, {
@@ -2560,7 +2578,7 @@ export async function runForProfile(
         // verify uses it to re-scan order history when buy-time scan
         // had partial coverage (INC-2026-05-10).
         ...(useFillers
-          ? { fillerOrderIds, cartAsins, productTitle }
+          ? { fillerOrderIds, cartAsins, preBuyOrderIds, productTitle }
           : {}),
       })
       .catch(() => undefined);
