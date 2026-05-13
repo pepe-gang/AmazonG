@@ -1336,6 +1336,22 @@ async function handleVerifyJob(
               : 'order was cancelled by Amazon',
           placedOrderId: targetOrderId,
           placedEmail: profile.email,
+          // Target order cancelled by Amazon → the bundled filler is
+          // definitionally gone with it (Amazon doesn't ship the
+          // filler when the whole order is dead). Mark cleaned=true
+          // so BG clears targetOrderHasUncancelledFillers, dropping
+          // the row from "Uncancelled filler orders" and removing
+          // the 📦 Uncancelled Filler pill on the purchase row.
+          // Only relevant for filler-mode buys; single-mode never
+          // had that flag set.
+          ...(job.viaFiller
+            ? {
+                targetOrderCleanupOutcome: {
+                  cleaned: true,
+                  error: null,
+                },
+              }
+            : {}),
         },
         cid,
       );
