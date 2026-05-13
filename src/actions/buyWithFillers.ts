@@ -411,6 +411,15 @@ function isBlockedByPool(
     if (/\bethernet\s+cable/i.test(title)) return true;
     return false;
   }
+  if (pool === 'amazon-basics') {
+    // Per user request 2026-05-13: exclude "Amazon Basics Multipurpose
+    // Copy Printer Paper" — bulky/heavy item that complicates returns
+    // when it ends up bundled in a target order's cancellation chain.
+    // Pattern is broad enough to catch other paper variants (Copy
+    // Paper / Printer Paper) since they share the same shipping shape.
+    if (/\b(?:copy|printer)\s+paper\b/i.test(title)) return true;
+    return false;
+  }
   return false;
 }
 
@@ -800,6 +809,33 @@ export async function buyWithFillers(
   }
   const fillersAdded = fillersResult.added;
   const fillerAsins = fillersResult.asins;
+  // Fail-fast on zero fillers. The in-attempt pool fallback above was
+  // our one and only retry — if even amazon-basics came back empty,
+  // every search term in both pools hit Amazon's meta-refresh stub
+  // and there's nothing to ship to /spc but the target item. That's
+  // both pointless (filler mode exists to bump cashback) and silently
+  // wrong (logs say "filler mode", order has no fillers). Surface a
+  // recognizable failure here instead of running the full /spc flow
+  // and reporting `cashback_gate` downstream. The outer
+  // runFillerBuyWithRetries only retries on `cashback_gate` so this
+  // also short-circuits the 3× retry loop the user was seeing.
+  if (fillersAdded === 0) {
+    logger.warn(
+      'step.fillerBuy.fillers.zero',
+      {
+        fillersRequested: fillerTargetCount,
+        termsTried: fillersResult.termsTried,
+        metaRefreshHits: fillersResult.metaRefreshHits,
+      },
+      cid,
+    );
+    return {
+      ok: false,
+      stage: 'filler_search',
+      reason: 'no_filler_candidates — search rate-limited across all pools',
+      detail: `termsTried=${fillersResult.termsTried}, metaRefreshHits=${fillersResult.metaRefreshHits}, pool=${opts.fillerPool ?? 'default'}`,
+    };
+  }
   if (fillersAdded < fillerTargetCount) {
     logger.warn(
       'step.fillerBuy.fillers.partial',
@@ -3621,6 +3657,62 @@ async function fetchSearchPageOnce(
   };
 }
 
+/**
+ * Last-resort filler search via a real browser navigation. Use when
+ * `searchFillerCandidatesViaHttp` returns the meta-refresh stub on
+ * every term in the configured pool (and the in-attempt pool fallback,
+ * if any) — Amazon's HTTP-API rate-limit fires on `ctx.request.get`
+ * but is much more lenient on full browser navigations (verified live
+ * 2026-05-13: parallel burst of 20 fetches from the browser context
+ * all returned real results, even though prior HTTP requests from the
+ * same account were stub'd).
+ *
+ * Opens a fresh tab in the same context so the buy-flow's main page
+ * isn't disturbed; cookies are shared. Chromium handles the
+ * meta-refresh stub natively (waits 5s, follows the redirect), so no
+ * retry logic needed here. Cost: ~1.5-3s wall-clock. Returns the same
+ * `SearchResultCandidate[]` shape as the HTTP path — the same JSDOM
+ * parser (`extractSearchResultCandidates`) runs against the rendered
+ * page content.
+ *
+ * Returns [] (not the diag struct) — caller has already logged its
+ * diag from the failed HTTP attempts; the browser path is binary:
+ * either we got candidates or we didn't.
+ */
+async function searchFillerCandidatesViaBrowser(
+  mainPage: Page,
+  term: string,
+  pool: FillerPool | undefined,
+): Promise<SearchResultCandidate[]> {
+  const url = buildFillerSearchUrl(term, pool);
+  const searchPage = await mainPage.context().newPage();
+  try {
+    await searchPage
+      .goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      .catch(() => undefined);
+    // Wait for the search-result cards to render. Cap at 8s — if Amazon
+    // is STILL serving the meta-refresh stub at this point, the rate-
+    // limit is beyond what a browser nav can paper over and we bail
+    // with 0 candidates (caller fail-fasts the buy).
+    await searchPage
+      .waitForSelector('[data-component-type="s-search-result"]', { timeout: 8_000 })
+      .catch(() => undefined);
+    const html = await searchPage.content().catch(() => '');
+    if (!html) return [];
+    const doc = new JSDOM(html).window.document;
+    const all = extractSearchResultCandidates(doc);
+    const { min: minPrice, max: maxPrice } = priceBandForPool(pool);
+    return all.filter((c) => {
+      if (!c.isPrime) return false;
+      if (c.price === null) return false;
+      if (c.price < minPrice || c.price > maxPrice) return false;
+      return true;
+    });
+  } finally {
+    await searchPage.close().catch(() => undefined);
+  }
+}
+
 async function searchFillerCandidatesViaHttp(
   page: Page,
   term: string,
@@ -4035,10 +4127,57 @@ async function addFillerItems(
     );
   }
 
+  // Last-resort browser fallback. Triggers ONLY when every HTTP term
+  // hit the meta-refresh rate-limit stub — that's the one failure
+  // mode browser nav can paper over (real Chromium nav handles the
+  // stub natively; Amazon's anti-bot is HTTP-API-specific). Costs
+  // ~1.5-3s; we cap at one attempt with the first term in the pool.
+  if (
+    (candidates.length === 0 || csrf === null) &&
+    metaRefreshHits > 0 &&
+    metaRefreshHits === terms.length &&
+    terms[0]
+  ) {
+    logger.warn(
+      'step.fillerBuy.fillers.browserFallback',
+      { term: terms[0], reason: 'every HTTP term rate-limited; trying browser nav' },
+      cid,
+    );
+    const browserCandidates = await searchFillerCandidatesViaBrowser(
+      mainPage,
+      terms[0],
+      fillerOpts.pool,
+    );
+    let added = 0;
+    let blocked = 0;
+    for (const c of browserCandidates) {
+      if (candidates.length >= targetCount) break;
+      if (seen.has(c.asin)) continue;
+      seen.add(c.asin);
+      if (isBlockedByPool(fillerOpts.pool, c.title)) {
+        blocked++;
+        continue;
+      }
+      candidates.push(c);
+      added++;
+      if (csrf === null) csrf = c.csrf;
+    }
+    logger.info(
+      'step.fillerBuy.fillers.browserFallback.result',
+      {
+        fresh: added,
+        ...(blocked > 0 ? { blockedByPool: blocked } : {}),
+        totalCandidates: candidates.length,
+        of: targetCount,
+      },
+      cid,
+    );
+  }
+
   if (candidates.length === 0 || csrf === null) {
     logger.warn(
       'step.fillerBuy.fillers.noCandidates',
-      { termsTried: terms.length, targetCount },
+      { termsTried: terms.length, targetCount, metaRefreshHits },
       cid,
     );
     return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };

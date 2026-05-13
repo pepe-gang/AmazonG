@@ -92,7 +92,15 @@ export type BuyResult =
         | 'cart_verify'
         | 'proceed_checkout'
         | 'spc_wait'
-        | 'spc_ready';
+        | 'spc_ready'
+        // Filler-search rate-limit: every term in the configured pool
+        // (and the in-attempt fallback pool) hit Amazon's meta-refresh
+        // stub on /s?k=... — we'd ship a naked cart to /spc with just
+        // the target item. Fail-fast here instead so the outer retry
+        // doesn't fire (cashback_gate retries don't help when there
+        // are no fillers to retry with) and the row's error reads
+        // clearly in the BG dashboard.
+        | 'filler_search';
       reason: string;
       detail?: string;
     };
