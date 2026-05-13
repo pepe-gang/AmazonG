@@ -2114,3 +2114,63 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   from { opacity: 0; transform: translate(-50%, 8px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
+
+/* Per-account Actions dropdown — consolidates Your Orders / Set-Edit
+   Address / Add to Amazon / Remove into one menu so the row doesn't
+   span half the screen. Trigger is the existing .ghost-btn ("Actions ▾");
+   the menu floats below it, right-aligned to its edge. */
+.actions-menu-wrap {
+  position: relative;
+  display: inline-block;
+}
+.actions-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  min-width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  animation: actions-menu-in 90ms ease-out;
+}
+@keyframes actions-menu-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.actions-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.actions-menu-item:hover:not(:disabled) {
+  background: var(--surface-hover, rgba(255, 255, 255, 0.06));
+}
+.actions-menu-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.actions-menu-item--danger {
+  color: var(--danger);
+}
+.actions-menu-item--danger:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.12);
+}
+.actions-menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 2px;
+}

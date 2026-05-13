@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Switch } from '@/components/ui/switch';
 import type { AmazonProfile } from '../../shared/types.js';
 import { useSettings } from '../hooks/useSettings.js';
@@ -323,6 +323,12 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   // Address" opens a modal pre-filled with the saved values.
   const [addingAddrEmail, setAddingAddrEmail] = useState<string | null>(null);
   const [editAddrEmail, setEditAddrEmail] = useState<string | null>(null);
+  // Per-row Actions dropdown — only one menu can be open at a time so
+  // this is a single shared "which row's menu is showing" string
+  // (email key). Click outside / Escape closes; close also fires when
+  // an item is selected so the user doesn't have to dismiss manually
+  // after clicking through.
+  const [openMenuEmail, setOpenMenuEmail] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -863,6 +869,10 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                       );
                     })()}
                     {!p.loggedIn && (
+                      // Sign-in stays prominent (primary action) because
+                      // a not-signed-in account can't do anything until
+                      // it's signed in — burying it in the dropdown
+                      // would be a UX trap.
                       <button
                         className="primary-action"
                         disabled={busyEmail === p.email}
@@ -871,43 +881,17 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                         {busyEmail === p.email ? 'Opening…' : 'Sign in'}
                       </button>
                     )}
-                    {p.loggedIn && (
-                      <button
-                        className="ghost-btn"
-                        title="Open Amazon's Your Orders page using this account's session"
-                        onClick={() => void window.autog.profilesOpenOrders(p.email)}
-                      >
-                        Your Orders ↗
-                      </button>
-                    )}
-                    <button
-                      className="ghost-btn"
-                      title={
-                        p.bgAddress
-                          ? `Edit the BG receiving address saved for this account.\n\n${p.bgAddress.fullName}\n${p.bgAddress.street1}\n${p.bgAddress.city}, ${p.bgAddress.state} ${p.bgAddress.zip}`
-                          : 'No address saved. Click to add one.'
-                      }
-                      onClick={() => setEditAddrEmail(p.email)}
-                    >
-                      {p.bgAddress ? 'Edit Address' : 'Set Address'}
-                    </button>
-                    {p.loggedIn && p.bgAddress && (
-                      <button
-                        className="ghost-btn"
-                        disabled={addingAddrEmail === p.email}
-                        title={`Add this saved BG address to Amazon's address book for this account.\n\n${p.bgAddress.fullName}\n${p.bgAddress.street1}\n${p.bgAddress.city}, ${p.bgAddress.state} ${p.bgAddress.zip}`}
-                        onClick={() => void doAddBgAddress(p.email)}
-                      >
-                        {addingAddrEmail === p.email ? 'Adding…' : 'Add to Amazon'}
-                      </button>
-                    )}
-                    <button
-                      className="ghost-btn danger-text"
-                      disabled={busyEmail === p.email}
-                      onClick={() => void doRemove(p.email)}
-                    >
-                      Remove
-                    </button>
+                    <ActionsMenu
+                      profile={p}
+                      open={openMenuEmail === p.email}
+                      onOpenChange={(open) => setOpenMenuEmail(open ? p.email : null)}
+                      busy={busyEmail === p.email}
+                      addingAddr={addingAddrEmail === p.email}
+                      onYourOrders={() => void window.autog.profilesOpenOrders(p.email)}
+                      onSetEditAddress={() => setEditAddrEmail(p.email)}
+                      onAddToAmazon={() => void doAddBgAddress(p.email)}
+                      onRemove={() => void doRemove(p.email)}
+                    />
                   </div>
                 )}
               </div>
@@ -928,6 +912,127 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
           onClose={() => setEditAddrEmail(null)}
           onError={(msg) => showToast(msg)}
         />
+      )}
+    </div>
+  );
+}
+
+/** Per-row Actions dropdown. Consolidates Your Orders / Set-Edit
+ *  Address / Add to Amazon / Remove into one menu so the row doesn't
+ *  span a full screen width. Sign-in is intentionally NOT in here —
+ *  it stays as a prominent primary button when the account is signed
+ *  out, since it's the gating action for everything else. */
+function ActionsMenu(props: {
+  profile: AmazonProfile;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  busy: boolean;
+  addingAddr: boolean;
+  onYourOrders: () => void;
+  onSetEditAddress: () => void;
+  onAddToAmazon: () => void;
+  onRemove: () => void;
+}) {
+  const { profile: p } = props;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Close on click outside + Escape. Listeners attach only while
+  // open so closed menus don't carry an event-listener cost.
+  useEffect(() => {
+    if (!props.open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!containerRef.current) return;
+      if (!containerRef.current.contains(e.target as Node)) {
+        props.onOpenChange(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') props.onOpenChange(false);
+    };
+    // mousedown so the click that lands ON the trigger toggles
+    // open→closed cleanly (using click would re-open it via the
+    // trigger's own handler firing after this one).
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [props.open, props]);
+
+  const close = () => props.onOpenChange(false);
+  const addr = p.bgAddress;
+  const addrTitle = addr
+    ? `${addr.fullName}\n${addr.street1}\n${addr.city}, ${addr.state} ${addr.zip}`
+    : null;
+
+  return (
+    <div ref={containerRef} className="actions-menu-wrap">
+      <button
+        type="button"
+        className="ghost-btn"
+        aria-haspopup="menu"
+        aria-expanded={props.open}
+        onClick={() => props.onOpenChange(!props.open)}
+      >
+        Actions ▾
+      </button>
+      {props.open && (
+        <div className="actions-menu" role="menu">
+          {p.loggedIn && (
+            <button
+              type="button"
+              role="menuitem"
+              className="actions-menu-item"
+              onClick={() => {
+                props.onYourOrders();
+                close();
+              }}
+            >
+              Your Orders ↗
+            </button>
+          )}
+          <button
+            type="button"
+            role="menuitem"
+            className="actions-menu-item"
+            title={addrTitle ? `Saved BG address:\n${addrTitle}` : undefined}
+            onClick={() => {
+              props.onSetEditAddress();
+              close();
+            }}
+          >
+            {addr ? 'Edit Address' : 'Set Address'}
+          </button>
+          {p.loggedIn && addr && (
+            <button
+              type="button"
+              role="menuitem"
+              className="actions-menu-item"
+              disabled={props.addingAddr}
+              title={`Add saved BG address to Amazon's address book.\n\n${addrTitle}`}
+              onClick={() => {
+                props.onAddToAmazon();
+                close();
+              }}
+            >
+              {props.addingAddr ? 'Adding…' : 'Add to Amazon'}
+            </button>
+          )}
+          <div className="actions-menu-divider" />
+          <button
+            type="button"
+            role="menuitem"
+            className="actions-menu-item actions-menu-item--danger"
+            disabled={props.busy}
+            onClick={() => {
+              props.onRemove();
+              close();
+            }}
+          >
+            Remove
+          </button>
+        </div>
       )}
     </div>
   );
