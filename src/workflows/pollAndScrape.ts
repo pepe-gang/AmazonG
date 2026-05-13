@@ -1451,10 +1451,31 @@ async function handleVerifyJob(
       { ...logCtx, orderId: targetOrderId, error },
       cid,
     );
-    await deps.jobAttempts
-      .update(activeAttemptId, { status: 'failed', error })
-      .catch(() => undefined);
-    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+    // Status-preservation guard. When the verify catch fires, the
+    // buy WAS already successful (the order id is real, the row is
+    // sitting in awaiting_verification or verified). Flipping to
+    // status='failed' here lies — the order is alive, we just
+    // couldn't check it on this attempt. Only record the error so
+    // the user knows verify hit a snag; status stays where it was
+    // so the row keeps its Pending/Success bucket. The user can
+    // click Verify-now to retry. Same fix on the fetch_tracking
+    // catch below. Pre-fix: a browser-crashed verify on an already-
+    // placed order moved the row to the Failed bucket even though
+    // the order was placed successfully and never cancelled.
+    const hadOrder = await deps.jobAttempts
+      .get(activeAttemptId)
+      .then((a) => !!a?.orderId)
+      .catch(() => false);
+    if (hadOrder) {
+      await deps.jobAttempts
+        .update(activeAttemptId, { error })
+        .catch(() => undefined);
+    } else {
+      await deps.jobAttempts
+        .update(activeAttemptId, { status: 'failed', error })
+        .catch(() => undefined);
+      await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+    }
   } finally {
     // Always close the verify-phase browser window. Unlike the buy flow
     // (where we keep the window open on some failure modes so the user
@@ -1788,10 +1809,27 @@ async function handleFetchTrackingJob(
       { ...logCtx, orderId: targetOrderId, error },
       cid,
     );
-    await deps.jobAttempts
-      .update(activeAttemptId, { status: 'failed', error })
-      .catch(() => undefined);
-    await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+    // Status-preservation guard — see the matching verify-catch
+    // commentary above. fetch_tracking ALWAYS runs against a row
+    // that already has an orderId (it's scheduled by BG only after
+    // buy+verify), so in practice this branch always preserves
+    // status. Mirror the verify shape anyway for defensive
+    // consistency in case fetch_tracking is ever called for a
+    // pre-placement attempt.
+    const hadOrder = await deps.jobAttempts
+      .get(activeAttemptId)
+      .then((a) => !!a?.orderId)
+      .catch(() => false);
+    if (hadOrder) {
+      await deps.jobAttempts
+        .update(activeAttemptId, { error })
+        .catch(() => undefined);
+    } else {
+      await deps.jobAttempts
+        .update(activeAttemptId, { status: 'failed', error })
+        .catch(() => undefined);
+      await reportSafe(deps, job.id, { status: 'failed', error }, cid);
+    }
   } finally {
     if (fetchPage) {
       await fetchPage.close().catch(() => undefined);
