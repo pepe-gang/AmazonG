@@ -4,6 +4,7 @@ import {
   bodySample,
   clickRequestCancellation,
   isCancelConfirmed,
+  isCancelPending,
   isCancelRefused,
   openCancelPage,
   waitForCancelOutcome,
@@ -238,6 +239,24 @@ export async function cancelNonTargetItems(
       ok: false,
       reason:
         'Amazon refused: unable to cancel requested items (already processing, shipped, or locked)',
+      detail: `url=${page.url()}, cancelled(prospective)=${counts.cancelled}, kept=${counts.kept}`,
+    };
+  }
+
+  // Amazon's "Attempting to cancel requested items / We'll email you
+  // when there's an update" banner — the request was accepted into
+  // their async pipeline but hasn't actually cancelled yet. We treat
+  // this as TERMINAL (don't retry the click — Amazon will keep
+  // showing the same banner until the async decision lands) but NOT
+  // as cleaned: the "Uncancelled filler orders" warning stays visible
+  // until a later verify pass re-reads the order and confirms the
+  // filler is actually gone. Specific reason string so
+  // isTerminalCancelReason in pollAndScrape.ts recognizes it.
+  if (await isCancelPending(page)) {
+    return {
+      ok: false,
+      reason:
+        'pending_amazon_decision: Amazon accepted the cancel request but is still processing — will reverify later',
       detail: `url=${page.url()}, cancelled(prospective)=${counts.cancelled}, kept=${counts.kept}`,
     };
   }

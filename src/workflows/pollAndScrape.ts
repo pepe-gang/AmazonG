@@ -208,7 +208,13 @@ function isTerminalCancelReason(reason: string): boolean {
     /unable to cancel/i.test(reason) ||
     /not on cancel-items page/i.test(reason) ||
     /could not identify target item/i.test(reason) ||
-    /only target item is cancellable/i.test(reason)
+    /only target item is cancellable/i.test(reason) ||
+    // Amazon accepted the cancel request into async processing (the
+    // "Attempting to cancel requested items / We'll email you" banner).
+    // Terminal within this verify pass — re-clicking just lands on the
+    // same banner. Future verify passes will re-check whether the
+    // cancellation actually took effect on Amazon's side.
+    /pending_amazon_decision/i.test(reason)
   );
 }
 
@@ -333,7 +339,16 @@ async function runVerifyFillerCleanup(
   targetOrderCleaned: boolean;
   targetCleanError: string | null;
 }> {
-  const MAX_TRIES = 3;
+  // 2× retry budget per verify pass (was 3). Combined with the
+  // "Attempting to cancel" success-detector fix in cancelForm.ts:
+  // - happy path lands on attempt 1 (no retries needed)
+  // - terminal-failure paths break early via isTerminalCancelReason
+  // - transient failures get exactly one retry, then we surface the
+  //   "Uncancelled filler orders" warning so the user can click
+  //   "Cancel filler" manually instead of the worker burning verify
+  //   cycles in a 3-deep loop the user described as "bot keeps
+  //   re-trying".
+  const MAX_TRIES = 2;
 
   // 1. Cancel the filler-only orders (orders that do NOT contain the target).
   const { fillerOrdersCancelled, fillerOrdersFailed } =

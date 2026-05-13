@@ -257,7 +257,14 @@ export async function isCancelRefused(page: Page): Promise<boolean> {
     .catch(() => false);
 }
 
-/** True when Amazon's cancellation-confirmation banner has rendered. */
+/** True when Amazon's cancellation-confirmation banner has rendered —
+ *  i.e., Amazon has CONFIRMED cancellation (or the item is gone from
+ *  the order). Distinct from `isCancelPending` (Amazon merely accepted
+ *  the request for async processing — the actual cancellation may
+ *  still fail). The verify-phase cleanup treats confirmed as true
+ *  success (clears the "Uncancelled filler orders" pillar) but treats
+ *  pending as not-yet-cleaned (pillar stays until a later verify
+ *  re-reads the order and the filler is actually absent). */
 export async function isCancelConfirmed(page: Page): Promise<boolean> {
   return page
     .evaluate(() => {
@@ -265,6 +272,26 @@ export async function isCancelConfirmed(page: Page): Promise<boolean> {
       const re =
         /cancellation (?:has been )?(?:requested|submitted|received|successful)|your cancellation request|item(?:s)? (?:has|have) been cancelled|order (?:was|has been) cancelled/i;
       return re.test(body);
+    })
+    .catch(() => false);
+}
+
+/** True when Amazon has put the cancel request into its async pipeline
+ *  but hasn't actually cancelled yet — the "Attempting to cancel
+ *  requested items / We'll email you when there's an update" banner.
+ *  Treated as a TERMINAL non-success outcome by the verify-phase loop:
+ *  we don't retry the click within the same pass (no point — Amazon
+ *  will keep showing the same banner), but we DO leave
+ *  targetOrderHasUncancelledFillers=true on BG so the "Uncancelled
+ *  filler orders" pillar stays visible until a later verify confirms
+ *  the cancellation actually took (filler absent from the order). */
+export async function isCancelPending(page: Page): Promise<boolean> {
+  return page
+    .evaluate(() => {
+      const body = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
+      return /attempting to cancel(?: requested| selected| these)? items?|we(?:'|’)ll email you when there(?:'|’)s an update/i.test(
+        body,
+      );
     })
     .catch(() => false);
 }
