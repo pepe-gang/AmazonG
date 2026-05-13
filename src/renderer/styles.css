@@ -2124,10 +2124,14 @@ a.item-link:hover { border-bottom-color: var(--text-subtle); }
   display: inline-block;
 }
 .actions-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 50;
+  /* `position: fixed` + portal-mounted on document.body so the menu
+     escapes the per-account card's stacking context. Earlier
+     position:absolute version got covered by the next row's opaque
+     card border. Top/right coords are set inline by the component
+     from the trigger's getBoundingClientRect. Generous z-index so
+     other floating UI (toasts, dialogs) still stays above. */
+  position: fixed;
+  z-index: 1500;
   min-width: 180px;
   background: var(--surface);
   border: 1px solid var(--border);

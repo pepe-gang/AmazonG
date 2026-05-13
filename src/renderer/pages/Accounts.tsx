@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Switch } from '@/components/ui/switch';
 import type { AmazonProfile } from '../../shared/types.js';
 import { useSettings } from '../hooks/useSettings.js';
@@ -934,24 +935,45 @@ function ActionsMenu(props: {
   onRemove: () => void;
 }) {
   const { profile: p } = props;
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  // Portal-positioned menu coords. Computed from the trigger's
+  // bounding rect when the menu opens — `position: fixed` so it
+  // floats above every account card regardless of stacking context.
+  // Previously a sibling absolute-positioned menu got clipped by
+  // the next row's card (it has its own border/background and
+  // higher document order). Portal + fixed coords sidesteps both.
+  const [coords, setCoords] = useState<{ top: number; right: number } | null>(null);
 
-  // Close on click outside + Escape. Listeners attach only while
-  // open so closed menus don't carry an event-listener cost.
+  useLayoutEffect(() => {
+    if (!props.open || !triggerRef.current) {
+      setCoords(null);
+      return;
+    }
+    const r = triggerRef.current.getBoundingClientRect();
+    setCoords({
+      top: r.bottom + 4,
+      // right-anchor: viewport-right - trigger-right (so the menu
+      // extends leftward from the trigger's right edge, matching
+      // the previous .actions-menu absolute-positioned layout)
+      right: window.innerWidth - r.right,
+    });
+  }, [props.open]);
+
+  // Close on click outside + Escape. The trigger and menu both
+  // need to count as "inside" so clicking inside the menu doesn't
+  // also close it.
   useEffect(() => {
     if (!props.open) return;
     const onDocClick = (e: MouseEvent) => {
-      if (!containerRef.current) return;
-      if (!containerRef.current.contains(e.target as Node)) {
-        props.onOpenChange(false);
-      }
+      const tgt = e.target as Node;
+      if (triggerRef.current?.contains(tgt)) return;
+      if (menuRef.current?.contains(tgt)) return;
+      props.onOpenChange(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') props.onOpenChange(false);
     };
-    // mousedown so the click that lands ON the trigger toggles
-    // open→closed cleanly (using click would re-open it via the
-    // trigger's own handler firing after this one).
     document.addEventListener('mousedown', onDocClick);
     document.addEventListener('keydown', onKey);
     return () => {
@@ -967,8 +989,9 @@ function ActionsMenu(props: {
     : null;
 
   return (
-    <div ref={containerRef} className="actions-menu-wrap">
+    <div className="actions-menu-wrap">
       <button
+        ref={triggerRef}
         type="button"
         className="ghost-btn"
         aria-haspopup="menu"
@@ -977,8 +1000,13 @@ function ActionsMenu(props: {
       >
         Actions ▾
       </button>
-      {props.open && (
-        <div className="actions-menu" role="menu">
+      {props.open && coords && createPortal(
+        <div
+          ref={menuRef}
+          className="actions-menu"
+          role="menu"
+          style={{ top: coords.top, right: coords.right }}
+        >
           {p.loggedIn && (
             <button
               type="button"
@@ -1032,7 +1060,8 @@ function ActionsMenu(props: {
           >
             Remove
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
