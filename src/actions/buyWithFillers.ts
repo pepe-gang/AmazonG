@@ -1057,29 +1057,56 @@ export async function buyWithFillers(
     cid,
   );
 
-  // 8. Verify the TARGET line item's price on /spc — not the cart max,
-  //    because with 12 fillers ≤ $100 a cheap target could be dwarfed by
-  //    a pricey filler and falsely trip the cap. We locate the target's
-  //    row by its product link (/dp/<ASIN>) and read the price from that
-  //    row specifically. Skipped when we can't identify the target or
-  //    the deal has no cap — the product-page verify already ran.
-  if (opts.maxPrice !== null && targetAsin) {
+  // 8. Target-in-/spc HARD GUARD + price check.
+  //
+  //    Hard guard: target ASIN MUST be visible as a line item on /spc
+  //    before we click Place Order. If the target dropped out of cart
+  //    between ATC and here (Amazon evicted it, a race in the filler
+  //    adds, an out-of-stock flip on Amazon's side, /spc dedup edge
+  //    case), placing the order would charge the user for fillers
+  //    without the actual target — worst-case outcome. Run this
+  //    UNCONDITIONALLY (not gated on price cap) and bail with a clear
+  //    stage='cart_verify' on miss. User-reported as a defensive ask
+  //    after seeing a buy that worried them.
+  //
+  //    Price check: layered on top — when a maxPrice cap is set we
+  //    also verify the target's line-item price is within it. We
+  //    locate the target's row by its product link (/dp/<ASIN>) and
+  //    read the price from that row specifically (not the cart max,
+  //    because with 12 fillers ≤ $100 a cheap target could be dwarfed
+  //    by a pricey filler and falsely trip the cap). When no cap is
+  //    set we pass Number.POSITIVE_INFINITY so the existence check
+  //    still fires but the price comparison can't fail.
+  if (targetAsin) {
     const priceCheck = await verifyTargetLineItemPrice(
       page,
       targetAsin,
       info.title,
-      opts.maxPrice,
+      opts.maxPrice ?? Number.POSITIVE_INFINITY,
     );
     if (!priceCheck.ok) {
+      // Split the failure into target-missing vs price-exceeds because
+      // they're meaningfully different — missing target is a hard
+      // "do not place" signal, price-exceeds is a routine cap miss.
+      const missing = /could not locate target .* in \/spc line items/i.test(
+        priceCheck.reason,
+      );
+      const stage: 'cart_verify' | 'checkout_price' = missing
+        ? 'cart_verify'
+        : 'checkout_price';
       logger.warn(
-        'step.fillerBuy.spc.price.fail',
+        missing
+          ? 'step.fillerBuy.spc.target.missing'
+          : 'step.fillerBuy.spc.price.fail',
         { targetAsin, cap: opts.maxPrice, reason: priceCheck.reason },
         cid,
       );
       return {
         ok: false,
-        stage: 'checkout_price',
-        reason: priceCheck.reason,
+        stage,
+        reason: missing
+          ? `target ${targetAsin} not in /spc cart at place-order time — refusing to checkout without the main item`
+          : priceCheck.reason,
         ...(priceCheck.detail ? { detail: priceCheck.detail } : {}),
       };
     }
@@ -1089,12 +1116,13 @@ export async function buyWithFillers(
       cid,
     );
   } else {
-    logger.info(
-      'step.fillerBuy.spc.price.skip',
+    // No target ASIN at all — couldn't parse one from the productUrl.
+    // That's a malformed deal; we can't safely run the hard guard.
+    logger.warn(
+      'step.fillerBuy.spc.target.no_asin',
       {
-        targetAsin,
-        cap: opts.maxPrice,
-        reason: !targetAsin ? 'no_target_asin' : 'no_price_cap',
+        targetAsin: null,
+        note: 'productUrl had no parseable ASIN — skipping target-in-cart guard',
       },
       cid,
     );
@@ -1893,28 +1921,49 @@ async function snapshotOrderHistoryIds(
     );
     return null;
   }
-  // CRITICAL: wait for at least one `.order-card.js-order-card` to be
-  // rendered. The OLD condition was `csd-encrypted-sensitive == 0`
-  // alone, which is ALSO TRUE before any DOM has rendered (0 == 0).
-  // That race caused snapshot.empty to fire on a perfectly fine
-  // account with 10+ historical orders — the page had committed but
-  // not painted yet when we scanned. With an empty pre-set, the
-  // post-buy diff then treated every visible order as new, generating
-  // a long fillerOrderIds list and (catastrophically) trying to cancel
-  // historical real-customer orders.
+  // CRITICAL: the previous wait fired the moment the FIRST card
+  // rendered (count > 0 + no encrypted ones). On a slow page paint
+  // we'd snapshot just that 1 card before the other 9 had painted —
+  // baseline of 1 ID, post-buy diff treats every other order as new,
+  // sanity check fires and drops ALL filler claims (or worse, if it
+  // doesn't fire, false-positive cancel attempts on historical
+  // real-customer orders). User-reported: cpnnick's snapshot
+  // returned just 114-4284636-9153864 on multiple buys today.
+  //
+  // New gate: require card count STABILITY. Wait for the count to
+  // stop changing for 2s before accepting. Adapts to whatever the
+  // account has — a brand-new account with 0 orders still finishes
+  // the 10s wait empty (the existing `ids.length === 0 → null` path
+  // below handles that); an established account waits patiently
+  // until all visible cards have painted. Polling at 300ms × 2s
+  // stability = ~7 consecutive same-count checks.
   //
   // Logged incident 2026-05-11 attempt cmp1ng5p60004pl746onbynhv on
-  // amycpnguyen2: snapshot.empty fired, post-buy scan returned 10
-  // orders, 8 false-positive fillers entered the cancel queue.
+  // amycpnguyen2: original snapshot.empty fired, post-buy scan
+  // returned 10 orders, 8 false-positive fillers entered the cancel
+  // queue. The non-empty-but-too-short failure mode (1 ID instead of
+  // 10) on cpnnick today is the same problem one layer deeper.
   await page
     .waitForFunction(
       () => {
-        if (document.querySelectorAll('.csd-encrypted-sensitive').length !== 0) {
+        const cards = document.querySelectorAll('.order-card.js-order-card').length;
+        const encrypted = document.querySelectorAll('.csd-encrypted-sensitive').length;
+        if (encrypted !== 0) return false;
+        if (cards === 0) return false;
+        // Stash count + first-stable timestamp on window so consecutive
+        // polls can see whether the count has settled. Cleared on each
+        // navigation (window is recreated).
+        const w = window as Window & {
+          __agSnapLast?: number;
+          __agSnapSince?: number;
+        };
+        const now = Date.now();
+        if (w.__agSnapLast !== cards) {
+          w.__agSnapLast = cards;
+          w.__agSnapSince = now;
           return false;
         }
-        return (
-          document.querySelectorAll('.order-card.js-order-card').length > 0
-        );
+        return now - (w.__agSnapSince ?? now) >= 2_000;
       },
       undefined,
       { timeout: 10_000, polling: 300 },
@@ -2398,18 +2447,55 @@ export async function rescanFillerOrderIds(
     return [];
   }
   // Wait for Siege to decrypt every visible card before scanning
-  // (zero `csd-encrypted-sensitive` divs remaining). By verify time
-  // (~10 min after buy) decryption should be near-instant, but we
-  // still bound to 10s in case Amazon's checkout farm is slow.
-  // Same signal as buy-time scan — see INC-2026-05-10 comment in
-  // fetchOrderIdsForAsins for the failure mode this prevents.
+  // (zero `csd-encrypted-sensitive` divs remaining) AND for the card
+  // count to stabilize. Same stability gate as snapshotOrderHistoryIds —
+  // a snapshot that fires when only 1 card has painted is just as
+  // wrong here as it was at buy time.
   await page
     .waitForFunction(
-      () => document.querySelectorAll('.csd-encrypted-sensitive').length === 0,
+      () => {
+        const cards = document.querySelectorAll('.order-card.js-order-card').length;
+        const encrypted = document.querySelectorAll('.csd-encrypted-sensitive').length;
+        if (encrypted !== 0) return false;
+        if (cards === 0) return false;
+        const w = window as Window & {
+          __agRescanLast?: number;
+          __agRescanSince?: number;
+        };
+        const now = Date.now();
+        if (w.__agRescanLast !== cards) {
+          w.__agRescanLast = cards;
+          w.__agRescanSince = now;
+          return false;
+        }
+        return now - (w.__agRescanSince ?? now) >= 2_000;
+      },
       undefined,
-      { timeout: 10_000, polling: 500 },
+      { timeout: 10_000, polling: 300 },
     )
     .catch(() => undefined);
+  // Snapshot coherence validation (audit #4). If the persisted
+  // preBuyOrderIds is non-empty but MUCH smaller than the currently
+  // visible card count, the snapshot was taken before the page
+  // fully rendered — using it as a diff baseline would falsely
+  // attribute every "missing" card as a new filler. Reject the
+  // snapshot in that case and fall back to ASIN-walker (which has
+  // some prev-order-bleed risk but is safer than diffing against a
+  // known-bad baseline).
+  let effectivePreBuy = preBuyOrderIds;
+  if (preBuyOrderIds && preBuyOrderIds.length > 0) {
+    const currentCardCount = await page
+      .evaluate(
+        () => document.querySelectorAll('.order-card.js-order-card').length,
+      )
+      .catch(() => 0);
+    // Threshold: snapshot size must be at least half of current
+    // count. 10 cards visible + snapshot of 5 = OK; 10 cards + 1
+    // snapshot = broken baseline, reject.
+    if (currentCardCount > 0 && preBuyOrderIds.length * 2 < currentCardCount) {
+      effectivePreBuy = null;
+    }
+  }
   // Use snapshot-diff when we have the pre-buy IDs (defeats cross-deal
   // contamination — see the doc above). Falls back to ASIN-walker
   // when the snapshot is missing (pre-feature attempts in the local
@@ -2418,10 +2504,21 @@ export async function rescanFillerOrderIds(
     .evaluate(scanOrderHistoryDOMFn, {
       asinList: cartAsins,
       preBuyOrderIds:
-        preBuyOrderIds && preBuyOrderIds.length > 0 ? preBuyOrderIds : null,
+        effectivePreBuy && effectivePreBuy.length > 0 ? effectivePreBuy : null,
     })
     .catch(() => [] as OrderMatch[]);
+  // Verify-time strictness: require an actual ASIN match in the order
+  // card. Diff-mode at buy time can accept matchedAsins=[] entries
+  // (freebie/bundle window — anything new since the pre-buy snapshot
+  // is plausibly ours), but at verify time 10+ minutes have passed
+  // and parallel buys on the same account create unrelated orders
+  // that ALSO show up in the diff. User-reported: 6 unrelated 111-XXX
+  // orders attributed to a buy on cpnhuy because other buys ran
+  // between this buy's snapshot and its verify pass. Filtering to
+  // matchedAsins > 0 trades "miss a rare Amazon-bundle freebie at
+  // verify" for "never falsely attribute another buy's orders".
   return matches
+    .filter((m) => m.matchedAsins.length > 0)
     .map((m) => m.orderId)
     .filter((id) => id !== targetOrderId);
 }

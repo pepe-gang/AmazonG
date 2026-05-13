@@ -236,10 +236,31 @@ async function cancelFillerOrdersOnly(
   page: Page,
   fillerOrderIds: string[],
   cid: string,
+  /** Defense-in-depth safety: when provided, filter `targetOrderId`
+   *  out of the cancel list before processing. The caller's
+   *  classification logic is supposed to keep target out of
+   *  fillerOrderIds, but a parsing edge case or future regression
+   *  could let it slip through — and a single bad cancel of the
+   *  user's real order is catastrophic. Logs a warn if the filter
+   *  actually removes anything so the upstream misclassification is
+   *  visible in audit. */
+  targetOrderId?: string,
 ): Promise<{
   fillerOrdersCancelled: string[];
   fillerOrdersFailed: string[];
 }> {
+  if (targetOrderId && fillerOrderIds.includes(targetOrderId)) {
+    logger.warn(
+      'step.cancelFillerOrdersOnly.target_in_list',
+      {
+        targetOrderId,
+        listSize: fillerOrderIds.length,
+        message: `targetOrderId was in fillerOrderIds — filtered out to prevent cancelling the real order. Upstream classification has a bug.`,
+      },
+      cid,
+    );
+    fillerOrderIds = fillerOrderIds.filter((id) => id !== targetOrderId);
+  }
   const MAX_TRIES = 3;
   const fillerOrdersCancelled: string[] = [];
   const fillerOrdersFailed: string[] = [];
@@ -352,7 +373,7 @@ async function runVerifyFillerCleanup(
 
   // 1. Cancel the filler-only orders (orders that do NOT contain the target).
   const { fillerOrdersCancelled, fillerOrdersFailed } =
-    await cancelFillerOrdersOnly(page, fillerOrderIds, cid);
+    await cancelFillerOrdersOnly(page, fillerOrderIds, cid, targetOrderId);
 
   // 2. Clean the target order — cancel everything except the target.
   let targetOrderCleaned = false;
@@ -488,7 +509,7 @@ async function runVerifyFillerCleanupSweep(
       { ...logCtx, targetOrderId, fillerOrderIdCount: fillerOrderIds.length },
       cid,
     );
-    const cleanup = await cancelFillerOrdersOnly(page, fillerOrderIds, cid);
+    const cleanup = await cancelFillerOrdersOnly(page, fillerOrderIds, cid, targetOrderId);
     logger.info(
       `job.verify.${outcomeKind}.filler.cleanup.done`,
       {
@@ -1097,13 +1118,68 @@ async function handleVerifyJob(
       // orders" list's in-target-order row type).
       let verifyFillerCleanup: Awaited<ReturnType<typeof runVerifyFillerCleanup>> | null = null;
       if (job.viaFiller) {
-        const { fillerOrderIds, productTitle } = await loadFillerBuyContext(
+        const {
+          fillerOrderIds: persistedFillerOrderIds,
+          productTitle,
+          cartAsins,
+          preBuyOrderIds: persistedPreBuyOrderIds,
+        } = await loadFillerBuyContext(
           deps,
           job,
           profile.email,
           activeAttemptId,
         );
         const targetAsin = parseAsinFromUrl(job.productUrl);
+        // Active-outcome rescan (audit #3). The cancelled-outcome path
+        // re-scans order history for late-propagating fillers before
+        // cleanup. The active path historically skipped that and only
+        // cancelled buy-time-captured filler order IDs. A filler that
+        // propagated to order-history between buy-time poll (~5s) and
+        // verify-time (~10min) would silently slip through. Mirror
+        // the cancelled-path rescan here, dedup with Set, persist
+        // the merged set so audit reflects reality.
+        let fillerOrderIds = persistedFillerOrderIds;
+        if (cartAsins.length > 0) {
+          const rescan = await rescanFillerOrderIds(
+            verifyPage,
+            cartAsins,
+            targetOrderId,
+            cid,
+            persistedPreBuyOrderIds,
+          );
+          const known = new Set(persistedFillerOrderIds);
+          const newlyFound = rescan.filter((id) => !known.has(id));
+          if (newlyFound.length > 0) {
+            logger.warn(
+              'job.verify.filler.rescan.newlyFound',
+              {
+                ...logCtx,
+                targetOrderId,
+                buyTimeKnownCount: persistedFillerOrderIds.length,
+                rescanFoundCount: rescan.length,
+                newlyFoundOrderIds: newlyFound,
+              },
+              cid,
+            );
+            fillerOrderIds = Array.from(
+              new Set([...persistedFillerOrderIds, ...newlyFound]),
+            );
+            await deps.jobAttempts
+              .update(activeAttemptId, { fillerOrderIds })
+              .catch(() => undefined);
+          } else {
+            logger.info(
+              'job.verify.filler.rescan.complete',
+              {
+                ...logCtx,
+                targetOrderId,
+                buyTimeKnownCount: persistedFillerOrderIds.length,
+                rescanFoundCount: rescan.length,
+              },
+              cid,
+            );
+          }
+        }
         logger.info(
           'job.verify.filler.cleanup.start',
           {
@@ -1269,7 +1345,18 @@ async function handleVerifyJob(
               },
               cid,
             );
-            mergedFillerOrderIds = [...persistedFillerOrderIds, ...newlyFound];
+            // Dedup the merge via Set — defense against an edge case
+            // where rescan returns an id that's somehow already in
+            // persistedFillerOrderIds (shouldn't happen given the
+            // `!known.has(id)` filter above, but a Set wrap is
+            // free insurance against a future regression and the
+            // cost of duplicate cancel attempts on the same order
+            // is not zero — Amazon may rate-limit). Also drops any
+            // accidental duplicates inside persistedFillerOrderIds
+            // itself.
+            mergedFillerOrderIds = Array.from(
+              new Set([...persistedFillerOrderIds, ...newlyFound]),
+            );
             await deps.jobAttempts
               .update(activeAttemptId, { fillerOrderIds: mergedFillerOrderIds })
               .catch(() => undefined);
@@ -1300,6 +1387,7 @@ async function handleVerifyJob(
             verifyPage,
             mergedFillerOrderIds,
             cid,
+            targetOrderId,
           );
           logger.info(
             'job.verify.cancelled.filler.cleanup.done',
@@ -1586,6 +1674,7 @@ async function handleFetchTrackingJob(
           fetchPage,
           fillerOrderIds,
           cid,
+          targetOrderId,
         );
         logger.info(
           'job.fetchTracking.filler.cleanup.done',
