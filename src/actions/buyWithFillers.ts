@@ -3072,10 +3072,35 @@ async function runSurgicalCashbackRecovery(
         if (best.radio.checked) {
           return { ok: true, alreadyChecked: true, label: best.label, pct: best.pct };
         }
-        best.radio.click();
-        return { ok: true, alreadyChecked: false, label: best.label, pct: best.pct };
+        // Return the radio's identifiers (name + value) instead of
+        // clicking inside the evaluate. The caller does a Playwright
+        // locator click with force:true outside this block — same fix
+        // shape as pickBestCashbackDelivery in buyNow.ts. DOM-level
+        // .click() here used to trigger Amazon's /eligibleshipoption
+        // bot detector → /errors/500. force:true Playwright click
+        // skips the actionability hit-test (so Chewbacca's boxed
+        // wrapper doesn't block) but still dispatches real mouse
+        // events that Amazon's backend accepts.
+        return {
+          ok: true,
+          alreadyChecked: false,
+          label: best.label,
+          pct: best.pct,
+          radioName: best.radio.name,
+          radioValue: best.radio.value,
+        };
       }, targetAsin)
       .catch((err) => ({ ok: false as const, reason: `evaluate_failed: ${String(err).slice(0, 80)}` }));
+    if (clickResult.ok && !clickResult.alreadyChecked && 'radioName' in clickResult) {
+      const radioName = clickResult.radioName as string;
+      const radioValue = clickResult.radioValue as string;
+      const sel = `input[type="radio"][name="${radioName.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"][value="${radioValue.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`;
+      await page
+        .locator(sel)
+        .first()
+        .click({ force: true, timeout: 5_000 })
+        .catch(() => undefined);
+    }
 
     // Wait for Amazon's eligibleshipoption XHR to settle so we don't
     // reverify against a stale page.

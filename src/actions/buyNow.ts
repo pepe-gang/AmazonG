@@ -2545,25 +2545,49 @@ export async function pickBestCashbackDelivery(
     if (!plan) break;
     clicked.add(`${plan.name}::${plan.value}`);
     const sel = `input[type="radio"][name="${escCssAttr(plan.name)}"][value="${escCssAttr(plan.value)}"]`;
-    // DOM-level input.click() rather than page.locator(sel).click().
-    // Chewbacca /spc wraps each shipping option in
-    // `<div class="a-box eligible-delivery-group-option-box standard">`
-    // which catches pointer events — Playwright's locator click fails
-    // the actionability hit-test with "intercepts pointer events" and
-    // never lands. HTMLInputElement.click() toggles the radio at the
-    // DOM level (no pointer hit-test) and fires the change events
-    // Amazon's JS listens for to POST eligibleshipoption. Verified
-    // live 2026-05-13 against /checkout/p/.../spc?pipelineType=Chewbacca
-    // (before:false → after:true). Settle still happens downstream in
-    // `waitForDeliverySettle` — see prior commentary.
-    const ok = await page
-      .evaluate((s) => {
-        const r = document.querySelector(s) as HTMLInputElement | null;
-        if (!r) return false;
-        r.click();
-        return r.checked;
-      }, sel)
-      .catch(() => false);
+    // Playwright locator click with `force: true`. Chewbacca /spc
+    // wraps each shipping option in
+    // `<div class="a-box eligible-delivery-group-option-box standard">`,
+    // which makes Playwright's default actionability hit-test fail
+    // ("intercepts pointer events"). The v0.13.45 workaround used
+    // `page.evaluate(() => input.click())` which DID toggle the
+    // radio locally — but Amazon's `/eligibleshipoption` POST
+    // handler then served `/errors/500?ref=chk_web_sry` because
+    // the JS-dispatched click doesn't carry the mousedown/mouseup/
+    // pointer-event session signals Amazon's bot detector uses to
+    // authenticate the change. See memory
+    // project_amazon_500_native_click.md.
+    //
+    // `{ force: true }` is the fix: it tells Playwright to SKIP the
+    // actionability check (no hit-test, no "covered by wrapper"
+    // error) but to STILL dispatch a full real mouse-event sequence
+    // (mousemove → mousedown → mouseup → click) at the input's
+    // bounding-rect center. Amazon's backend sees the same signal a
+    // user click produces and accepts the POST. Combined fix for
+    // both the Chewbacca wrapper + the 500 we saw on cuong.ngoxxxxxx
+    // 2026-05-14T01:20:25Z.
+    let ok = false;
+    try {
+      await page.locator(sel).first().click({ force: true, timeout: 5_000 });
+      ok = true;
+    } catch (err) {
+      // Defensive last-resort: if `force:true` also fails (unlikely;
+      // it skips actionability), fall through to the JS click. May
+      // still 500 on Amazon's side but at least preserves the
+      // chance of selecting the radio when no other option exists.
+      logger.warn(
+        'step.spc.cashback.radioClick.forceFallback',
+        { sel: sel.slice(0, 80), error: String(err).slice(0, 120) },
+      );
+      ok = await page
+        .evaluate((s) => {
+          const r = document.querySelector(s) as HTMLInputElement | null;
+          if (!r) return false;
+          r.click();
+          return r.checked;
+        }, sel)
+        .catch(() => false);
+    }
     if (!ok) break;
     changes.push({ picked: plan.label, pct: plan.pickedPct });
   }

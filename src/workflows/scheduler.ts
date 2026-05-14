@@ -210,11 +210,14 @@ export class StreamingScheduler {
     const BACKOFF_SLEEP_MS = 5_000;
     while (this.running) {
       const cap = this.sd.cap();
-      // Don't pre-buffer too many tuples; we want the BG-claimed jobs
-      // to reflect recent state. cap*2 gives the consumer some
-      // lookahead for skip-blocked dispatch without holding stale
-      // claims for long.
-      if (this.readyQueue.length + this.inFlight.size >= cap * 2) {
+      // Pre-buffer cap. Bumped from cap*2 to cap*3 so the producer
+      // stays ahead even when verify/tracking jobs are single-tuple
+      // (so the consumer doesn't starve waiting on the producer's
+      // next claim cycle). Combined with parallel-claim below, this
+      // lets the consumer keep cap slots busy without the producer
+      // becoming the bottleneck.
+      const buffered = this.readyQueue.length + this.inFlight.size;
+      if (buffered >= cap * 3) {
         await sleep(200, () => this.running);
         continue;
       }
@@ -242,98 +245,121 @@ export class StreamingScheduler {
         }
       }
 
-      let job: AutoGJob | null = null;
-      try {
-        job = await this.sd.deps.bg.claimJob();
-      } catch (err) {
-        logger.warn(
-          'scheduler.claim.error',
-          { error: err instanceof Error ? err.message : String(err) },
-          this.sd.parentCid,
-        );
-        await sleep(BACKOFF_SLEEP_MS, () => this.running);
-        continue;
-      }
-      if (!job) {
+      // PARALLEL CLAIM + PROCESS. Previously this loop claimed one
+      // job at a time and blocked on resolveJobContext() (2 BG
+      // round-trips per call) before claiming the next. Result: with
+      // verify/tracking phases (always single-tuple per job), the
+      // consumer would sit idle waiting for the producer to push
+      // tuples one-by-one — user observed "1 browser working, 3-4
+      // idle, then 1 finishes and the next starts." With parallel
+      // claim+process the producer fills the queue in one cycle,
+      // letting the consumer dispatch up to `cap` tuples concurrently
+      // from the get-go.
+      //
+      // Burst size = remaining pre-buffer capacity. Each claim is
+      // independent on the BG side (atomic per-call), so claiming N
+      // jobs in parallel just yields up to N jobs back. Per-job
+      // processing (resolve + expand + push) runs in parallel via
+      // Promise.all — bundles.set and readyQueue.push are single-
+      // threaded JS event-loop operations, so no race.
+      const burst = Math.max(1, cap * 3 - buffered);
+      const claimedRaw = await Promise.all(
+        Array.from({ length: burst }, () =>
+          this.sd.deps.bg.claimJob().catch((err) => {
+            logger.warn(
+              'scheduler.claim.error',
+              { error: err instanceof Error ? err.message : String(err) },
+              this.sd.parentCid,
+            );
+            return null;
+          }),
+        ),
+      );
+      const claimed = claimedRaw.filter((j): j is AutoGJob => j !== null);
+      if (claimed.length === 0) {
         await sleep(NO_JOB_SLEEP_MS, () => this.running);
         continue;
       }
-
-      // Resolve per-job context (eligible profiles + overrides). Mirror
-      // legacy handleJob's empty-eligible path (pollAndScrape.ts:1022-
-      // 1036): report `failed` to BG so the job moves out of `claimed`
-      // state. Otherwise the job stays stuck until BG's stale-claim
-      // recovery (~10 min) and we'd reclaim it forever.
-      const ctx = await this.sd.resolveJobContext(job).catch(() => null);
-      if (!ctx) {
-        logger.warn(
-          'scheduler.resolve.error',
-          { jobId: job.id, phase: job.phase },
-          this.sd.parentCid,
-        );
-        await this.sd.deps.bg
-          .reportStatus(job.id, {
-            status: 'failed',
-            error: 'failed to resolve job context',
-          })
-          .catch(() => undefined);
-        continue;
-      }
-      if (ctx.eligible.length === 0) {
-        let error: string;
-        if (job.phase === 'buy') {
-          error = 'no enabled Amazon accounts available for this buy';
-        } else if (ctx.emptyReason === 'disabled') {
-          // Signed in but account is disabled in AmazonG. Distinct
-          // from "not signed in" so BG's dashboard can render a
-          // separate "🚫 Disabled" pill.
-          error = `target account ${job.placedEmail ?? '(none)'} is disabled in AmazonG`;
-        } else {
-          error = `target account ${job.placedEmail ?? '(none)'} not signed in`;
-        }
-        logger.warn(
-          'scheduler.eligible.empty',
-          { jobId: job.id, phase: job.phase, placedEmail: job.placedEmail },
-          this.sd.parentCid,
-        );
-        await this.sd.deps.bg
-          .reportStatus(job.id, { status: 'failed', error })
-          .catch(() => undefined);
-        continue;
-      }
-
-      const tuples = await this.expandToTuples(job, ctx);
-      if (tuples.length === 0) {
-        // Buy phase reclaim where every account already finished on a
-        // prior instance — purchases are reported, but the parent job
-        // is still `claimed`. Roll the parent forward via a no-op
-        // `awaiting_verification` report so BG can transition it (BG
-        // de-dupes purchases by amazonEmail; an empty purchases list
-        // just moves the parent state).
-        logger.info(
-          'scheduler.expand.empty',
-          { jobId: job.id, phase: job.phase },
-          this.sd.parentCid,
-        );
-        await this.sd.deps.bg
-          .reportStatus(job.id, {
-            status: 'awaiting_verification',
-            placedAt: null,
-            placedQuantity: null,
-            placedPrice: null,
-            placedCashbackPct: null,
-            placedOrderId: null,
-            placedEmail: null,
-            purchases: [],
-          })
-          .catch(() => undefined);
-        continue;
-      }
-
-      const bundle = this.createBundle(job.id, tuples.length, ctx.fillerByEmail);
-      this.bundles.set(job.id, bundle);
-      this.readyQueue.push(...tuples);
+      await Promise.all(claimed.map((job) => this.processClaimedJob(job)));
     }
+  }
+
+  /** Resolve + expand + push for one claimed job. Called concurrently
+   *  by the producer's parallel-claim loop. Side effects (bundles.set,
+   *  readyQueue.push) are single-threaded JS event-loop ops so
+   *  concurrent invocations don't race. Each branch reports the
+   *  appropriate BG status on failure so jobs don't sit stuck in
+   *  `claimed` state until the 10-min stale-claim recovery. */
+  private async processClaimedJob(job: AutoGJob): Promise<void> {
+    const ctx = await this.sd.resolveJobContext(job).catch(() => null);
+    if (!ctx) {
+      logger.warn(
+        'scheduler.resolve.error',
+        { jobId: job.id, phase: job.phase },
+        this.sd.parentCid,
+      );
+      await this.sd.deps.bg
+        .reportStatus(job.id, {
+          status: 'failed',
+          error: 'failed to resolve job context',
+        })
+        .catch(() => undefined);
+      return;
+    }
+    if (ctx.eligible.length === 0) {
+      let error: string;
+      if (job.phase === 'buy') {
+        error = 'no enabled Amazon accounts available for this buy';
+      } else if (ctx.emptyReason === 'disabled') {
+        // Signed in but account is disabled in AmazonG. Distinct
+        // from "not signed in" so BG's dashboard can render a
+        // separate "🚫 Disabled" pill.
+        error = `target account ${job.placedEmail ?? '(none)'} is disabled in AmazonG`;
+      } else {
+        error = `target account ${job.placedEmail ?? '(none)'} not signed in`;
+      }
+      logger.warn(
+        'scheduler.eligible.empty',
+        { jobId: job.id, phase: job.phase, placedEmail: job.placedEmail },
+        this.sd.parentCid,
+      );
+      await this.sd.deps.bg
+        .reportStatus(job.id, { status: 'failed', error })
+        .catch(() => undefined);
+      return;
+    }
+
+    const tuples = await this.expandToTuples(job, ctx);
+    if (tuples.length === 0) {
+      // Buy phase reclaim where every account already finished on a
+      // prior instance — purchases are reported, but the parent job
+      // is still `claimed`. Roll the parent forward via a no-op
+      // `awaiting_verification` report so BG can transition it (BG
+      // de-dupes purchases by amazonEmail; an empty purchases list
+      // just moves the parent state).
+      logger.info(
+        'scheduler.expand.empty',
+        { jobId: job.id, phase: job.phase },
+        this.sd.parentCid,
+      );
+      await this.sd.deps.bg
+        .reportStatus(job.id, {
+          status: 'awaiting_verification',
+          placedAt: null,
+          placedQuantity: null,
+          placedPrice: null,
+          placedCashbackPct: null,
+          placedOrderId: null,
+          placedEmail: null,
+          purchases: [],
+        })
+        .catch(() => undefined);
+      return;
+    }
+
+    const bundle = this.createBundle(job.id, tuples.length, ctx.fillerByEmail);
+    this.bundles.set(job.id, bundle);
+    this.readyQueue.push(...tuples);
   }
 
   /** Build tuples from a claimed job. For reclaimed jobs (attempts > 1
