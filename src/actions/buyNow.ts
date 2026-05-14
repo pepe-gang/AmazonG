@@ -87,6 +87,13 @@ async function captureDebugShot(
  * are hard to reproduce). Same best-effort contract — returns null if
  * debugDir is unset or either capture fails. Tag is timestamp-prefixed
  * so multiple captures per attempt don't overwrite.
+ *
+ * DEV-MODE ONLY. Gated on `process.env.NODE_ENV !== 'production'`
+ * (electron-vite sets NODE_ENV=development under `npm run dev`,
+ * packaged builds run as production). The lighter captureDebugShot
+ * (PNG only) stays always-on for real-user diagnostics; this heavier
+ * HTML-capture path is purely for the developer's batch diagnostic
+ * runs.
  */
 async function captureDebugSnapshot(
   page: Page,
@@ -94,6 +101,7 @@ async function captureDebugSnapshot(
   tag: string,
 ): Promise<{ pngPath: string; htmlPath: string } | null> {
   if (!debugDir) return null;
+  if (process.env.NODE_ENV === 'production') return null;
   try {
     await mkdir(debugDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -563,6 +571,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         });
         await page.waitForTimeout(1_000);
       },
+      debugDir: opts.debugDir,
     });
     if (!confirmWait.ok) {
       // Capture what's on screen — often Amazon stalled the redirect or
@@ -2168,6 +2177,11 @@ export async function waitForConfirmationOrPending(
     onDeliveryOptionsChanged?: () => Promise<void>;
     /** Hard cap on delivery-options-changed recoveries per call. */
     maxDeliveryRecoveryAttempts?: number;
+    /** Dev-only HTML+PNG capture on the 60s confirmation timeout. The
+     *  function already emits a `confirmation.timeout.diag` log line
+     *  with url+title+h1s+h2s; this adds a saved DOM snapshot for
+     *  offline analysis. Plumbed from BuyOptions.debugDir. */
+    debugDir?: string;
   } = {},
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const deadline = Date.now() + 60_000;
@@ -2460,6 +2474,30 @@ export async function waitForConfirmationOrPending(
     }))
     .catch(() => ({ url: '', title: '', h1s: [], h2s: [] }));
   step('step.buy.place.confirmation.timeout.diag', diag);
+  // Dev-only HTML + PNG capture (gated inside captureDebugSnapshot
+  // on NODE_ENV). Lets the developer collect data across a batch
+  // of jobs without having to reproduce each one interactively.
+  // Run a probe alongside the existing url+title+h1+h2 logging so
+  // the JSON log line also tells us if known landmarks (place order
+  // button, BYG continue, /errors/500 marker, delivery-options-
+  // changed banner) are present on the page that timed out.
+  const probe = await probePageDiag(page, {
+    placeOrderInput: 'input[name="placeYourOrder1"]',
+    placeOrderById: '#submitOrderButtonId',
+    pendingOrderText: 'body',
+    errors500Marker: 'h1, h2',
+    deliveryOptionsChangedBanner: '[id*="delivery-options-changed" i], [class*="delivery-options-changed" i]',
+    bygContinueButton: 'input[name="proceedToRetailCheckout"]',
+  });
+  const snap = await captureDebugSnapshot(
+    page,
+    opts.debugDir,
+    'confirm-url-never-loaded',
+  );
+  step('step.buy.place.confirmation.timeout.capture', {
+    selectors: probe.selectors,
+    ...(snap ? { htmlPath: snap.htmlPath, pngPath: snap.pngPath } : {}),
+  });
   return { ok: false, reason: 'confirmation URL never loaded' };
 }
 
