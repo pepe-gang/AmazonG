@@ -187,6 +187,11 @@ type BuyWithFillersOptions = {
    * can't be safely auto-retried.
    */
   onStage?: (stage: 'placing' | null) => void | Promise<void>;
+  /** Optional debug-snapshot directory. Plumbed through to inner
+   *  helpers (notably toggleBGNameAndRetry) so DOM-drift failures can
+   *  dump HTML + screenshot + selector probes to disk for offline
+   *  inspection. */
+  debugDir?: string;
 };
 
 /**
@@ -1301,6 +1306,7 @@ export async function buyWithFillers(
           step: (m, d) => logger.info(m, d, cid),
           warn: (m, d) => logger.warn(m, d, cid),
         },
+        opts.debugDir,
       );
       if (!toggled.ok) {
         return {

@@ -688,6 +688,10 @@ async function runFillerBuyWithRetries(
       // inline when this is on. See BuyWithFillersOptions.surgicalCashbackRecovery.
       surgicalCashbackRecovery,
       onStage,
+      // Plumb the worker's debugDir so inner helpers like
+      // toggleBGNameAndRetry can dump HTML + screenshot + selector
+      // probes on DOM-drift failures.
+      debugDir: deps.debugDir,
     });
     if (lastRaw.ok) {
       if (attempt > 1) {

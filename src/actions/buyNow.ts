@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { JSDOM } from 'jsdom';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../shared/logger.js';
 import {
@@ -78,6 +78,84 @@ async function captureDebugShot(
   } catch {
     return null;
   }
+}
+
+/**
+ * Like captureDebugShot but ALSO drops a full HTML snapshot alongside
+ * the PNG. Use at points where we want both visual context (screenshot)
+ * AND the actual DOM for offline analysis (e.g., DOM-drift bugs that
+ * are hard to reproduce). Same best-effort contract — returns null if
+ * debugDir is unset or either capture fails. Tag is timestamp-prefixed
+ * so multiple captures per attempt don't overwrite.
+ */
+async function captureDebugSnapshot(
+  page: Page,
+  debugDir: string | undefined,
+  tag: string,
+): Promise<{ pngPath: string; htmlPath: string } | null> {
+  if (!debugDir) return null;
+  try {
+    await mkdir(debugDir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const pngPath = join(debugDir, `${ts}_${tag}.png`);
+    const htmlPath = join(debugDir, `${ts}_${tag}.html`);
+    await Promise.all([
+      page.screenshot({ path: pngPath, fullPage: true }).catch(() => undefined),
+      page
+        .content()
+        .then((html) => writeFile(htmlPath, html, 'utf8'))
+        .catch(() => undefined),
+    ]);
+    return { pngPath, htmlPath };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * In-page probe that gathers diagnostic context for a failure point.
+ * Given a map of named selectors, returns counts and a small text
+ * sample for each — useful when an expected selector misses and we
+ * want to know what the page DOES contain. Always-on (single
+ * page.evaluate, cheap) so the failure log carries enough context to
+ * narrow DOM drift without a follow-up reproduction.
+ *
+ * Returns an empty object on evaluate failure — never throws.
+ */
+async function probePageDiag(
+  page: Page,
+  selectors: Record<string, string>,
+): Promise<{
+  url: string;
+  title: string;
+  selectors: Record<string, { count: number; sample: string | null }>;
+}> {
+  return page
+    .evaluate((sels) => {
+      const out: Record<string, { count: number; sample: string | null }> = {};
+      for (const [name, sel] of Object.entries(sels)) {
+        try {
+          const els = document.querySelectorAll(sel);
+          const first = els[0] as HTMLElement | undefined;
+          const text = first
+            ? (first.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
+            : '';
+          const href = first?.getAttribute('href') ?? '';
+          const sample = first
+            ? `${first.tagName}${href ? ' href=' + href.slice(0, 80) : ''}${text ? ' "' + text + '"' : ''}`.slice(0, 200)
+            : null;
+          out[name] = { count: els.length, sample };
+        } catch {
+          out[name] = { count: 0, sample: null };
+        }
+      }
+      return {
+        url: location.href,
+        title: document.title.slice(0, 120),
+        selectors: out,
+      };
+    }, selectors)
+    .catch(() => ({ url: '', title: '', selectors: {} }));
 }
 
 type StepEmitter = (message: string, data?: Record<string, unknown>) => void;
@@ -397,10 +475,12 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       // need to verify). The ONLY thing dry-run skips is the final Place
       // Order click. Saved-address mutations are intentional.
       warn('step.buy.cashback.retry', { via: 'bg-name-toggle' });
-      const toggled = await toggleBGNameAndRetry(page, opts.allowedAddressPrefixes, {
-        step,
-        warn,
-      });
+      const toggled = await toggleBGNameAndRetry(
+        page,
+        opts.allowedAddressPrefixes,
+        { step, warn },
+        opts.debugDir,
+      );
       if (!toggled.ok) {
         return fail('cashback_gate', toggled.reason, toggled.detail);
       }
@@ -1804,6 +1884,10 @@ export async function toggleBGNameAndRetry(
   page: Page,
   allowedPrefixes: string[],
   emit: { step: StepEmitter; warn: StepEmitter },
+  /** Optional debug-snapshot directory. When provided, failure
+   *  branches dump HTML + screenshot + selector probe to disk so
+   *  DOM-drift bugs can be inspected offline. Best-effort. */
+  debugDir?: string,
 ): Promise<ToggleResult> {
   if (allowedPrefixes.length === 0) {
     return { ok: false, reason: 'no allowed prefixes configured — cannot locate address to edit' };
@@ -1822,7 +1906,35 @@ export async function toggleBGNameAndRetry(
     })
     .catch(() => false);
   if (!reopened) {
-    return { ok: false, reason: "couldn't reopen address picker for name toggle" };
+    // The "Change" link wasn't on the page. This typically means we're
+    // not actually on /spc (Amazon redirected us — most often to
+    // /errors/500 after the cashback radio click — see commit 00e7d94
+    // for the force:true mitigation). Probe what IS on the page and
+    // dump HTML so we can confirm the root cause without re-running
+    // the buy.
+    const diag = await probePageDiag(page, {
+      expandPanelAddress: 'a.expand-panel-button[href*="/address"]',
+      changeDeliveryLink: '#change-delivery-link',
+      anyAddressLink: 'a[href*="/address"]',
+      anyChangeButton: 'a.expand-panel-button',
+      bodyTextSnippet: 'body',
+    });
+    const snap = await captureDebugSnapshot(
+      page,
+      debugDir,
+      'name-toggle-reopen-fail',
+    );
+    emit.warn('step.checkout.cashback.name-toggle.reopen-fail', {
+      url: diag.url,
+      title: diag.title,
+      selectors: diag.selectors,
+      ...(snap ? { htmlPath: snap.htmlPath, pngPath: snap.pngPath } : {}),
+    });
+    return {
+      ok: false,
+      reason: "couldn't reopen address picker for name toggle",
+      detail: `url=${diag.url}; title=${diag.title}; selectors=${JSON.stringify(diag.selectors)}`,
+    };
   }
   try {
     await page.waitForURL(/\/checkout\/p\/[^/]+\/address/i, { timeout: 15_000 });
