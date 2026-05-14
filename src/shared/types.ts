@@ -29,6 +29,12 @@ export type AutoGJob = {
    *  skips its 6%-CB check at /spc time for this specific job, regardless
    *  of the per-account `requireMinCashback` setting. Default true. */
   requireMinCashback: boolean;
+  /** Per-job override for the checkout price-cap gate. When true, the
+   *  worker skips `verifyCheckoutPrice` at /spc and proceeds straight to
+   *  Place Order. Set on the BG manual Trigger panel via the "Bypass
+   *  price check" checkbox. Independent of requireMinCashback. Default
+   *  false (safe — enforce the cap). */
+  bypassPriceCheck: boolean;
 };
 
 export type ProductCondition = 'new' | 'used' | 'renewed';

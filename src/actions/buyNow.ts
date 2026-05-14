@@ -24,6 +24,10 @@ type BuyOptions = {
    *  is skipped entirely and a missing on-page reading defaults to
    *  DEFAULT_MISSING_CASHBACK_PCT (5%). See shared/cashbackGate.ts. */
   requireMinCashback: boolean;
+  /** Per-job override that skips the `verifyCheckoutPrice` gate at /spc.
+   *  Set on the BG manual Trigger panel as "Bypass price check". Default
+   *  false (enforce the cap). Independent of requireMinCashback. */
+  bypassPriceCheck?: boolean;
   maxPrice: number | null;
   allowedAddressPrefixes: string[];
   correlationId?: string;
@@ -412,7 +416,17 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
 
     // 4. Checkout[0]: re-verify item price on /spc (catches taxes/shipping
     //    that push the total past the retail cap).
-    if (opts.maxPrice !== null) {
+    //
+    // Bypass: when the BG manual Trigger panel sets `bypassPriceCheck`,
+    // skip the gate entirely. The user has already accepted that this
+    // specific job may pay over cap, so we proceed to Place Order. The
+    // bypass is logged so downstream forensics can spot it.
+    if (opts.maxPrice !== null && opts.bypassPriceCheck === true) {
+      step('step.checkout.price.bypass', {
+        max: opts.maxPrice,
+        reason: 'user_opt_in',
+      });
+    } else if (opts.maxPrice !== null) {
       const priceCheck = await verifyCheckoutPrice(page, opts.maxPrice);
       if (!priceCheck.ok) {
         warn('step.checkout.price.fail', {

@@ -80,6 +80,14 @@ type BuyWithFillersOptions = {
    */
   requireMinCashback: boolean;
   /**
+   * Per-job override: when true, skip the target-row price-cap check
+   * at /spc. The target-existence check still fires (we still refuse
+   * to place without the target in cart), but `maxPrice` is treated
+   * as POSITIVE_INFINITY for the cap comparison. Surfaced on the BG
+   * Trigger panel as "Bypass price check". Default false.
+   */
+  bypassPriceCheck?: boolean;
+  /**
    * When true, stop immediately before the final "Place Order" click.
    * All other mutations (cart edits, address swap, BG name toggle) still
    * run — they're intentional — but we skip the one irreversible step
@@ -1083,11 +1091,27 @@ export async function buyWithFillers(
   //    set we pass Number.POSITIVE_INFINITY so the existence check
   //    still fires but the price comparison can't fail.
   if (targetAsin) {
+    // Bypass: when the user opted in on the BG Trigger panel, neutralize
+    // the cap so the target-existence guard still fires but the price
+    // comparison can't fail. We don't skip the call entirely — we still
+    // need the "is target in cart" hard guard, which is the more
+    // important half of this check.
+    const capForVerify =
+      opts.bypassPriceCheck === true
+        ? Number.POSITIVE_INFINITY
+        : opts.maxPrice ?? Number.POSITIVE_INFINITY;
+    if (opts.bypassPriceCheck === true && opts.maxPrice !== null) {
+      logger.info(
+        'step.fillerBuy.spc.price.bypass',
+        { targetAsin, max: opts.maxPrice, reason: 'user_opt_in' },
+        cid,
+      );
+    }
     const priceCheck = await verifyTargetLineItemPrice(
       page,
       targetAsin,
       info.title,
-      opts.maxPrice ?? Number.POSITIVE_INFINITY,
+      capForVerify,
     );
     if (!priceCheck.ok) {
       // Split the failure into target-missing vs price-exceeds because
