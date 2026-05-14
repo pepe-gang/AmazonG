@@ -2483,7 +2483,21 @@ export async function runForProfile(
       }
     }
 
-    const constraints = { ...DEFAULT_CONSTRAINTS, maxPrice: job.maxPrice };
+    // Bypass: PDP-level price gate runs before /spc. If the user opted
+    // into "Bypass price check" on the BG Trigger panel, null out the
+    // cap here so verifyProductDetailed skips the price step entirely
+    // — otherwise we'd fail with `price_too_high` long before reaching
+    // the /spc gates that already honor the flag.
+    const effectiveMaxPrice =
+      job.bypassPriceCheck === true ? null : job.maxPrice;
+    if (job.bypassPriceCheck === true && job.maxPrice !== null) {
+      logger.info(
+        'step.verify.price.bypass',
+        { jobId: job.id, profile, cap: job.maxPrice, reason: 'user_opt_in' },
+        cid,
+      );
+    }
+    const constraints = { ...DEFAULT_CONSTRAINTS, maxPrice: effectiveMaxPrice };
     const enabledChecks = [
       ...(constraints.requireInStock ? ['inStock'] : []),
       ...(constraints.maxPrice !== null ? ['price'] : []),

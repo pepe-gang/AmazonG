@@ -538,7 +538,22 @@ export async function buyWithFillers(
   } else {
     info = await scrapeProduct(page, opts.productUrl);
   }
-  const constraints = { ...DEFAULT_CONSTRAINTS, maxPrice: opts.maxPrice };
+  // Bypass: PDP-level price gate runs before /spc. Mirror the worker's
+  // outer PDP-verify in pollAndScrape — when the user opted in, null
+  // out the cap so verifyProductDetailed skips the price step.
+  const fillerEffectiveMaxPrice =
+    opts.bypassPriceCheck === true ? null : opts.maxPrice;
+  if (opts.bypassPriceCheck === true && opts.maxPrice !== null) {
+    logger.info(
+      'step.fillerBuy.verify.price.bypass',
+      { cap: opts.maxPrice, reason: 'user_opt_in' },
+      cid,
+    );
+  }
+  const constraints = {
+    ...DEFAULT_CONSTRAINTS,
+    maxPrice: fillerEffectiveMaxPrice,
+  };
   const report = verifyProductDetailed(info, constraints);
   if (!report.ok) {
     const reason = (report.reason ?? 'verification failed').trim();
