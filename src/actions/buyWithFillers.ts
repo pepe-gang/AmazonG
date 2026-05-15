@@ -767,6 +767,38 @@ export async function buyWithFillers(
     }
     const inCart = await hasTargetInCart(page, targetAsin);
     if (!inCart) {
+      // Always-on probe + dev-only HTML snapshot. We landed on
+      // amazon.com but `hasTargetInCart` couldn't find the target —
+      // could be Amazon dropped the item silently (oos, region-block,
+      // qty cap), redirected us to a checkout/spc step, or showed a
+      // captcha/signin wall. The probe counts cover all of these.
+      const probe = await probePageDiag(page, {
+        active_cart: '[data-name="Active Cart"]',
+        target_href: `a[href*="/dp/${targetAsin ?? '__none__'}"]`,
+        cart_count: '#nav-cart-count, .nav-cart-count',
+        empty_cart_heading: '#sc-active-cart h2, .sc-cart-page-message',
+        signin_form: 'form#ap_signin_form, input#ap_email',
+        captcha: 'form[action*="validateCaptcha"], #captchacharacters',
+        spc_marker: 'input[name="placeYourOrder1"]',
+        page_headings: 'h1, h2',
+      }).catch(() => null);
+      logger.warn(
+        'step.fillerBuy.cart.targetMissing.probe',
+        { targetAsin, url: page.url(), probe },
+        cid,
+      );
+      const snap = await captureDebugSnapshot(
+        page,
+        opts.debugDir,
+        'target_not_in_cart',
+      );
+      if (snap) {
+        logger.info(
+          'step.fillerBuy.cart.targetMissing.snapshot',
+          { png: snap.pngPath, html: snap.htmlPath },
+          cid,
+        );
+      }
       return {
         ok: false,
         stage: 'cart_verify',
