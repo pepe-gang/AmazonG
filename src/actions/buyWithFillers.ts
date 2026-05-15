@@ -3659,7 +3659,48 @@ async function verifyTargetLineItemPrice(
           (target.querySelector('.a-color-price') as HTMLElement | null) ??
           (target.querySelector('.a-price') as HTMLElement | null);
         const text = priceEl ? (priceEl.textContent ?? '').trim() : '';
-        return { found: true as const, text };
+
+        // Read the qty from the same line-item container. The /spc page
+        // shows the LINE TOTAL (qty × unit) in the price element for
+        // qty>1, so without dividing we'd falsely fail the cap (e.g.
+        // Echo Dot at $39.99 unit × qty 2 = $79.98 displayed > $39.99
+        // cap). Mirrors readTargetQuantity's three strategies.
+        const parseNum = (s: string | null | undefined): number | null => {
+          if (!s) return null;
+          const m = s.match(/\b(\d{1,3})\b/);
+          if (!m) return null;
+          const v = parseInt(m[1] as string, 10);
+          return Number.isFinite(v) && v > 0 && v < 1000 ? v : null;
+        };
+        let qty: number | null = null;
+        const dd = target.querySelector<HTMLElement>(
+          '.a-dropdown-prompt, .dropdown_selectedTOption',
+        );
+        qty = parseNum(dd?.innerText ?? dd?.textContent ?? null);
+        if (qty === null) {
+          const input = target.querySelector<HTMLInputElement>(
+            'input[name="quantity"], input[name*="quantity" i]',
+          );
+          if (input && input.value) qty = parseNum(input.value);
+        }
+        if (qty === null) {
+          const stepper = target.querySelector<HTMLElement>(
+            '[aria-label*="Increase" i], [aria-label*="Decrease" i], [aria-label*="Quantity" i]',
+          );
+          if (stepper) {
+            const scope =
+              stepper.closest(
+                '.a-button-stack, .a-quantity, [data-csa-c-content-id*="quantity" i], span, div',
+              ) ?? stepper.parentElement;
+            if (scope) {
+              qty = parseNum(
+                (scope as HTMLElement).innerText ?? scope.textContent ?? null,
+              );
+            }
+          }
+        }
+
+        return { found: true as const, text, qty };
       },
       { asin: targetAsin, title: titlePrefix },
     )
@@ -3678,25 +3719,33 @@ async function verifyTargetLineItemPrice(
     };
   }
 
-  const n = parsePrice(hit.text);
-  if (n === null || n <= 0) {
+  const linePrice = parsePrice(hit.text);
+  if (linePrice === null || linePrice <= 0) {
     return {
       ok: false,
       reason: `could not parse target price from "${hit.text}"`,
     };
   }
+  // /spc shows the line total = unit × qty. Divide by the qty we
+  // read from the same line container so we compare like-for-like
+  // against the per-unit cap from BG. qty=null (parse miss) falls
+  // back to 1 — matches pre-fix behavior so single-qty deals are
+  // unaffected even if the qty reader regresses on a future layout.
+  const lineQty = hit.qty && hit.qty > 0 ? hit.qty : 1;
+  const unitPrice = linePrice / lineQty;
   const tol = effectivePriceTolerance(cap);
-  if (n > cap + tol) {
+  if (unitPrice > cap + tol) {
+    const qtySuffix = lineQty > 1 ? ` (line total $${linePrice.toFixed(2)} ÷ qty ${lineQty})` : '';
     return {
       ok: false,
       reason:
         tol > 0
-          ? `target price $${n.toFixed(2)} exceeds cap $${cap.toFixed(2)} (+$${tol.toFixed(2)} tolerance)`
-          : `target price $${n.toFixed(2)} exceeds cap $${cap.toFixed(2)}`,
+          ? `target price $${unitPrice.toFixed(2)} exceeds cap $${cap.toFixed(2)} (+$${tol.toFixed(2)} tolerance)${qtySuffix}`
+          : `target price $${unitPrice.toFixed(2)} exceeds cap $${cap.toFixed(2)}${qtySuffix}`,
       detail: hit.text,
     };
   }
-  return { ok: true, priceText: hit.text, price: n };
+  return { ok: true, priceText: hit.text, price: unitPrice };
 }
 
 /**
