@@ -41,6 +41,7 @@ import {
   updateProfile,
   upsertProfile,
 } from './profiles.js';
+import { addCard, getCardNumberByLast4, listCards, removeCard } from './cardVault.js';
 import {
   createChaseProfile,
   loadChaseProfiles,
@@ -77,7 +78,7 @@ import { openSession } from '../browser/driver.js';
 import { snapshotDir, snapshotsDiskUsage, clearAllSnapshots } from '../browser/snapshot.js';
 import { compareSemver } from '../shared/version.js';
 import { isLoggedInAmazon, loginAmazon } from '../actions/loginAmazon.js';
-import type { AmazonProfile, IdentityInfo, RendererStatus } from '../shared/types.js';
+import type { AmazonProfile, CreditCardSafe, IdentityInfo, RendererStatus } from '../shared/types.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -978,6 +979,11 @@ async function startWorkerNow(): Promise<void> {
     // profile. Reusing the existing context avoids that lock entirely.
     findExistingSession: (email) =>
       openOrderSessions.get(email)?.session ?? null,
+    // Auto-handle Amazon's "Verify your card" challenge: look up the
+    // full card number from the encrypted local vault by its last 4.
+    // Returns null when no card matches → worker falls back to the
+    // legacy action_required fail.
+    resolveCardNumber: (last4: string) => getCardNumberByLast4(last4),
     jobAttempts: {
       async create(partial) {
         const a = await storeCreateAttempt(partial);
@@ -3042,6 +3048,26 @@ function registerIpcHandlers(): void {
       const list = await updateProfile(email, { bgAddress: address });
       await broadcastProfiles();
       return list;
+    },
+  );
+
+  ipcMain.handle(IPC.cardsList, async (): Promise<CreditCardSafe[]> => {
+    return listCards();
+  });
+
+  ipcMain.handle(
+    IPC.cardsAdd,
+    async (_e, rawNumber: string, label: string): Promise<CreditCardSafe[]> => {
+      // addCard validates + encrypts; it throws on a bad number, which
+      // ipcMain.handle surfaces to the renderer as a rejected invoke.
+      return addCard(rawNumber, label);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.cardsRemove,
+    async (_e, id: string): Promise<CreditCardSafe[]> => {
+      return removeCard(id);
     },
   );
 
