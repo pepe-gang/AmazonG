@@ -359,6 +359,15 @@ async function runVerifyFillerCleanup(
   fillerOrdersFailed: string[];
   targetOrderCleaned: boolean;
   targetCleanError: string | null;
+  /**
+   * True when cancelNonTargetItems returned
+   * `code: 'target_absent_from_cancel_page'` on any attempt — i.e. the
+   * cancel page renders sibling items but not the target's checkbox.
+   * Combined with `outcome.kind === 'active'` upstream, this is the
+   * canonical signal that the target was cancelled while sibling
+   * fillers remain alive (BG flips status to `target_cancelled`).
+   */
+  targetAbsentFromCancelPage: boolean;
 }> {
   // 2× retry budget per verify pass (was 3). Combined with the
   // "Attempting to cancel" success-detector fix in cancelForm.ts:
@@ -378,6 +387,7 @@ async function runVerifyFillerCleanup(
   // 2. Clean the target order — cancel everything except the target.
   let targetOrderCleaned = false;
   let targetCleanError: string | null = null;
+  let targetAbsentFromCancelPage = false;
   for (let tryN = 1; tryN <= MAX_TRIES; tryN++) {
     const r = await cancelNonTargetItems(page, targetOrderId, target, {
       correlationId: cid,
@@ -392,9 +402,14 @@ async function runVerifyFillerCleanup(
       break;
     }
     targetCleanError = r.reason;
+    // Surface the structured "target absent from cancel page" signal
+    // to the caller — see runVerifyFillerCleanup's return-type comment.
+    if (r.code === 'target_absent_from_cancel_page') {
+      targetAbsentFromCancelPage = true;
+    }
     logger.warn(
       'job.verify.filler.targetClean.attempt',
-      { orderId: targetOrderId, attempt: tryN, reason: r.reason, detail: r.detail },
+      { orderId: targetOrderId, attempt: tryN, reason: r.reason, detail: r.detail, code: r.code ?? null },
       cid,
     );
     // "only target cancellable" is a terminal state, but unlike the
@@ -413,6 +428,7 @@ async function runVerifyFillerCleanup(
     fillerOrdersFailed,
     targetOrderCleaned,
     targetCleanError,
+    targetAbsentFromCancelPage,
   };
 }
 
@@ -1278,6 +1294,13 @@ async function handleVerifyJob(
                 targetOrderCleanupOutcome: {
                   cleaned: verifyFillerCleanup.targetOrderCleaned,
                   error: verifyFillerCleanup.targetCleanError,
+                  // True when the target's checkbox was missing from
+                  // the cancel page. Combined with this branch (which
+                  // only fires on outcome.kind === 'active') it tells
+                  // BG: order is alive, but the target item inside it
+                  // was cancelled — flip status to target_cancelled.
+                  targetCancelledInsideActiveOrder:
+                    verifyFillerCleanup.targetAbsentFromCancelPage,
                 },
               }
             : {}),

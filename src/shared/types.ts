@@ -234,6 +234,22 @@ export type JobStatusReport = {
   targetOrderCleanupOutcome?: {
     cleaned: boolean;
     error: string | null;
+    /**
+     * True when cancelNonTargetItems reported
+     * `code: 'target_absent_from_cancel_page'` — the cancel page
+     * surfaces sibling items but NOT the target's checkbox. This is
+     * the canonical signal that the target was cancelled (by Amazon
+     * or the user) while fillers in the same order are still active.
+     *
+     * BG flips purchase.status to `target_cancelled` when this is
+     * true, so the dashboard can stop showing the row as a successful
+     * buy and instead surface the "fillers will ship without the
+     * target" outcome for manual follow-up.
+     *
+     * Only sent when cleanup ran on a still-active target order;
+     * false on the normal "fillers stuck inside target" path.
+     */
+    targetCancelledInsideActiveOrder?: boolean;
   };
   purchases?: {
     amazonEmail: string;

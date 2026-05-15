@@ -12,7 +12,20 @@ import {
 
 export type CancelNonTargetResult =
   | { ok: true; cancelled: number; kept: number }
-  | { ok: false; reason: string; detail?: string };
+  | {
+      ok: false;
+      reason: string;
+      detail?: string;
+      /**
+       * Machine-readable classification for the failure. Currently only
+       * `'target_absent_from_cancel_page'` is set — fires when the
+       * cancel page doesn't surface the target's checkbox at all,
+       * which is the canonical signal that the target item has been
+       * cancelled (by Amazon or by the user) while sibling fillers in
+       * the same order are still active. Unset on other failures.
+       */
+      code?: 'target_absent_from_cancel_page';
+    };
 
 /**
  * Cancel every item in a pre-ship order EXCEPT the target (which we
@@ -148,6 +161,7 @@ export async function cancelNonTargetItems(
       ok: false,
       reason: 'could not identify target item on cancel page — aborting to avoid cancelling target',
       detail: `asin=${target.asin}, title=${titlePrefix ?? '(null)'}`,
+      code: 'target_absent_from_cancel_page',
     };
   }
 
@@ -169,6 +183,7 @@ export async function cancelNonTargetItems(
       ok: false,
       reason: 'could not identify target item on cancel page — aborting to avoid cancelling target',
       detail: `cancelled(prospective)=${counts.cancelled}, kept=0, asin=${target.asin}, title=${titlePrefix ?? '(null)'}`,
+      code: 'target_absent_from_cancel_page',
     };
   }
 
