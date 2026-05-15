@@ -108,7 +108,7 @@ async function captureDebugShot(
  * HTML-capture path is purely for the developer's batch diagnostic
  * runs.
  */
-async function captureDebugSnapshot(
+export async function captureDebugSnapshot(
   page: Page,
   debugDir: string | undefined,
   tag: string,
@@ -143,7 +143,7 @@ async function captureDebugSnapshot(
  *
  * Returns an empty object on evaluate failure — never throws.
  */
-async function probePageDiag(
+export async function probePageDiag(
   page: Page,
   selectors: Record<string, string>,
 ): Promise<{

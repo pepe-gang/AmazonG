@@ -11,9 +11,11 @@ import { clearCart, removeCartItemsByAsin, type ClearCartResult } from './clearC
 import { appendResearchEvent } from '../shared/researchLog.js';
 import { scrapeProduct } from './scrapeProduct.js';
 import {
+  captureDebugSnapshot,
   ensureAddress,
   findPlaceOrderLocator,
   pickBestCashbackDelivery,
+  probePageDiag,
   setMaxQuantity,
   toggleBGNameAndRetry,
   waitForCheckout,
@@ -999,6 +1001,41 @@ export async function buyWithFillers(
     }
     const clicked = await clickProceedToCheckout(page);
     if (!clicked) {
+      // Always-on probe: when our three known PTC selectors all miss
+      // (8s timeout each, ~24s total), we have no idea what the cart
+      // page actually shows. Probe a handful of likely candidates so
+      // the failure log carries enough signal to narrow DOM drift
+      // without needing a captured HTML snapshot.
+      const probe = await probePageDiag(page, {
+        ptc_input_name: 'input[name="proceedToRetailCheckout"]',
+        ptc_buy_box: '#sc-buy-box-ptc-button',
+        ptc_buy_box_input: '#sc-buy-box-ptc-button input',
+        ptc_alt_buy_now: 'input[name="proceedToCheckout"]',
+        active_cart: '[data-name="Active Cart"]',
+        empty_cart_heading: '#sc-active-cart h2, .sc-cart-page-message',
+        signin_form: 'form#ap_signin_form, input#ap_email',
+        captcha: 'form[action*="validateCaptcha"], #captchacharacters',
+      }).catch(() => null);
+      logger.warn(
+        'step.fillerBuy.proceed.fail.probe',
+        { url: page.url(), probe },
+        cid,
+      );
+      // Dev-only HTML + PNG capture (gated inside captureDebugSnapshot
+      // on NODE_ENV). Production users are unaffected. Lets us collect
+      // the actual cart page DOM next time this fires in `npm run dev`.
+      const snap = await captureDebugSnapshot(
+        page,
+        opts.debugDir,
+        'proceed_checkout_fail',
+      );
+      if (snap) {
+        logger.info(
+          'step.fillerBuy.proceed.fail.snapshot',
+          { png: snap.pngPath, html: snap.htmlPath },
+          cid,
+        );
+      }
       return {
         ok: false,
         stage: 'proceed_checkout',
