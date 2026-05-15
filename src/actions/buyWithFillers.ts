@@ -3630,13 +3630,14 @@ async function verifyTargetLineItemPrice(
           );
         }
 
-        // Step 2: testid pin. Chewbacca renders hidden
-        // <span data-testid="Item_asin_N_N_N">ASIN</span> elements,
-        // but they live in the order-summary widget which is NOT
-        // inside any line-item container. attemptToTarget rejects
-        // those automatically (closest returns null), so we never
-        // accept a testid match in that layout — preventing the
-        // wrong-row read this fix is designed to stop.
+        // Step 2: testid pin with container ancestor. Chewbacca
+        // typically renders hidden <span data-testid="Item_asin_N_N_N">ASIN</span>
+        // elements in the order-summary widget — OUTSIDE
+        // .lineitem-container. attemptToTarget rejects those (closest
+        // returns null), so this step only succeeds on layouts where
+        // the testid pin happens to live inside the card itself.
+        // Almost never on current Chewbacca; kept for safety on older
+        // layouts.
         if (!target) {
           const spans = document.querySelectorAll<HTMLElement>(
             '[data-testid^="Item_asin_"]',
@@ -3648,6 +3649,39 @@ async function verifyTargetLineItemPrice(
                 target = t;
                 break;
               }
+            }
+          }
+        }
+
+        // Step 2.5: testid ordinal mapping. When Step 2's container-
+        // ancestor lookup misses because the testid pins live in the
+        // order-summary widget (Chewbacca's default), the DOM order
+        // of the testid spans still matches the DOM order of the
+        // line-item cards (Amazon renders them from the same data,
+        // identical sort). Find the target's index in the testid
+        // list, then return the lineitem-container at the same index.
+        //
+        // Validated against five captured target_missing snapshots
+        // (Echo Dot, MacBook Pro M5, AirPods 4, across 3 accounts):
+        // index mapping picks the correct container in every case.
+        //
+        // Hard guard: only accept the mapping when testidCount ===
+        // lineitemCount. If they differ (e.g., "saved for later" items
+        // contributing a testid without a card, or an inverse case)
+        // we'd risk a wrong-row pick — fall through to Step 3 instead.
+        if (!target) {
+          const spans = Array.from(
+            document.querySelectorAll<HTMLElement>('[data-testid^="Item_asin_"]'),
+          );
+          const cards = Array.from(
+            document.querySelectorAll<HTMLElement>('.lineitem-container'),
+          );
+          if (spans.length > 0 && spans.length === cards.length) {
+            const idx = spans.findIndex(
+              (s) => (s.textContent ?? '').trim() === asin,
+            );
+            if (idx >= 0 && idx < cards.length) {
+              target = cards[idx] ?? null;
             }
           }
         }
