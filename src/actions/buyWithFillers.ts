@@ -1191,6 +1191,40 @@ export async function buyWithFillers(
         { targetAsin, cap: opts.maxPrice, reason: priceCheck.reason },
         cid,
       );
+      // For the target-missing case the /spc HTML is the only way to
+      // tell whether (a) Amazon dropped the item silently, (b) the
+      // title we searched for differs from what's rendered, or (c)
+      // the testids live outside containers and the title walker
+      // didn't find a match. Always-on probe to count what the page
+      // has; dev-only HTML+PNG so we can inspect the DOM offline.
+      if (missing) {
+        const probe = await probePageDiag(page, {
+          lineitem_containers: '.lineitem-container',
+          line_item_feature: '[data-feature-id*="line-item"]',
+          all_testid_spans: '[data-testid^="Item_asin_"]',
+          target_href: `a[href*="/dp/${targetAsin}"]`,
+          empty_cart_heading: '#sc-active-cart h2, .sc-cart-page-message',
+          signin_form: 'form#ap_signin_form, input#ap_email',
+          captcha: 'form[action*="validateCaptcha"], #captchacharacters',
+        }).catch(() => null);
+        logger.warn(
+          'step.fillerBuy.spc.target.missing.probe',
+          { targetAsin, url: page.url(), probe },
+          cid,
+        );
+        const snap = await captureDebugSnapshot(
+          page,
+          opts.debugDir,
+          'target_missing',
+        );
+        if (snap) {
+          logger.info(
+            'step.fillerBuy.spc.target.missing.snapshot',
+            { png: snap.pngPath, html: snap.htmlPath },
+            cid,
+          );
+        }
+      }
       return {
         ok: false,
         stage,
