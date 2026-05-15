@@ -605,6 +605,23 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       if (shotPath) {
         warn('step.buy.confirm.screenshot', { path: shotPath, currentUrl: page.url() });
       }
+      // Always-on probe + dev-only HTML snapshot. Mirrors the other
+      // failure sites — the probe log line tells us which known
+      // landmarks ARE on the timed-out confirmation page (place-order
+      // still visible, error 500, BYG continue, pending-order page).
+      const probe = await probePageDiag(page, {
+        placeOrderInput: 'input[name="placeYourOrder1"]',
+        placeOrderById: '#submitOrderButtonId',
+        thankyouMarker: '#widget-purchase-confirmation, [data-feature-name="thankYou"]',
+        errors500Marker: 'h1, h2',
+        bygContinueButton: 'input[name="proceedToRetailCheckout"]',
+        pendingOrderText: 'body',
+      }).catch(() => null);
+      warn('step.buy.confirm.probe', { url: page.url(), probe });
+      const snap = await captureDebugSnapshot(page, opts.debugDir, 'confirm_parse');
+      if (snap) {
+        step('step.buy.confirm.snapshot', { png: snap.pngPath, html: snap.htmlPath });
+      }
       return fail('confirm_parse', confirmWait.reason);
     }
     await opts.onStage?.(null);
@@ -1323,6 +1340,29 @@ export async function waitForCheckout(
             logger.warn(
               'step.checkout.address.picker.screenshot',
               { path: shotPath, currentUrl: page.url() },
+            );
+          }
+          // Always-on probe + dev-only HTML snapshot. Counts of the
+          // selectors we DO know about so we can spot a new picker
+          // layout without needing to open the screenshot.
+          const probe = await probePageDiag(page, {
+            address_radios: 'input[type="radio"][name*="address" i]',
+            address_radios_any: 'input[type="radio"]',
+            deliver_to_button: 'input[name="shipToThisAddress"]',
+            use_this_address_button: 'input[name="useThisAddress"]',
+            change_link: 'a[href*="/address" i]',
+            saved_address_cards: '[data-testid*="address" i]',
+            address_book_heading: 'h1, h2',
+          }).catch(() => null);
+          logger.warn(
+            'step.checkout.address.picker.probe',
+            { url: page.url(), probe },
+          );
+          const snap = await captureDebugSnapshot(page, debugDir, 'address_picker');
+          if (snap) {
+            logger.info(
+              'step.checkout.address.picker.snapshot',
+              { png: snap.pngPath, html: snap.htmlPath },
             );
           }
           return { ok: false, reason: `address picker: ${pick.reason}` };
