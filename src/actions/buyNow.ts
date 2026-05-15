@@ -59,6 +59,15 @@ type BuyOptions = {
    * existing clearCart sequence.
    */
   preflightCleared?: Promise<ClearCartResult>;
+  /**
+   * Resolver for Amazon's PMTS "Verify your card" checkout challenge.
+   * Given the card's last 4 digits (read from the challenge's
+   * placeholder hint), returns the full card number from AmazonG's
+   * encrypted local vault, or null when no saved card matches. When
+   * supplied, the challenge is auto-handled; when omitted the buy
+   * fails to action_required with reason "Verify your card" (legacy).
+   */
+  resolveCardNumber?: (last4: string) => Promise<string | null>;
 };
 
 /**
@@ -387,6 +396,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
           step('step.buy.spc.delivery_options_changed.repicked', { changes: re.changes });
         },
         targetAsin: dealAsin,
+        resolveCardNumber: opts.resolveCardNumber,
       },
     );
     if (!checkoutPage.ok) {
@@ -848,6 +858,15 @@ export async function waitForCheckout(
      *  the "Make updates to your items" page (live observed
      *  2026-05-11 — no /dp/ links at all on this page variant). */
     targetTitle?: string | null;
+    /** Resolver for the PMTS "Verify your card" challenge: given the
+     *  card's last 4 digits, returns the full number from the encrypted
+     *  local vault (or null when none matches). When supplied, the
+     *  challenge is auto-handled instead of failing to action_required.
+     *  Omitted = legacy behavior (fail with reason "Verify your card"). */
+    resolveCardNumber?: (last4: string) => Promise<string | null>;
+    /** Internal recursion guard — set true after one verify-card
+     *  attempt so a re-challenge can't loop. Callers never pass this. */
+    _verifyCardAttempted?: boolean;
   } = {},
 ): Promise<CheckoutReadyResult> {
   // Poll for either a Place Order button (success — we're on /spc), a
@@ -1472,12 +1491,128 @@ export async function waitForCheckout(
     const html = await page.content();
     const doc = new JSDOM(html).window.document;
     if (isVerifyCardChallenge(doc)) {
+      // Auto-handle when a card resolver is wired AND we haven't
+      // already tried once this call. The resolver looks up the full
+      // card number from the encrypted local vault by the challenge's
+      // "ending in NNNN" hint. On success Amazon re-renders the Place
+      // Order button, so we re-run the wait once (guarded so a
+      // re-challenge can't recurse forever).
+      if (opts.resolveCardNumber && !opts._verifyCardAttempted) {
+        const handled = await handleVerifyCardChallenge(
+          page,
+          opts.resolveCardNumber,
+          emit?.step,
+        );
+        if (handled.ok) {
+          emit?.step?.('step.buy.verifyCard.handled', {});
+          return waitForCheckout(page, allowedAddressPrefixes, debugDir, emit, {
+            ...opts,
+            _verifyCardAttempted: true,
+          });
+        }
+        return { ok: false, reason: `Verify your card — ${handled.reason}` };
+      }
       return { ok: false, reason: 'Verify your card' };
     }
   } catch {
     // ignore — fall through to the generic message
   }
   return { ok: false, reason: 'Place Order button never appeared in 30s' };
+}
+
+/**
+ * Resolve Amazon's PMTS "Verify your card" checkout challenge.
+ *
+ * The challenge renders one input — `name` ending `_addCreditCardNumber`
+ * — with a placeholder like "ending in 5088", plus a "Verify card"
+ * button. We read the last-4 from the placeholder, look up the full
+ * card number via `resolveCardNumber` (encrypted local vault), fill it,
+ * and submit. On success Amazon clears the `.pmts-cc-address-challenge-form`
+ * and re-renders the Place Order button.
+ *
+ * Returns ok:false (with a human reason) when there's no last-4 hint,
+ * no matching saved card, or the number is rejected — the caller then
+ * falls back to the existing `action_required` "Verify your card" path.
+ */
+export async function handleVerifyCardChallenge(
+  page: Page,
+  resolveCardNumber: (last4: string) => Promise<string | null>,
+  step?: StepEmitter,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const numberInput = page.locator('input[name$="_addCreditCardNumber"]').first();
+  const placeholder = await numberInput.getAttribute('placeholder').catch(() => null);
+  // Placeholder reads e.g. "ending in 5088" — pull the trailing 4 digits.
+  const last4 = placeholder?.match(/(\d{4})\s*$/)?.[1] ?? null;
+  if (!last4) {
+    return { ok: false, reason: 'could not read the card last-4 from the challenge' };
+  }
+  const fullNumber = await resolveCardNumber(last4);
+  if (!fullNumber) {
+    step?.('step.buy.verifyCard.noMatch', { last4 });
+    return { ok: false, reason: `no saved card ending in ${last4}` };
+  }
+  step?.('step.buy.verifyCard.filling', { last4 });
+  try {
+    await numberInput.fill(fullNumber, { timeout: 8_000 });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `failed to fill card number: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  // Tag the "Verify card" button, then click it via a real Playwright
+  // locator (force:true — the PMTS form sometimes overlays its own
+  // spinner). Mirrors the continue-button tagging used above.
+  const tagged = await page
+    .evaluate(() => {
+      const form = document.querySelector('.pmts-cc-address-challenge-form');
+      if (!form) return false;
+      const els = Array.from(form.querySelectorAll<HTMLElement>('input, button, span, a'));
+      const hit = els.find((el) => {
+        if (el.offsetParent === null) return false;
+        const label = ((el as HTMLInputElement).value || el.textContent || '').trim();
+        return /^verify card$/i.test(label);
+      });
+      if (!hit) return false;
+      const clickable = (hit.closest('.a-button, button') as HTMLElement | null) ?? hit;
+      clickable.setAttribute('data-amazong-verify-card', '1');
+      return true;
+    })
+    .catch(() => false);
+  if (!tagged) {
+    return { ok: false, reason: 'Verify card button not found' };
+  }
+  try {
+    await page
+      .locator('[data-amazong-verify-card="1"]')
+      .click({ timeout: 8_000, force: true });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `failed to click Verify card: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  // Amazon validates the number server-side then re-renders /spc. Wait
+  // for the challenge wrapper to drop out of the DOM.
+  try {
+    await page
+      .locator('.pmts-cc-address-challenge-form')
+      .first()
+      .waitFor({ state: 'detached', timeout: 20_000 });
+  } catch {
+    const stillThere = await page
+      .locator('.pmts-cc-address-challenge-form')
+      .count()
+      .catch(() => 1);
+    if (stillThere > 0) {
+      return {
+        ok: false,
+        reason: 'challenge still present after Verify card (number rejected?)',
+      };
+    }
+  }
+  step?.('step.buy.verifyCard.cleared', { last4 });
+  return { ok: true };
 }
 
 /**

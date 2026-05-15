@@ -88,6 +88,14 @@ type BuyWithFillersOptions = {
    */
   bypassPriceCheck?: boolean;
   /**
+   * Resolver for Amazon's PMTS "Verify your card" challenge — given a
+   * card's last 4 digits, returns the full number from the encrypted
+   * local vault (or null). Threaded into waitForCheckout so the
+   * filler-buy flow auto-handles the challenge too. Omitted = the buy
+   * fails with reason "Verify your card" (legacy action_required).
+   */
+  resolveCardNumber?: (last4: string) => Promise<string | null>;
+  /**
    * When true, stop immediately before the final "Place Order" click.
    * All other mutations (cart edits, address swap, BG name toggle) still
    * run — they're intentional — but we skip the one irreversible step
@@ -1039,6 +1047,7 @@ export async function buyWithFillers(
       },
       targetAsin,
       targetTitle: info.title,
+      resolveCardNumber: opts.resolveCardNumber,
     },
   );
   // QLA capped the target row: Amazon reduced our request from N to M.

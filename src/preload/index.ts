@@ -59,6 +59,14 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.profilesSetBgAddress, email, address) as ReturnType<
       AutoGBridge['profilesSetBgAddress']
     >,
+  cardsList: () =>
+    ipcRenderer.invoke(IPC.cardsList) as ReturnType<AutoGBridge['cardsList']>,
+  cardsAdd: (rawNumber, label) =>
+    ipcRenderer.invoke(IPC.cardsAdd, rawNumber, label) as ReturnType<
+      AutoGBridge['cardsAdd']
+    >,
+  cardsRemove: (id) =>
+    ipcRenderer.invoke(IPC.cardsRemove, id) as ReturnType<AutoGBridge['cardsRemove']>,
   dealsList: () =>
     ipcRenderer.invoke(IPC.dealsList) as ReturnType<AutoGBridge['dealsList']>,
   dealsTrigger: (dealId) =>

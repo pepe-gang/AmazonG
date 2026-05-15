@@ -742,3 +742,14 @@ export type FetchStatsSummary = {
   totals: { autog: number; cloud: number; total: number; pctAutog: number };
   liveStatus: { online: boolean; lastSeenAt: string | null; ageMs: number | null };
 };
+
+/**
+ * Renderer-safe view of a stored payment card. The full card number
+ * is encrypted at rest in the main process (card-vault.json via OS
+ * keychain) and NEVER crosses IPC — only this view does.
+ */
+export type CreditCardSafe = {
+  id: string;
+  last4: string;
+  label: string;
+};

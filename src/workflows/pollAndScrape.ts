@@ -133,6 +133,15 @@ export type Deps = {
    * Return null when nothing is open for this profile.
    */
   findExistingSession?: (email: string) => DriverSession | null;
+  /**
+   * Resolver for Amazon's PMTS "Verify your card" checkout challenge.
+   * Given a card's last 4 digits it returns the full number from the
+   * encrypted local card vault (main-process only), or null when no
+   * saved card matches. Threaded into buyNow / buyWithFillers so the
+   * challenge is auto-handled instead of failing to action_required.
+   * Optional — when absent the worker keeps the legacy fail behavior.
+   */
+  resolveCardNumber?: (last4: string) => Promise<string | null>;
 };
 
 export type WorkerHandle = {
@@ -685,6 +694,7 @@ async function runFillerBuyWithRetries(
       minCashbackPct,
       requireMinCashback,
       bypassPriceCheck: job.bypassPriceCheck === true,
+      resolveCardNumber: deps.resolveCardNumber,
       dryRun: deps.buyDryRun,
       fillerPool: effectivePool,
       attemptedAsins,
@@ -2643,6 +2653,7 @@ export async function runForProfile(
         minCashbackPct: effectiveMinCashbackPct,
         requireMinCashback,
         bypassPriceCheck: job.bypassPriceCheck === true,
+        resolveCardNumber: deps.resolveCardNumber,
         maxPrice: job.maxPrice,
         allowedAddressPrefixes: deps.allowedAddressPrefixes,
         correlationId: cid,

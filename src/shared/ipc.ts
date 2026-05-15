@@ -6,6 +6,7 @@ import type {
   ChaseProfile,
   ChaseRedeemEntry,
   ChaseRedeemResult,
+  CreditCardSafe,
   FetchStatsSummary,
   IdentityInfo,
   JobAttempt,
@@ -47,6 +48,14 @@ export const IPC = {
    *  Pass null to clear. Returns the updated profile list so the
    *  renderer can reconcile its local state. */
   profilesSetBgAddress: 'profiles:set-bg-address',
+  /** List stored payment cards (safe view — id/last4/label only, no
+   *  full number). Drives the "Verify your card" auto-handler. */
+  cardsList: 'cards:list',
+  /** Add a payment card. Inbound full number is encrypted at rest
+   *  via the OS keychain; only the safe list comes back. */
+  cardsAdd: 'cards:add',
+  /** Remove a stored payment card by id. Returns the updated list. */
+  cardsRemove: 'cards:remove',
   /** Fetch the current live Amazon deals catalog from BetterBG's
    *  public endpoint (x-api-key: pepe-gang). The renderer re-fetches
    *  on user click; no polling. */
@@ -406,6 +415,14 @@ export type AutoGBridge = {
   profilesAddBgAddress(email: string): Promise<{ ok: boolean; reason?: string; detail?: string }>;
   /** Save or clear the BG receiving address on one AmazonProfile. */
   profilesSetBgAddress(email: string, address: BGAddress | null): Promise<AmazonProfile[]>;
+  /** List stored payment cards — safe view only (no full number). */
+  cardsList(): Promise<CreditCardSafe[]>;
+  /** Add a payment card. `rawNumber` is encrypted at rest in the main
+   *  process; only the safe list is returned. Rejects on an invalid
+   *  number (13–19 digits after stripping separators). */
+  cardsAdd(rawNumber: string, label: string): Promise<CreditCardSafe[]>;
+  /** Remove a stored payment card by id. Returns the updated list. */
+  cardsRemove(id: string): Promise<CreditCardSafe[]>;
   dealsList(): Promise<AmazonDeal[]>;
   dealsTrigger(dealId: string): Promise<{
     jobId: string;
