@@ -3581,36 +3581,63 @@ async function verifyTargetLineItemPrice(
   const hit = await page
     .evaluate(
       ({ asin, title }) => {
-        // Step 1: try ASIN-based locators. Chewbacca SPC strips
-        // /dp/<ASIN> hrefs on a subset of layouts, so try a broader
-        // contains-ASIN match too. ASINs are 10-char base36 strings,
-        // unlikely to collide with unrelated URLs.
-        let link: Element | null = document.querySelector(
-          `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"], a[href*="${asin}"]`,
+        const containerSel =
+          '.lineitem-container, [data-feature-id*="line-item"], .order-summary-line-item';
+
+        // Each candidate strategy proposes an anchor; we only accept
+        // the anchor when it lives inside a line-item container.
+        // Anchors found in the order-summary mini-widget (which sits
+        // outside the cards on Chewbacca SPC) would otherwise pass a
+        // generic "any ancestor with a price element" fallback and
+        // make us read THE FIRST line item's price — i.e. the wrong
+        // row entirely, which silently passes the cap by coincidence
+        // when the wrong row is cheap and silently fails when it's
+        // expensive. We saw both modes on Echo Dot @ qty 2: same
+        // deal, intermittent results depending on Amazon's A/B variant.
+        const attemptToTarget = (el: Element | null): Element | null => {
+          if (!el) return null;
+          return el.closest(containerSel) as Element | null;
+        };
+
+        // Step 1: ASIN-based href locators. Older /spc layouts wrap
+        // each line item's title in an <a href="/dp/<ASIN>">. On
+        // Chewbacca SPC these hrefs are stripped, so step often misses.
+        let target: Element | null = attemptToTarget(
+          document.querySelector(
+            `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"], a[href*="${asin}"]`,
+          ),
         );
 
-        // Step 1.5: Chewbacca testid pin. The /spc page renders a
-        // hidden <span data-testid="Item_asin_N_N_N">ASIN</span>
-        // inside each line-item card. Most reliable anchor when href
-        // selectors miss because Amazon strips the link itself on
-        // some checkout layouts. Mirrors the cashback reader's
-        // strategy in parsers/amazonCheckout.ts:387-396.
-        if (!link) {
+        // Step 2: testid pin. Chewbacca renders hidden
+        // <span data-testid="Item_asin_N_N_N">ASIN</span> elements,
+        // but they live in the order-summary widget which is NOT
+        // inside any line-item container. attemptToTarget rejects
+        // those automatically (closest returns null), so we never
+        // accept a testid match in that layout — preventing the
+        // wrong-row read this fix is designed to stop.
+        if (!target) {
           const spans = document.querySelectorAll<HTMLElement>(
             '[data-testid^="Item_asin_"]',
           );
           for (const s of Array.from(spans)) {
             if ((s.textContent ?? '').trim() === asin) {
-              link = s;
-              break;
+              const t = attemptToTarget(s);
+              if (t) {
+                target = t;
+                break;
+              }
             }
           }
         }
 
-        // Step 2: Chewbacca title fallback — match the product title
-        // as a text node, take its parent as the target anchor. Only
-        // fires when href + testid both miss.
-        if (!link && title && title.length > 5) {
+        // Step 3: title text walker. Chewbacca's actual line-item
+        // cards DO contain the product title text node inside the
+        // .lineitem-container, so walking text nodes and finding the
+        // first one that starts with the title prefix reliably lands
+        // us inside the right card. Verified on a real Chewbacca SPC
+        // snapshot — exactly 1 hit for the target title, inside the
+        // correct .lineitem-container.
+        if (!target && title && title.length > 5) {
           const needle = title.toLowerCase();
           const walker = document.createTreeWalker(
             document.body,
@@ -3625,32 +3652,15 @@ async function verifyTargetLineItemPrice(
               .trim()
               .toLowerCase();
             if (txt.length > 5 && txt.startsWith(needle)) {
-              link = n.parentElement;
-              break;
+              const t = attemptToTarget(n.parentElement);
+              if (t) {
+                target = t;
+                break;
+              }
             }
           }
         }
-        if (!link) return { found: false as const };
 
-        // Walk up to the enclosing line-item container — try known
-        // classes first, then fall back to nearest ancestor with a
-        // price element inside.
-        let target: Element | null =
-          link.closest(
-            '.lineitem-container, [data-feature-id*="line-item"], .order-summary-line-item',
-          ) ?? null;
-        if (!target) {
-          let el: Element | null = link.parentElement;
-          let depth = 0;
-          while (el && el !== document.body && depth < 10) {
-            if (el.querySelector('.a-price, .lineitem-price-text, .a-color-price')) {
-              target = el;
-              break;
-            }
-            el = el.parentElement;
-            depth++;
-          }
-        }
         if (!target) return { found: false as const };
 
         const priceEl =
