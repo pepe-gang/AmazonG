@@ -2736,12 +2736,46 @@ export async function runForProfile(
     }
 
     const placedAt = new Date().toISOString();
+    // Ghost-order guard. buyNow / buyWithFillers only return ok:true
+    // AFTER the confirmation page was reached — so the order IS placed
+    // on Amazon. But the post-buy order-history scan can still come up
+    // empty (propagation lag beyond the retry budget, history-page nav
+    // failure). Shipping that as a clean "awaiting_verification" with a
+    // null orderId is the root of the "placed but AmazonG lost it" bug:
+    // BG gets no orderId, verify can never run, the order silently
+    // ships unreconciled. Instead surface it as action_required with a
+    // message pointing the user at Amazon's order history. We still
+    // keep placedAt + amazonPurchaseId + filler context so the row is
+    // a real, reconcilable record — not a vanished order.
+    const orderIdUnknown = !buy.dryRun && !buy.orderId;
+    const orderIdUnknownError = orderIdUnknown
+      ? `Order placed but AmazonG could not capture the Amazon orderId. Open Amazon order history for ${profile} and reconcile manually` +
+        (buy.amazonPurchaseId
+          ? ` (checkout purchaseId ${buy.amazonPurchaseId})`
+          : '')
+      : null;
+    if (orderIdUnknown) {
+      logger.warn(
+        'job.profile.placed.orderid.unknown',
+        {
+          jobId: job.id,
+          profile,
+          amazonPurchaseId: buy.amazonPurchaseId,
+          message: orderIdUnknownError,
+        },
+        cid,
+      );
+    }
     // Buy succeeded — the order isn't fully "done" until the verify-phase
     // job (queued for ~10 min later by BG) confirms Amazon didn't auto-
     // cancel it. Show as "Waiting for Verification" in the table.
+    // orderId-unknown placements go to action_required instead — verify
+    // can't run without an orderId, and a human needs to reconcile.
     const finalStatus: JobAttemptStatus = buy.dryRun
       ? 'dry_run_success'
-      : 'awaiting_verification';
+      : orderIdUnknown
+        ? 'action_required'
+        : 'awaiting_verification';
     // Retail price source: Amazon's confirmation page first (reflects any
     // mid-flow delivery-price bumps), PDP scrape as fallback when the
     // confirmation parser doesn't find a price element. Used for BOTH
@@ -2757,7 +2791,7 @@ export async function runForProfile(
         // Actual quantity picked at /spc — replaces the BG-requested
         // quantity that was stored at fan-out time (always 1 for now).
         quantity: buy.quantity,
-        error: null,
+        error: orderIdUnknownError,
         // Filler-mode context for the verify phase to pick up ~10 min
         // later. Empty arrays / null on non-filler buys. cartAsins is
         // the FULL cart ASIN list (target + every committed filler) —
@@ -2770,13 +2804,17 @@ export async function runForProfile(
       .catch(() => undefined);
     return {
       email: profile,
-      status: 'completed',
+      // action_required when the order placed but we couldn't capture
+      // its orderId — keeps it OUT of the "completed" bucket so it
+      // can't be mistaken for a clean success, while still preserving
+      // placedAt / amazonPurchaseId below so it's a reconcilable row.
+      status: orderIdUnknown ? 'action_required' : 'completed',
       orderId: buy.orderId,
       placedPrice: retailPriceText,
       placedCashbackPct: buy.cashbackPct,
       placedAt,
       placedQuantity: buy.quantity,
-      error: null,
+      error: orderIdUnknownError,
       stage: null,
       dryRun: buy.dryRun,
       fillerOrderIds,

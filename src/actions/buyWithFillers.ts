@@ -1653,10 +1653,35 @@ export async function buyWithFillers(
   //     cancelFillerItems walks this list to surgically cancel fillers
   //     while leaving the target intact.
   const cartAsins = targetAsin ? [targetAsin, ...fillerAsins] : fillerAsins;
-  const orderMatches: OrderMatch[] =
+  let orderMatches: OrderMatch[] =
     cartAsins.length > 0
       ? await fetchOrderIdsForAsins(page, cartAsins, targetAsin, preBuyOrderIds)
       : [];
+  // The order IS placed at this point — confirmWait.ok gated us here.
+  // An empty scan almost always means Amazon's order-history
+  // propagation lagged past fetchOrderIdsForAsins' internal 15s poll
+  // budget (not that the order doesn't exist). Shipping orderId=null
+  // here is the root of the "ghost order" bug — the placed order
+  // becomes untraceable. Give it ONE more full pass after an 8s
+  // settle before we accept "unknown".
+  if (orderMatches.length === 0 && cartAsins.length > 0) {
+    logger.warn(
+      'step.fillerBuy.placed.orderid.retry',
+      {
+        targetAsin,
+        cartAsinsCount: cartAsins.length,
+        note: 'first post-buy scan empty — re-scanning order history after an 8s settle',
+      },
+      cid,
+    );
+    await page.waitForTimeout(8_000);
+    orderMatches = await fetchOrderIdsForAsins(
+      page,
+      cartAsins,
+      targetAsin,
+      preBuyOrderIds,
+    );
+  }
   const orderId =
     targetAsin !== null
       ? orderMatches.find((m) => m.matchedAsins.includes(targetAsin))?.orderId ??
