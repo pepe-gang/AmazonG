@@ -4,7 +4,7 @@ import type { DriverSession } from '../browser/driver.js';
 import type { FillerPool } from '../shared/ipc.js';
 import { openSession } from '../browser/driver.js';
 import { scrapeProduct } from '../actions/scrapeProduct.js';
-import { buyNow } from '../actions/buyNow.js';
+import { buyNow, captureDebugSnapshot, probePageDiag } from '../actions/buyNow.js';
 import { clearCartHttpOnly, type ClearCartResult } from '../actions/clearCart.js';
 import {
   buyWithFillers,
@@ -2835,7 +2835,51 @@ export async function runForProfile(
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
     const message = friendlyJobError(raw, profile);
-    logger.error('job.profile.fail', { jobId: job.id, profile, error: message }, cid);
+    // Surface err.cause's message when present (NavigationError /
+    // SelectorNotFoundError / etc. wrap underlying Playwright errors as
+    // `cause`). Without this we lose the actionable signal — "goto
+    // failed" alone doesn't tell us whether it was a timeout, an
+    // ERR_ABORTED on Amazon's redirect chain, "Target closed", etc.
+    const cause =
+      err instanceof Error && err.cause instanceof Error ? err.cause : null;
+    logger.error(
+      'job.profile.fail',
+      {
+        jobId: job.id,
+        profile,
+        error: message,
+        ...(cause ? { causeName: cause.name, causeMessage: cause.message.slice(0, 400) } : {}),
+      },
+      cid,
+    );
+    // Dev-mode HTML+PNG + probe when scrape navigation fails. Gives us
+    // the page state at the moment goto threw (often a /ap/signin
+    // redirect, a captcha interstitial, or a stale-cart /spc redirect).
+    // captureDebugSnapshot is internally gated on NODE_ENV.
+    if (page && /NavigationError/.test(raw)) {
+      const probe = await probePageDiag(page, {
+        signin_form: 'form#ap_signin_form, input#ap_email',
+        captcha: 'form[action*="validateCaptcha"], #captchacharacters',
+        buy_now_button: '#buy-now-button',
+        oos_widget: '#outOfStock_feature_div',
+        qty_limit_widget: '#quantityLimitExhaustionAOD_feature_div',
+        spc_marker: 'input[name="placeYourOrder1"]',
+        errors_marker: 'h1, h2',
+      }).catch(() => null);
+      logger.warn(
+        'job.profile.fail.nav.probe',
+        { jobId: job.id, profile, url: page.url(), probe },
+        cid,
+      );
+      const snap = await captureDebugSnapshot(page, deps.debugDir, 'nav_failed');
+      if (snap) {
+        logger.info(
+          'job.profile.fail.nav.snapshot',
+          { jobId: job.id, profile, png: snap.pngPath, html: snap.htmlPath },
+          cid,
+        );
+      }
+    }
     await maybeSnapshot(message, page, attemptId, session, deps, cid, { jobId: job.id, profile });
     await deps.jobAttempts
       .update(attemptId, { status: 'failed', error: message })
