@@ -3599,14 +3599,36 @@ async function verifyTargetLineItemPrice(
           return el.closest(containerSel) as Element | null;
         };
 
+        // Step 0: CSA item-id attribute. Chewbacca tags every deal-target
+        // line item with
+        //   <span data-csa-c-type="item" data-csa-c-item-type="asin"
+        //         data-csa-c-item-id="amzn1.asin.<ASIN>:amzn1.deal.<dealId>" …>
+        // INSIDE the .lineitem-container itself. Strongest anchor we have
+        // on the current layout — the attribute carries the literal ASIN
+        // string so wrong-row attribution is impossible. Validated against
+        // a captured /spc snapshot where Echo Dot's PDP scrape returned a
+        // null title and Steps 1/2 both missed: this Step 0 found the
+        // right container directly.
+        //
+        // Only present on items Amazon flags as a deal — fillers don't
+        // carry it. Since we're locating the TARGET only, that limitation
+        // is fine; falls through to Steps 1-3 when absent.
+        let target: Element | null = attemptToTarget(
+          document.querySelector(
+            `[data-csa-c-item-id^="amzn1.asin.${asin}"]`,
+          ),
+        );
+
         // Step 1: ASIN-based href locators. Older /spc layouts wrap
         // each line item's title in an <a href="/dp/<ASIN>">. On
         // Chewbacca SPC these hrefs are stripped, so step often misses.
-        let target: Element | null = attemptToTarget(
-          document.querySelector(
-            `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"], a[href*="${asin}"]`,
-          ),
-        );
+        if (!target) {
+          target = attemptToTarget(
+            document.querySelector(
+              `a[href*="/dp/${asin}"], a[href*="/gp/product/${asin}"], a[href*="${asin}"]`,
+            ),
+          );
+        }
 
         // Step 2: testid pin. Chewbacca renders hidden
         // <span data-testid="Item_asin_N_N_N">ASIN</span> elements,
