@@ -13,6 +13,7 @@ import { recordPlacedOrderEvent } from '../main/placedOrderLedger.js';
 import { scrapeProduct } from './scrapeProduct.js';
 import {
   captureDebugSnapshot,
+  detectOrderLikelyPlaced,
   ensureAddress,
   findPlaceOrderLocator,
   pickBestCashbackDelivery,
@@ -1721,13 +1722,30 @@ export async function buyWithFillers(
       },
     },
   );
+  let recoveredFromConfirmTimeout = false;
   if (!confirmWait.ok) {
-    return {
-      ok: false,
-      stage: 'confirm_parse',
-      reason: confirmWait.reason,
-      detail: `url=${page.url()}`,
-    };
+    // The confirmation page never loaded — but that does NOT mean the
+    // order wasn't placed. If the Place Order click was accepted,
+    // failing as confirm_parse here discards a real order (the
+    // ghost-order bug). Check the page state first.
+    const placed = await detectOrderLikelyPlaced(page);
+    if (!placed.likelyPlaced) {
+      return {
+        ok: false,
+        stage: 'confirm_parse',
+        reason: confirmWait.reason,
+        detail: `url=${page.url()}`,
+      };
+    }
+    // Order was almost certainly placed despite the timeout — fall
+    // through to the order-id recovery scan below instead of
+    // discarding a real order.
+    recoveredFromConfirmTimeout = true;
+    logger.warn(
+      'step.fillerBuy.confirm.timeout.recovering',
+      { reason: confirmWait.reason, url: page.url(), signal: placed.reason },
+      cid,
+    );
   }
   await opts.onStage?.(null);
 
@@ -1756,6 +1774,9 @@ export async function buyWithFillers(
     productUrl: opts.productUrl,
     url: page.url(),
     amazonPurchaseId,
+    ...(recoveredFromConfirmTimeout
+      ? { detail: 'recovered after confirmation-URL timeout' }
+      : {}),
   });
 
   // Parse the confirmation page for `finalPrice` + `finalPriceText`.
@@ -1784,7 +1805,8 @@ export async function buyWithFillers(
     cartAsins.length > 0
       ? await fetchOrderIdsForAsins(page, cartAsins, targetAsin, preBuyOrderIds)
       : [];
-  // The order IS placed at this point — confirmWait.ok gated us here.
+  // The order IS placed at this point — either confirmWait.ok or the
+  // confirmation-timeout recovery above gated us here.
   // An empty scan almost always means Amazon's order-history
   // propagation lagged past fetchOrderIdsForAsins' internal 15s poll
   // budget (not that the order doesn't exist). Shipping orderId=null

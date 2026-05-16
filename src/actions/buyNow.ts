@@ -180,6 +180,55 @@ export async function probePageDiag(
     .catch(() => ({ url: '', title: '', selectors: {} }));
 }
 
+/**
+ * After a `waitForConfirmationOrPending` timeout, decide whether the
+ * Place Order click was in fact accepted — i.e. the order is most
+ * likely already live on Amazon even though we never saw the
+ * thank-you page. Failing the attempt as `confirm_parse` when this is
+ * true discards a real, placed order — the ghost-order bug. Callers
+ * use a true result to fall through to order-id recovery instead.
+ *
+ * Signals (any one is sufficient):
+ *  - URL is the thank-you handler or carries a `purchaseId` — Amazon
+ *    routes there only post-placement.
+ *  - URL is the `/spc/place-order` post-click processing page AND no
+ *    Place Order button remains — the button is removed from the DOM
+ *    the instant the click is accepted.
+ *
+ * Conservative on ambiguity: anything else (including an evaluate
+ * failure on the button probe) returns likelyPlaced=false so the
+ * caller still fails the attempt rather than reporting a phantom.
+ */
+export async function detectOrderLikelyPlaced(
+  page: Page,
+): Promise<{ likelyPlaced: boolean; reason: string }> {
+  const url = page.url();
+  if (/\/buy\/thankyou\//.test(url) || /[?&]purchaseId=/.test(url)) {
+    return { likelyPlaced: true, reason: 'thankyou/purchaseId URL' };
+  }
+  if (/\/spc\/place-order/.test(url)) {
+    const placeOrderVisible = await page
+      .evaluate(
+        () =>
+          !!document.querySelector(
+            'input[name="placeYourOrder1"], #submitOrderButtonId',
+          ),
+      )
+      .catch(() => true);
+    if (!placeOrderVisible) {
+      return {
+        likelyPlaced: true,
+        reason: '/spc/place-order processing page, Place Order button gone',
+      };
+    }
+    return {
+      likelyPlaced: false,
+      reason: '/spc/place-order but Place Order button still present',
+    };
+  }
+  return { likelyPlaced: false, reason: `no placement signal (url=${url})` };
+}
+
 type StepEmitter = (message: string, data?: Record<string, unknown>) => void;
 
 const CHECKOUT_PLACE_SELECTORS = [
@@ -598,32 +647,48 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       },
       debugDir: opts.debugDir,
     });
+    let recoveredFromConfirmTimeout = false;
     if (!confirmWait.ok) {
-      // Capture what's on screen — often Amazon stalled the redirect or
-      // showed an unexpected interstitial we don't yet recognize. Path is
-      // logged so the user can find the PNG under userData/debug-screenshots.
-      const shotPath = await captureDebugShot(page, opts.debugDir, 'confirm_parse');
-      if (shotPath) {
-        warn('step.buy.confirm.screenshot', { path: shotPath, currentUrl: page.url() });
+      // The confirmation page never loaded — but that does NOT mean the
+      // order wasn't placed. If the Place Order click was accepted,
+      // failing as confirm_parse here discards a real order (the
+      // ghost-order bug). Check the page state first.
+      const placed = await detectOrderLikelyPlaced(page);
+      if (!placed.likelyPlaced) {
+        // Genuine failure — capture what's on screen. Often Amazon
+        // stalled the redirect or showed an unrecognized interstitial.
+        const shotPath = await captureDebugShot(page, opts.debugDir, 'confirm_parse');
+        if (shotPath) {
+          warn('step.buy.confirm.screenshot', { path: shotPath, currentUrl: page.url() });
+        }
+        // Always-on probe + dev-only HTML snapshot. Mirrors the other
+        // failure sites — the probe log line tells us which known
+        // landmarks ARE on the timed-out confirmation page (place-order
+        // still visible, error 500, BYG continue, pending-order page).
+        const probe = await probePageDiag(page, {
+          placeOrderInput: 'input[name="placeYourOrder1"]',
+          placeOrderById: '#submitOrderButtonId',
+          thankyouMarker: '#widget-purchase-confirmation, [data-feature-name="thankYou"]',
+          errors500Marker: 'h1, h2',
+          bygContinueButton: 'input[name="proceedToRetailCheckout"]',
+          pendingOrderText: 'body',
+        }).catch(() => null);
+        warn('step.buy.confirm.probe', { url: page.url(), probe });
+        const snap = await captureDebugSnapshot(page, opts.debugDir, 'confirm_parse');
+        if (snap) {
+          step('step.buy.confirm.snapshot', { png: snap.pngPath, html: snap.htmlPath });
+        }
+        return fail('confirm_parse', confirmWait.reason);
       }
-      // Always-on probe + dev-only HTML snapshot. Mirrors the other
-      // failure sites — the probe log line tells us which known
-      // landmarks ARE on the timed-out confirmation page (place-order
-      // still visible, error 500, BYG continue, pending-order page).
-      const probe = await probePageDiag(page, {
-        placeOrderInput: 'input[name="placeYourOrder1"]',
-        placeOrderById: '#submitOrderButtonId',
-        thankyouMarker: '#widget-purchase-confirmation, [data-feature-name="thankYou"]',
-        errors500Marker: 'h1, h2',
-        bygContinueButton: 'input[name="proceedToRetailCheckout"]',
-        pendingOrderText: 'body',
-      }).catch(() => null);
-      warn('step.buy.confirm.probe', { url: page.url(), probe });
-      const snap = await captureDebugSnapshot(page, opts.debugDir, 'confirm_parse');
-      if (snap) {
-        step('step.buy.confirm.snapshot', { png: snap.pngPath, html: snap.htmlPath });
-      }
-      return fail('confirm_parse', confirmWait.reason);
+      // Order was almost certainly placed despite the timeout — the
+      // Place Order click was accepted. Fall through to the order-id
+      // recovery path below instead of discarding a real order.
+      recoveredFromConfirmTimeout = true;
+      warn('step.buy.confirm.timeout.recovering', {
+        reason: confirmWait.reason,
+        url: page.url(),
+        signal: placed.reason,
+      });
     }
     await opts.onStage?.(null);
     // Capture Amazon's checkout-session purchaseId BEFORE any subsequent
@@ -639,16 +704,20 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       step('step.buy.purchaseId.captured', { amazonPurchaseId });
     }
 
-    // DURABLE LEDGER. Confirmation page reached — a real order IS
-    // placed on Amazon. Append synchronously NOW, before orderId
-    // capture or reporting, so the placement survives every
-    // downstream failure mode. See placedOrderLedger.ts.
+    // DURABLE LEDGER. Confirmation page reached (or recovered from a
+    // confirmation timeout) — a real order IS placed on Amazon. Append
+    // synchronously NOW, before orderId capture or reporting, so the
+    // placement survives every downstream failure mode. See
+    // placedOrderLedger.ts.
     recordPlacedOrderEvent({
       event: 'order_confirmed',
       profile: opts.profile ?? '(unknown)',
       jobId: opts.jobId ?? null,
       url: page.url(),
       amazonPurchaseId,
+      ...(recoveredFromConfirmTimeout
+        ? { detail: 'recovered after confirmation-URL timeout' }
+        : {}),
     });
     // Optional: parse the confirmation page for the final price (the
     // orderId pulled from it is unreliable — recommendation sections and
