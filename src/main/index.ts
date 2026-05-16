@@ -34,6 +34,7 @@ import type { JobAttempt, JobAttemptStatus, LogEvent } from '../shared/types.js'
 import { BGApiError } from '../shared/errors.js';
 import { loadIdentity, saveIdentity, clearIdentity } from './identity.js';
 import { loadSettings, saveSettings } from './settings.js';
+import { planSync } from './syncPlan.js';
 import {
   loadProfiles,
   newProfile,
@@ -430,21 +431,20 @@ async function pushSyncToBG(): Promise<void> {
 
 /**
  * Pull the user's synced cards + Buy-with-Fillers config from BG and
- * apply them to local disk. Runs once at startup. When BG has no sync
- * row yet, seeds it from this machine instead. Best-effort.
+ * apply them to local disk. Runs once at startup. Best-effort.
  *
- * Card-wipe guard: an empty BG card list never overwrites a populated
- * local vault (that would be a fresh machine clobbering a configured
- * one) — in that case we push local up instead.
+ * The merge decision (seed when BG is empty, the empty-remote card-
+ * wipe guard, which settings to apply) lives in the pure `planSync`
+ * — see src/main/syncPlan.ts + tests/unit/syncPlan.test.ts. This
+ * function just fetches the blob and executes the plan.
  */
 async function pullSyncFromBG(): Promise<void> {
   if (!apiKey) return;
-  let settingsNow;
+  let settingsNow: Settings;
   let blob;
   try {
     settingsNow = await loadSettings();
-    const bg = createBGClient(settingsNow.bgBaseUrl, apiKey);
-    blob = await bg.getSync();
+    blob = await createBGClient(settingsNow.bgBaseUrl, apiKey).getSync();
   } catch (err) {
     logger.info('sync.pull.skip', {
       reason: err instanceof Error ? err.message : String(err),
@@ -452,45 +452,24 @@ async function pullSyncFromBG(): Promise<void> {
     return;
   }
 
-  if (!blob.exists) {
-    // No row on BG yet — seed it from this machine.
-    await pushSyncToBG();
-    return;
-  }
+  const localCards = await listCards().catch(() => []);
+  const plan = planSync(blob, localCards.length);
 
-  let applied = false;
-
-  // Buy-with-Fillers settings — apply whatever BG carries.
-  const patch: Partial<Settings> = {};
-  if (typeof blob.buyWithFillers === 'boolean') {
-    patch.buyWithFillers = blob.buyWithFillers;
+  if (Object.keys(plan.settingsPatch).length > 0) {
+    await saveSettings({ ...settingsNow, ...plan.settingsPatch });
   }
-  if (Array.isArray(blob.fillerAttempts) && blob.fillerAttempts.length > 0) {
-    patch.fillerAttempts = blob.fillerAttempts as Settings['fillerAttempts'];
-  }
-  if (Object.keys(patch).length > 0) {
-    await saveSettings({ ...settingsNow, ...patch });
-    applied = true;
-  }
-
-  // Cards — replace the local vault from BG. Never let an empty BG
-  // list wipe a populated local vault.
-  if (blob.cards.length > 0) {
+  if (plan.cards) {
     try {
-      await replaceCardsFromSync(blob.cards);
-      applied = true;
+      await replaceCardsFromSync(plan.cards);
     } catch (err) {
       logger.info('sync.pull.cards.skip', {
         reason: err instanceof Error ? err.message : String(err),
       });
     }
-  } else {
-    const local = await listCards().catch(() => []);
-    if (local.length > 0) await pushSyncToBG();
   }
-
-  if (applied) {
-    logger.info('sync.pull.applied', { cards: blob.cards.length });
+  if (plan.pushLocal) await pushSyncToBG();
+  if (plan.applied) {
+    logger.info('sync.pull.applied', { cards: plan.cards?.length ?? 0 });
     mainWindow?.webContents.send(IPC.evtSyncApplied);
   }
 }
