@@ -1008,24 +1008,31 @@ export type CheckoutReadyResult =
         | 'no_payment';
     };
 
+const CART_URL = 'https://www.amazon.com/gp/cart/view.html';
+const ADD_ADDRESS_URL =
+  'https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button';
+
 /**
- * Fill + submit Amazon's checkout "Add an address" modal from a saved
- * BG address. Called by waitForCheckout when checkout parks on the
+ * Add a delivery address to the Amazon account from a saved BG
+ * address. Called by waitForCheckout when checkout parks on the
  * "Add delivery address" state and the account has a bgAddress.
  *
- * Recipe verified live 2026-05-16 against the Chewbacca address page:
- *   1. Open the modal via "Add a new delivery address".
+ * Navigates OFF the checkout to the dedicated address-book add page
+ * (/a/addresses/add) — more reliable than the in-checkout modal — and
+ * the caller re-enters checkout afterwards via reenterCheckout().
+ *
+ * Recipe verified live 2026-05-16:
+ *   1. goto /a/addresses/add.
  *   2. Fill the stable `address-ui-widgets-*` fields (Country defaults
  *      to United States — left as-is).
- *   3. Tick "Make this my default address".
- *   4. Click "Use this address" — up to twice: Amazon's address
- *      verifier shows a "Review your address" warning on the first
- *      click for addresses it can't verify; the second click accepts
- *      the address as entered.
+ *   3. Tick "Use as my default address".
+ *   4. Click "Add address" — up to twice: Amazon's verifier shows a
+ *      "couldn't verify" warning on the first click for addresses it
+ *      can't verify; the second click accepts it as entered. The form
+ *      page going away is the accepted signal.
  *
- * Returns true when the modal closed (address accepted), false on any
- * failure. Never throws — a failed add falls through to the
- * action_required path in the caller.
+ * Returns true when the address was accepted, false on any failure.
+ * Never throws.
  */
 async function addDeliveryAddress(
   page: Page,
@@ -1034,12 +1041,9 @@ async function addDeliveryAddress(
 ): Promise<boolean> {
   const FORM = '#address-ui-widgets-enterAddressFullName';
   const SUBMIT =
-    'input[aria-labelledby="checkout-primary-continue-button-id-announce"]';
+    'input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]';
   try {
-    await page
-      .locator('a.a-button-text:has-text("Add a new delivery address")')
-      .first()
-      .click();
+    await page.goto(ADD_ADDRESS_URL);
     await page.waitForSelector(FORM, { timeout: 15_000 });
 
     await page.fill(FORM, addr.fullName);
@@ -1059,27 +1063,27 @@ async function addDeliveryAddress(
       .catch(() => undefined);
     await page.fill('#address-ui-widgets-enterAddressPostalCode', addr.zip);
 
-    // "Make this my default address" — tick if not already.
+    // "Use as my default address" — tick if not already.
     const def = page.locator('#address-ui-widgets-use-as-my-default');
     if (!(await def.isChecked().catch(() => true))) {
       await def.click().catch(() => undefined);
     }
 
-    // "Use this address" — up to 2 clicks. The first can land on a
-    // "Review your address — couldn't verify" warning (modal stays
-    // open); the second accepts the address as entered. The modal
-    // disappearing (FORM gone) is the accepted signal.
+    // "Add address" — up to 2 clicks. The first can land on a
+    // "couldn't verify" warning (form stays); the second accepts the
+    // address as entered. The form field going away (Amazon navigates
+    // to the address book) is the accepted signal.
     for (let attempt = 1; attempt <= 2; attempt++) {
       await page.locator(SUBMIT).first().click();
       await page.waitForTimeout(2_500);
-      const stillOpen = await page.locator(FORM).count().catch(() => 1);
-      if (stillOpen === 0) {
+      const stillOnForm = await page.locator(FORM).count().catch(() => 1);
+      if (stillOnForm === 0) {
         emit?.step('step.waitForCheckout.address.added', { clicks: attempt });
         return true;
       }
     }
     emit?.warn('step.waitForCheckout.address.addFailed', {
-      note: 'modal still open after 2 "Use this address" clicks',
+      note: 'form still showing after 2 "Add address" clicks',
     });
     return false;
   } catch (err) {
@@ -1087,6 +1091,31 @@ async function addDeliveryAddress(
       error: err instanceof Error ? err.message : String(err),
     });
     return false;
+  }
+}
+
+/**
+ * Re-enter checkout after the address detour navigated off the
+ * checkout pipeline. Goes cart → "Proceed to checkout". The cart
+ * still holds the target + fillers, so this skips re-adding them.
+ * Never throws.
+ */
+async function reenterCheckout(
+  page: Page,
+  emit?: { step: StepEmitter; warn: StepEmitter },
+): Promise<void> {
+  try {
+    await page.goto(CART_URL);
+    await page
+      .locator('input[name="proceedToRetailCheckout"]')
+      .first()
+      .click();
+    await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+    emit?.step('step.waitForCheckout.reentered', { url: page.url() });
+  } catch (err) {
+    emit?.warn('step.waitForCheckout.reenter.error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -1213,7 +1242,10 @@ export async function waitForCheckout(
   // /pay?referrer=pay with a "Use this payment method" CTA — still
   // the same primary-continue-button that we click, loop, and recheck
   // for Place Order.
-  const deadline = Date.now() + 30_000;
+  // `let` because the address auto-add detour navigates away from the
+  // checkout and back — the deadline is reset once after it so the
+  // re-entered checkout gets a fresh poll budget.
+  let deadline = Date.now() + 30_000;
   let deliverClickedTimes = 0;
   // 5 rather than 3: a worst-case flow can chain several interstitials
   // (address → billing → payment → /spc), each adding one click.
@@ -1610,15 +1642,20 @@ export async function waitForCheckout(
 
     if (state.kind === 'no_address') {
       // Account has no delivery address. If the account has a saved BG
-      // address, auto-add it (once) and re-poll — the checkout then
-      // proceeds normally. Otherwise fail fast: the caller maps this to
-      // stage 'checkout_address' and the worker surfaces it as
+      // address, auto-add it (once) on the address-book page, re-enter
+      // checkout, and re-poll. Otherwise fail fast: the caller maps
+      // this to stage 'checkout_address' and the worker surfaces it as
       // action_required ("Add delivery address").
       if (opts.bgAddress && !addressAddAttempted) {
         addressAddAttempted = true;
         emit?.step('step.waitForCheckout.address.adding', {});
         const added = await addDeliveryAddress(page, opts.bgAddress, emit);
         if (added) {
+          // The add navigated off-checkout — re-enter via the cart
+          // (target + fillers are still in it) and reset the poll
+          // budget for the fresh checkout pipeline.
+          await reenterCheckout(page, emit);
+          deadline = Date.now() + 30_000;
           await page.waitForTimeout(1_500);
           continue;
         }
