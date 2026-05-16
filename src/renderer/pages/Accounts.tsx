@@ -416,8 +416,9 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
       </div>
 
       {/* Filler-attempt plan. Each row sets one attempt's pool; the
-          number of rows is the retry count. No effect when the master
-          Filler toggle is off. */}
+          number of rows is the retry count. Hidden entirely when the
+          master Filler toggle is off — it has no effect there. */}
+      {on && (
       <div className="mt-3 pt-3 border-t border-white/[0.04]">
         <div className="text-xs font-medium text-foreground/80">
           Filler Attempts
@@ -427,8 +428,7 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
           pool each attempt uses. Attempt 1 runs first; later attempts
           fire only if an earlier one fails with a recoverable error.
           Eero / Amazon Basics use narrow brand-specific term lists;
-          General uses the broad impulse mix. No effect when Buy with
-          Fillers is off.
+          General uses the broad impulse mix.
         </div>
         <div className="mt-2 flex flex-col gap-1.5">
           {fillerAttempts.map((pool, idx) => (
@@ -472,6 +472,7 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
           </button>
         )}
       </div>
+      )}
     </div>
   );
 }
