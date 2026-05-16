@@ -10,6 +10,7 @@ import type {
   BillingAddress,
   SyncCard,
 } from '../shared/types.js';
+import { normalizeExpiry, normalizeBilling } from '../shared/cardFields.js';
 import { writeJsonAtomic } from './atomicJson.js';
 
 /**
@@ -53,26 +54,6 @@ type StoredCard = {
   /** Billing address, plaintext. Absent on legacy rows / when none. */
   billingAddress?: BillingAddress | null;
 };
-
-/** Trim a billing address; an all-blank one collapses to null. */
-function normalizeBilling(
-  b: BillingAddress | null | undefined,
-): BillingAddress | null {
-  if (!b) return null;
-  const t = (s: string | undefined) => (s ?? '').trim();
-  const out: BillingAddress = {
-    fullName: t(b.fullName),
-    line1: t(b.line1),
-    line2: t(b.line2),
-    city: t(b.city),
-    state: t(b.state),
-    zip: t(b.zip),
-    country: t(b.country) || 'US',
-    phone: t(b.phone),
-  };
-  const hasContent = out.fullName || out.line1 || out.city || out.zip;
-  return hasContent ? out : null;
-}
 
 type StoreFile = { cards: StoredCard[] };
 
@@ -123,19 +104,6 @@ function decrypt(b64: string): string {
 
 /** Normalize an MM/YY-ish expiry. Returns null when blank, throws on
  *  an unparseable non-blank value. */
-function normalizeExpiry(raw: string): string | null {
-  const s = (raw ?? '').trim();
-  if (!s) return null;
-  const m = s.match(/^(\d{1,2})\s*\/?\s*(\d{2,4})$/);
-  if (!m || !m[1] || !m[2]) throw new Error('expiry must look like MM/YY');
-  const mm = m[1].padStart(2, '0');
-  const yy = m[2].slice(-2);
-  if (Number(mm) < 1 || Number(mm) > 12) {
-    throw new Error('expiry month must be 01–12');
-  }
-  return `${mm}/${yy}`;
-}
-
 const toSafe = (c: StoredCard): CardSafe => ({
   id: c.id,
   label: c.label?.trim() || `Card ••${c.last4}`,

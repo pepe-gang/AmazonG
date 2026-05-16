@@ -16,6 +16,7 @@ import { addFillerViaHttp, waitForDeliverySettle } from './buyWithFillers.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import { HTTP_BROWSERY_HEADERS, SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHttp.js';
 import { resolvePlacedQuantity } from '../shared/quantityResolver.js';
+import { splitExpiry } from '../shared/cardFields.js';
 import { recordPlacedOrderEvent } from '../main/placedOrderLedger.js';
 
 type BuyOptions = {
@@ -1158,17 +1159,16 @@ async function addPaymentCard(
     });
     return false;
   }
-  const m = card.expiry.match(/^(\d{1,2})\s*\/\s*(\d{2,4})$/);
-  if (!m || !m[1] || !m[2]) {
+  // splitExpiry → { month: "1".."12" (unpadded, matching the form's
+  // <select> values), year: "2028" (4-digit) }.
+  const exp = splitExpiry(card.expiry);
+  if (!exp) {
     emit?.warn('step.waitForCheckout.payment.skip', {
       reason: `unparseable expiry "${card.expiry}"`,
     });
     return false;
   }
-  // The month <select> values are unpadded ("1".."12"); the year
-  // <select> values are 4-digit ("2026"+).
-  const month = String(Number(m[1]));
-  const year = `20${m[2].slice(-2)}`;
+  const { month, year } = exp;
   try {
     await page.goto(WALLET_URL);
     await page
