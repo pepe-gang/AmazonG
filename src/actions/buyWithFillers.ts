@@ -41,7 +41,7 @@ import {
 import { isTargetInActiveCart } from '../parsers/amazonCart.js';
 import { parsePrice } from '../parsers/amazonProduct.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
-import type { ProductInfo, BGAddress } from '../shared/types.js';
+import type { ProductInfo, BGAddress, PaymentCardFill } from '../shared/types.js';
 import {
   CART_ADD_CLIENT_NAME,
   CART_ADD_URL,
@@ -74,6 +74,12 @@ type BuyWithFillersOptions = {
    * account has no configured BG address.
    */
   bgAddress?: BGAddress | null;
+  /**
+   * The payment card assigned to this account. When checkout parks on
+   * the "Add a credit or debit card" state and this is set,
+   * waitForCheckout auto-adds it. Null when no card is assigned.
+   */
+  paymentCard?: PaymentCardFill | null;
   /**
    * Minimum cashback % required on the target line item (not the page
    * max — fillers can surface unrelated offers that would falsely pass
@@ -330,6 +336,7 @@ export type BuyWithFillersResult =
         | 'item_unavailable'
         | 'checkout_price'
         | 'checkout_address'
+        | 'checkout_payment'
         | 'cashback_gate'
         | 'place_order'
         | 'confirm_parse';
@@ -1129,6 +1136,7 @@ export async function buyWithFillers(
       targetTitle: info.title,
       resolveCardNumber: opts.resolveCardNumber,
       bgAddress: opts.bgAddress,
+      paymentCard: opts.paymentCard,
     },
   );
   // QLA capped the target row: Amazon reduced our request from N to M.
@@ -1169,6 +1177,15 @@ export async function buyWithFillers(
       return {
         ok: false,
         stage: 'checkout_address',
+        reason: ready.reason,
+      };
+    }
+    // No payment method and no assigned card to auto-add (or the add
+    // failed). Surface as checkout_payment → action_required.
+    if (ready.kind === 'no_payment') {
+      return {
+        ok: false,
+        stage: 'checkout_payment',
         reason: ready.reason,
       };
     }

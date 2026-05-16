@@ -84,6 +84,7 @@ export type BuyResult =
         | 'item_unavailable'
         | 'checkout_price'
         | 'checkout_address'
+        | 'checkout_payment'
         | 'cashback_gate'
         | 'place_order'
         | 'confirm_parse'
@@ -773,6 +774,8 @@ export type CreditCardSafe = {
  */
 export type CreditCardInput = {
   label: string;
+  /** Cardholder name — typed into Amazon's "Name on card" field. */
+  cardholderName: string;
   number: string;
   expiry: string;
   cvv: string;
@@ -786,9 +789,25 @@ export type CreditCardInput = {
 export type SyncCard = {
   id: string;
   label: string;
+  /** Cardholder name; '' for legacy cards saved before the field. */
+  cardholderName: string;
   last4: string;
   number: string;
   /** MM/YY, or null for legacy cards. */
+  expiry: string | null;
+  cvv: string | null;
+};
+
+/**
+ * A resolved payment card ready to type into Amazon's checkout
+ * "Add a credit or debit card" form. Main-process + Playwright only —
+ * the full number + CVV must never reach the renderer.
+ */
+export type PaymentCardFill = {
+  cardholderName: string;
+  number: string;
+  /** MM/YY. Null when the card has no expiry — Amazon's add-card form
+   *  requires one, so a null-expiry card can't be auto-added. */
   expiry: string | null;
   cvv: string | null;
 };

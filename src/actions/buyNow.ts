@@ -9,7 +9,7 @@ import {
   parseOrderConfirmation,
 } from '../parsers/amazonCheckout.js';
 import { effectivePriceTolerance } from '../parsers/productConstraints.js';
-import type { BuyResult, BGAddress } from '../shared/types.js';
+import type { BuyResult, BGAddress, PaymentCardFill } from '../shared/types.js';
 import { evaluateCashbackGate } from '../shared/cashbackGate.js';
 import { clearCart, type ClearCartResult } from './clearCart.js';
 import { addFillerViaHttp, waitForDeliverySettle } from './buyWithFillers.js';
@@ -36,6 +36,10 @@ type BuyOptions = {
    *  auto-adds it instead of failing as action_required. Null when the
    *  account has no configured BG address. */
   bgAddress?: BGAddress | null;
+  /** The payment card assigned to this account. When checkout lands
+   *  on the "Add a credit or debit card" state and this is set,
+   *  waitForCheckout auto-adds it. Null when no card is assigned. */
+  paymentCard?: PaymentCardFill | null;
   correlationId?: string;
   /**
    * Routing context the disk-log sink uses to land step.buy.* events on
@@ -473,6 +477,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         targetAsin: dealAsin,
         resolveCardNumber: opts.resolveCardNumber,
         bgAddress: opts.bgAddress,
+        paymentCard: opts.paymentCard,
       },
     );
     if (!checkoutPage.ok) {
@@ -496,6 +501,13 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       if (checkoutPage.kind === 'no_address') {
         warn('step.buy.no_address', { reason: checkoutPage.reason });
         return fail('checkout_address', checkoutPage.reason);
+      }
+      // No payment method and no assigned card to auto-add (or the
+      // add failed). Surface as checkout_payment; the worker maps the
+      // "Add payment method" reason to action_required.
+      if (checkoutPage.kind === 'no_payment') {
+        warn('step.buy.no_payment', { reason: checkoutPage.reason });
+        return fail('checkout_payment', checkoutPage.reason);
       }
       return fail('checkout_wait', checkoutPage.reason, checkoutPage.detail);
     }
@@ -988,7 +1000,12 @@ export type CheckoutReadyResult =
       ok: false;
       reason: string;
       detail?: string;
-      kind?: 'unavailable' | 'quantity_limit' | 'timeout' | 'no_address';
+      kind?:
+        | 'unavailable'
+        | 'quantity_limit'
+        | 'timeout'
+        | 'no_address'
+        | 'no_payment';
     };
 
 /**
@@ -1073,6 +1090,79 @@ async function addDeliveryAddress(
   }
 }
 
+/**
+ * Fill + submit Amazon's checkout "Add a credit or debit card" form
+ * from a saved payment card. Called by waitForCheckout when checkout
+ * parks on the no-payment-method state and the account has a card
+ * assigned.
+ *
+ * Recipe verified live 2026-05-16. The card fields render inside a
+ * cross-origin PCI iframe (apx-security.amazon.com) — Playwright
+ * drives it via a frame locator. Field `id`s are randomized; the
+ * `name` attributes are stable.
+ *
+ * Returns false (never throws) when the card lacks an expiry or CVV
+ * — Amazon's form requires both — or on any failure. The caller then
+ * falls through to the action_required path. Success is confirmed by
+ * the caller re-polling (the no_payment state clears once the card
+ * lands), so this only needs to drive the form.
+ */
+async function addPaymentCard(
+  page: Page,
+  card: PaymentCardFill,
+  emit?: { step: StepEmitter; warn: StepEmitter },
+): Promise<boolean> {
+  if (!card.expiry || !card.cvv) {
+    emit?.warn('step.waitForCheckout.payment.skip', {
+      reason: 'assigned card has no expiry or CVV — Amazon requires both',
+    });
+    return false;
+  }
+  const m = card.expiry.match(/^(\d{1,2})\s*\/\s*(\d{2,4})$/);
+  if (!m || !m[1] || !m[2]) {
+    emit?.warn('step.waitForCheckout.payment.skip', {
+      reason: `unparseable expiry "${card.expiry}"`,
+    });
+    return false;
+  }
+  // The month <select> values are unpadded ("1".."12"); the year
+  // <select> values are 4-digit ("2026"+).
+  const month = String(Number(m[1]));
+  const year = `20${m[2].slice(-2)}`;
+  try {
+    await page.locator('a.pmts-add-cc-default-trigger-link').first().click();
+    const frame = page.frameLocator('iframe.apx-secure-iframe');
+    const numberField = frame.locator('input[name="addCreditCardNumber"]');
+    await numberField.waitFor({ state: 'visible', timeout: 15_000 });
+    await numberField.fill(card.number);
+    await frame
+      .locator('input[name="ppw-accountHolderName"]')
+      .fill(card.cardholderName);
+    await frame
+      .locator('select[name="ppw-expirationDate_month"]')
+      .selectOption(month);
+    await frame
+      .locator('select[name="ppw-expirationDate_year"]')
+      .selectOption(year);
+    await frame
+      .locator('input[name="addCreditCardVerificationNumber"]')
+      .fill(card.cvv);
+    await frame
+      .locator('input[name="ppw-widgetEvent:AddCreditCardEvent"]')
+      .click();
+    await page.waitForTimeout(3_000);
+    emit?.step('step.waitForCheckout.payment.submitted', {
+      last4: card.number.replace(/\D/g, '').slice(-4),
+    });
+    return true;
+  } catch (err) {
+    emit?.warn('step.waitForCheckout.payment.error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 export async function waitForCheckout(
   page: Page,
   allowedAddressPrefixes: string[] = [],
@@ -1101,6 +1191,10 @@ export async function waitForCheckout(
      *  lands on the "Add delivery address" state, the address is
      *  auto-added (once) instead of failing as action_required. */
     bgAddress?: BGAddress | null;
+    /** The payment card assigned to the account. When set and
+     *  checkout lands on the "Add a credit or debit card" state, the
+     *  card is auto-added (once) instead of failing. */
+    paymentCard?: PaymentCardFill | null;
   } = {},
 ): Promise<CheckoutReadyResult> {
   // Poll for either a Place Order button (success — we're on /spc), a
@@ -1125,9 +1219,10 @@ export async function waitForCheckout(
   // (address → billing → payment → /spc), each adding one click.
   const MAX_DELIVER_CLICKS = 5;
   let iteration = 0;
-  // One-shot guard: the "Add delivery address" auto-add runs at most
+  // One-shot guards: the address / payment auto-adds each run at most
   // once per waitForCheckout call, so a failed add can't loop.
   let addressAddAttempted = false;
+  let paymentAddAttempted = false;
   // Captured on the QLA gate fall-through (when Amazon caps the target
   // row from N to M >= 1). Reported back to the caller so BG sees the
   // corrected qty instead of the cart-add target.
@@ -1329,6 +1424,20 @@ export async function waitForCheckout(
         if (/enter your address to see delivery options/i.test(body)) {
           return { kind: 'no_address' as const };
         }
+        // 1c. No usable payment method. Amazon's /pay step always
+        //     offers an "Add a credit or debit card" trigger; the
+        //     distinguishing signal for "no card on file" is that no
+        //     payment-instrument radio is checked. Checked before the
+        //     deliver block — /pay's continue button shares the
+        //     Chewbacca shape (though it's disabled here anyway).
+        if (
+          document.querySelector('a.pmts-add-cc-default-trigger-link') &&
+          !document.querySelector(
+            'input[name="ppw-instrumentRowSelection"]:checked',
+          )
+        ) {
+          return { kind: 'no_payment' as const };
+        }
         // Label resolver that also follows aria-labelledby references.
         // Amazon's Chewbacca pipeline commonly ships inputs with no value
         // and no textContent — the visible label lives in a separate
@@ -1515,6 +1624,24 @@ export async function waitForCheckout(
         }
       }
       return { ok: false, kind: 'no_address', reason: 'Add delivery address' };
+    }
+
+    if (state.kind === 'no_payment') {
+      // No payment method on the account. If a card is assigned,
+      // auto-add it (once) and re-poll — the state clears once the
+      // card lands. Otherwise fail: the caller maps this to stage
+      // 'checkout_payment' and the worker surfaces it as
+      // action_required ("Add payment method").
+      if (opts.paymentCard && !paymentAddAttempted) {
+        paymentAddAttempted = true;
+        emit?.step('step.waitForCheckout.payment.adding', {});
+        const added = await addPaymentCard(page, opts.paymentCard, emit);
+        if (added) {
+          await page.waitForTimeout(1_500);
+          continue;
+        }
+      }
+      return { ok: false, kind: 'no_payment', reason: 'Add payment method' };
     }
 
     if (state.kind === 'deliver_pending') {

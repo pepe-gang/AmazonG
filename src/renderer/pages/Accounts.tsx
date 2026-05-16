@@ -106,6 +106,7 @@ function CreditCardsPanel() {
   const [cards, setCards] = useState<CreditCardSafe[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [labelDraft, setLabelDraft] = useState('');
+  const [nameDraft, setNameDraft] = useState('');
   const [numberDraft, setNumberDraft] = useState('');
   const [expiryDraft, setExpiryDraft] = useState('');
   const [cvvDraft, setCvvDraft] = useState('');
@@ -134,6 +135,7 @@ function CreditCardsPanel() {
 
   const resetDraft = () => {
     setLabelDraft('');
+    setNameDraft('');
     setNumberDraft('');
     setExpiryDraft('');
     setCvvDraft('');
@@ -145,6 +147,7 @@ function CreditCardsPanel() {
     try {
       const next = await window.autog.cardsAdd({
         label: labelDraft,
+        cardholderName: nameDraft,
         number: numberDraft,
         expiry: expiryDraft,
         cvv: cvvDraft,
@@ -199,6 +202,13 @@ function CreditCardsPanel() {
             value={labelDraft}
             onChange={(e) => setLabelDraft(e.target.value)}
             placeholder="Label (e.g. Chase Visa)"
+          />
+          <input
+            type="text"
+            autoComplete="off"
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            placeholder="Name on card"
           />
           <input
             type="text"

@@ -46,6 +46,7 @@ import {
 import {
   addCard,
   getCardNumberByLast4,
+  getFullCardById,
   listCards,
   removeCard,
   exportCardsWithNumbers,
@@ -1091,6 +1092,9 @@ async function startWorkerNow(): Promise<void> {
     // Returns null when no card matches → worker falls back to the
     // legacy action_required fail.
     resolveCardNumber: (last4: string) => getCardNumberByLast4(last4),
+    // Resolve the account's assigned vault card for the checkout
+    // payment auto-add. Returns null when the id is unknown.
+    resolveCardById: (id: string) => getFullCardById(id),
     jobAttempts: {
       async create(partial) {
         try {

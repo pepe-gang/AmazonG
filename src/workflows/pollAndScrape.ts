@@ -36,6 +36,7 @@ import type {
   BuyResult,
   JobAttempt,
   JobAttemptStatus,
+  PaymentCardFill,
   ProductInfo,
 } from '../shared/types.js';
 
@@ -144,6 +145,12 @@ export type Deps = {
    * Optional — when absent the worker keeps the legacy fail behavior.
    */
   resolveCardNumber?: (last4: string) => Promise<string | null>;
+  /**
+   * Resolve a vault card by id — used to auto-add the account's
+   * assigned payment card when checkout has no payment method.
+   * Optional; when absent the worker fails to action_required.
+   */
+  resolveCardById?: (cardId: string) => Promise<PaymentCardFill | null>;
 };
 
 export type WorkerHandle = {
@@ -189,6 +196,7 @@ const NON_RETRYABLE_BUY_STAGES: ReadonlySet<string> = new Set([
   'checkout_price',
   'product_verify',
   'checkout_address',
+  'checkout_payment',
 ]);
 
 /**
@@ -637,6 +645,9 @@ async function runFillerBuyWithRetries(
   /** The account's BG receiving address — auto-added at checkout when
    *  Amazon parks on the "Add delivery address" state. */
   bgAddress: BGAddress | null,
+  /** The account's assigned payment card — auto-added at checkout
+   *  when Amazon has no payment method on file. */
+  paymentCard: PaymentCardFill | null,
   onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
   let lastRaw: BuyWithFillersResult = {
@@ -698,6 +709,7 @@ async function runFillerBuyWithRetries(
       maxPrice: job.maxPrice,
       allowedAddressPrefixes: deps.allowedAddressPrefixes,
       bgAddress,
+      paymentCard,
       minCashbackPct,
       requireMinCashback,
       bypassPriceCheck: job.bypassPriceCheck === true,
@@ -2687,8 +2699,14 @@ export async function runForProfile(
       deps.jobAttempts
         .update(attemptId, { stage }, { forceFlush: true })
         .then(() => undefined);
+    // Resolve the account's assigned payment card (if any) so checkout
+    // can auto-add it when Amazon has no payment method on file.
+    const paymentCard: PaymentCardFill | null =
+      profileData.cardId && deps.resolveCardById
+        ? await deps.resolveCardById(profileData.cardId).catch(() => null)
+        : null;
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, fillerAttempts, surgicalCashbackRecovery, info, preflightCleared, profileData.bgAddress, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, fillerAttempts, surgicalCashbackRecovery, info, preflightCleared, profileData.bgAddress, paymentCard, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       cartAsins = r.cartAsins;
@@ -2704,6 +2722,7 @@ export async function runForProfile(
         maxPrice: job.maxPrice,
         allowedAddressPrefixes: deps.allowedAddressPrefixes,
         bgAddress: profileData.bgAddress,
+        paymentCard,
         correlationId: cid,
         // Routing fields — see BuyOptions.jobId docstring. Without these
         // every step.buy.* event silently drops at the disk-log sink.
@@ -3035,6 +3054,10 @@ function isActionRequiredReason(reason: string | null | undefined): boolean {
   // proceed until the user adds one. waitForCheckout surfaces this
   // verbatim as "Add delivery address".
   if (s.includes('add delivery address')) return true;
+  // No payment method on the account and no assignable card (or the
+  // auto-add failed) — needs the user. Surfaced as "Add payment
+  // method".
+  if (s.includes('add payment method')) return true;
   return false;
 }
 

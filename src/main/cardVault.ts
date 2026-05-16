@@ -40,6 +40,8 @@ type StoredCard = {
   id: string;
   /** Optional on disk for legacy rows; toSafe() supplies a default. */
   label?: string;
+  /** Cardholder name, plaintext. Absent on legacy rows. */
+  cardholderName?: string;
   last4: string;
   numberEnc: string;
   /** MM/YY, plaintext. Absent on legacy rows. */
@@ -142,6 +144,7 @@ export async function addCard(input: CreditCardInput): Promise<CardSafe[]> {
   const card: StoredCard = {
     id: randomUUID(),
     label: (input.label ?? '').trim(),
+    cardholderName: (input.cardholderName ?? '').trim(),
     last4: digits.slice(-4),
     numberEnc: encrypt(digits),
     expiry,
@@ -200,12 +203,19 @@ export async function countCardsByLast4(last4: string): Promise<number> {
  */
 export async function getFullCardById(
   id: string,
-): Promise<{ label: string; number: string; expiry: string | null; cvv: string | null } | null> {
+): Promise<{
+  label: string;
+  cardholderName: string;
+  number: string;
+  expiry: string | null;
+  cvv: string | null;
+} | null> {
   const match = (await loadAll()).find((c) => c.id === id);
   if (!match) return null;
   try {
     return {
       label: match.label?.trim() || `Card ••${match.last4}`,
+      cardholderName: match.cardholderName?.trim() ?? '',
       number: decrypt(match.numberEnc),
       expiry: match.expiry ?? null,
       cvv: match.cvvEnc ? decrypt(match.cvvEnc) : null,
@@ -233,6 +243,7 @@ export async function exportCardsWithNumbers(): Promise<SyncCard[]> {
       out.push({
         id: c.id,
         label: c.label?.trim() || `Card ••${c.last4}`,
+        cardholderName: c.cardholderName?.trim() ?? '',
         last4: c.last4,
         number: decrypt(c.numberEnc),
         expiry: c.expiry ?? null,
@@ -270,6 +281,7 @@ export async function replaceCardsFromSync(
     next.push({
       id: c.id || randomUUID(),
       label: (c.label ?? '').trim(),
+      cardholderName: (c.cardholderName ?? '').trim(),
       last4: digits.slice(-4),
       numberEnc: encrypt(digits),
       expiry: c.expiry ?? null,

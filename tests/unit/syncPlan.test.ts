@@ -5,6 +5,7 @@ import type { AutoGSyncBlob, SyncCard } from "../../src/shared/types.js";
 const card = (id: string): SyncCard => ({
   id,
   label: `Card ${id}`,
+  cardholderName: `Holder ${id}`,
   last4: id.slice(-4).padStart(4, "0"),
   number: `4111111111${id.slice(-4).padStart(4, "0")}`,
   expiry: "12/27",
