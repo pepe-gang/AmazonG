@@ -8,6 +8,12 @@ import { useConfirm } from '../components/ConfirmDialog.js';
 import { PencilIcon, PlusIcon, UsersIcon } from '../components/icons.js';
 import { relDate, shortEmail } from '../lib/format.js';
 
+/** In-renderer broadcast fired when the payment-card vault changes
+ *  (add / remove). The CreditCardsPanel owns the mutations; the
+ *  per-account card dropdown in AccountsList listens so it doesn't
+ *  show a stale snapshot from its own mount time. */
+const CARDS_EVENT = 'autog:cards-changed';
+
 /* ============================================================
    Accounts view (full page)
    Per-account management lives here. Global toggles (live mode,
@@ -144,6 +150,7 @@ function CreditCardsPanel() {
         cvv: cvvDraft,
       });
       setCards(next);
+      window.dispatchEvent(new CustomEvent(CARDS_EVENT));
       resetDraft();
       setAdding(false);
     } catch (err) {
@@ -157,6 +164,7 @@ function CreditCardsPanel() {
     setBusy(true);
     try {
       setCards(await window.autog.cardsRemove(id));
+      window.dispatchEvent(new CustomEvent(CARDS_EVENT));
     } finally {
       setBusy(false);
     }
@@ -593,8 +601,10 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
     };
   }, []);
 
-  // Load saved payment cards for the per-account card dropdown, and
-  // reload on a BG cross-device sync (which can replace the vault).
+  // Load saved payment cards for the per-account card dropdown.
+  // Reload on a BG cross-device sync (which can replace the vault)
+  // AND on a local add/remove in the Payment Cards panel — otherwise
+  // the dropdown shows whatever the vault held at mount time.
   useEffect(() => {
     let cancelled = false;
     const reload = async () => {
@@ -607,9 +617,12 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
     };
     void reload();
     const unsubSync = window.autog.onSyncApplied(() => void reload());
+    const onCards = () => void reload();
+    window.addEventListener(CARDS_EVENT, onCards);
     return () => {
       cancelled = true;
       unsubSync();
+      window.removeEventListener(CARDS_EVENT, onCards);
     };
   }, []);
 
