@@ -214,8 +214,9 @@ function CreditCardsPanel() {
             autoComplete="off"
             value={expiryDraft}
             onChange={(e) => setExpiryDraft(e.target.value)}
-            placeholder="MM/YY"
-            style={{ maxWidth: 90 }}
+            placeholder="MM/YY (optional)"
+            title="Expiry is optional — Amazon store cards have none. Leave blank if the card has no expiry."
+            style={{ maxWidth: 150 }}
           />
           <input
             type="text"
