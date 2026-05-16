@@ -1085,9 +1085,9 @@ export async function waitForCheckout(
         //     error in buyNow flow", or — worse for filler mode — into
         //     the cashback gate (which then fails because the limit page
         //     has no "N% back" panel for the target row, surfacing as
-        //     `stage: 'cashback_gate'` and triggering the FILLER_MAX_ATTEMPTS
-        //     retry loop in pollAndScrape — exactly the wasted-time
-        //     scenario this catch is here to prevent).
+        //     `stage: 'cashback_gate'` and triggering the configured
+        //     filler-attempt retry loop in pollAndScrape — exactly the
+        //     wasted-time scenario this catch is here to prevent).
         //
         // Two-pronged detection:
         //   (a) Stable Amazon selector `[data-messageId*="Limit" i]`

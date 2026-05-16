@@ -100,10 +100,11 @@ export type Deps = {
    */
   loadParallelism: () => Promise<{
     maxConcurrentBuys: number;
-    /** Filler-mode search-term pool ('general' | 'eero' | 'amazon-basics').
-     *  Read every claim so a Settings change takes effect on the next
-     *  deal without restarting the worker. */
-    fillerPool: FillerPool;
+    /** Per-attempt filler-pool plan — array length is the retry count,
+     *  each entry is that attempt's search-term pool. Read every claim
+     *  so a Settings change takes effect on the next deal without
+     *  restarting the worker. */
+    fillerAttempts: FillerPool[];
     /** Experimental: when true AND the buy is in filler mode AND the
      *  cashback gate fails with B1 (target's group has no "% back"
      *  radio at all), run surgical recovery (remove bundle-mates
@@ -162,20 +163,32 @@ export type WorkerHandle = {
 const DEFAULT_CONCURRENT_BUYS = 3;
 
 /**
- * How many times we re-run the whole filler buy (clear cart → Buy Now
- * → pick new random fillers → Proceed to Checkout → verify cashback)
- * before giving up on a cashback_gate failure.
+ * Filler-buy failure stages that a re-run cannot fix — we stop
+ * retrying immediately when we hit one, regardless of how many
+ * attempts the user configured in `fillerAttempts`.
  *
- * Rationale: the 6% back eligibility on /spc is attached to Amazon's
- * random shipping-group assignment, which depends on which fillers
- * land in the cart this time around. A different filler set often
- * lands the target in a different group with different cashback. So
- * retrying the whole thing with fresh fillers is a legit way to shake
- * the dice. Other failure stages (item_unavailable, buy_now_click,
- * checkout_address, etc.) indicate the account or product is the
- * problem, so we fail fast on those.
+ *  - confirm_parse:    the order MAY already be placed (a re-run would
+ *                      risk a duplicate order — the ghost-order class
+ *                      of bug). Never retry.
+ *  - item_unavailable: the product is out of stock / unavailable.
+ *  - checkout_price:   price is over cap; it won't change in seconds.
+ *  - product_verify:   product-page gate failed (prime, condition…).
+ *  - checkout_address: address config problem.
+ *
+ * Every other stage (cashback_gate, place_order, clear_cart, the /spc
+ * waits, etc.) is transient or shuffle-fixable, so the configured
+ * attempts run. Cashback_gate in particular benefits: the 6% back
+ * eligibility rides Amazon's random shipping-group assignment, which
+ * depends on which fillers land in the cart — a fresh filler set
+ * often re-rolls the target into a 6%-eligible group.
  */
-const FILLER_MAX_ATTEMPTS = 3;
+const NON_RETRYABLE_BUY_STAGES: ReadonlySet<string> = new Set([
+  'confirm_parse',
+  'item_unavailable',
+  'checkout_price',
+  'product_verify',
+  'checkout_address',
+]);
 
 /**
  * Verify-phase filler cleanup. Runs after verifyOrder confirms the
@@ -601,9 +614,10 @@ async function runFillerBuyWithRetries(
   minCashbackPct: number,
   /** Per-profile cashback gate enforcement. See runForProfile. */
   requireMinCashback: boolean,
-  /** Live filler-pool setting, re-read each claim. Single-mode buys
-   *  never reach here. */
-  fillerPool: FillerPool,
+  /** Live per-attempt filler-pool plan, re-read each claim. Array
+   *  length is the retry count; entry N is attempt N's pool.
+   *  Single-mode buys never reach here. */
+  fillerAttempts: FillerPool[],
   /** Live experimental.surgicalCashbackRecovery toggle. When on,
    *  buyWithFillers handles B1 cashback failures via the inline
    *  surgical flow AND we skip the 3-attempt outer retry — surgical
@@ -634,30 +648,19 @@ async function runFillerBuyWithRetries(
   // shipping-group fan-out → different cashback eligibility, which
   // is the whole point of retrying on a cashback_gate miss.
   const attemptedAsins = new Set<string>();
-  // When surgical recovery is on, we run buyWithFillers ONCE — it
-  // handles B1 cashback failures inline via the surgical flow. The
-  // outer 3-attempt retry exists to give "different-fillers shuffle"
-  // a chance; surgical is a different (and incompatible) recovery
-  // strategy that runs in-place. Forcing maxAttempts=1 when surgical
-  // is on means a non-cashback_gate failure short-circuits same as
-  // before; a cashback_gate failure surfaces the surgical-exhausted
-  // result directly.
-  const maxAttempts = surgicalCashbackRecovery ? 1 : FILLER_MAX_ATTEMPTS;
-  // Per-pool retry fallback. The eero pool only has ~13 unique items
-  // even at its broadest query, so attempt 1 burns most of them into
-  // `attemptedAsins`. Switching to amazon-basics on retry gives the
-  // picker a fresh ~45-item pool with zero overlap (different brand
-  // surface entirely), letting attempt 2/3 pursue different fillers
-  // without reusing any ASIN. Falls back to the original pool when
-  // no mapping is defined.
-  const retryPoolFallback: Partial<Record<FillerPool, FillerPool>> = {
-    eero: 'amazon-basics',
-  };
+  // The number of attempts and each attempt's pool come straight from
+  // the user's `fillerAttempts` setting (clamped to 1–5 on load).
+  // When surgical recovery is on we run buyWithFillers ONCE — it
+  // handles B1 cashback failures inline via the surgical flow, an
+  // incompatible in-place recovery strategy — so we use only the
+  // first configured attempt's pool.
+  const attemptPools: FillerPool[] = surgicalCashbackRecovery
+    ? fillerAttempts.slice(0, 1)
+    : fillerAttempts;
+  const maxAttempts = Math.max(1, attemptPools.length);
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const effectivePool: FillerPool =
-      attempt === 1
-        ? fillerPool
-        : (retryPoolFallback[fillerPool] ?? fillerPool);
+      attemptPools[attempt - 1] ?? attemptPools[0] ?? 'eero';
     if (attempt > 1) {
       logger.info(
         'step.fillerBuy.retryWhole.start',
@@ -666,9 +669,8 @@ async function runFillerBuyWithRetries(
           maxAttempts,
           priorReason: lastRaw.ok ? null : lastRaw.reason,
           excludedAsinsCount: attemptedAsins.size,
-          originalPool: fillerPool,
           effectivePool,
-          ...(effectivePool !== fillerPool
+          ...(effectivePool !== attemptPools[0]
             ? { poolSwitched: true }
             : {}),
         },
@@ -730,11 +732,11 @@ async function runFillerBuyWithRetries(
       }
       break;
     }
-    // Only retry when the failure is specifically a cashback_gate miss.
-    // Any other stage (item_unavailable, buy_now_click, checkout_address,
-    // etc.) points at account or product state that a rerun won't fix —
-    // cheaper to bail out than to burn another ~60–80s per attempt.
-    if (lastRaw.stage !== 'cashback_gate') break;
+    // Stop early on a failure a re-run cannot fix (see
+    // NON_RETRYABLE_BUY_STAGES) — notably confirm_parse, where a
+    // retry would risk a duplicate order. Any other stage burns the
+    // user's configured attempts.
+    if (NON_RETRYABLE_BUY_STAGES.has(lastRaw.stage)) break;
     if (attempt >= maxAttempts) {
       logger.warn(
         'step.fillerBuy.retryWhole.exhausted',
@@ -865,7 +867,7 @@ export function startWorker(deps: Deps): WorkerHandle {
         fillerByEmail: new Map<string, boolean>(),
         effectiveMinByEmail: new Map<string, number>(),
         requireMinByEmail: new Map<string, boolean>(),
-        fillerPool: 'general',
+        fillerAttempts: ['general'] as FillerPool[],
         surgicalCashbackRecovery: false,
         ...(emptyReason ? { emptyReason } : {}),
       };
@@ -886,7 +888,7 @@ export function startWorker(deps: Deps): WorkerHandle {
     let eligible = selectBuyProfiles(eligibleAll, job.placedEmail);
     const parallelism = await deps.loadParallelism().catch(() => ({
       maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
-      fillerPool: 'general' as FillerPool,
+      fillerAttempts: ['general'] as FillerPool[],
       surgicalCashbackRecovery: false,
     }));
 
@@ -923,7 +925,7 @@ export function startWorker(deps: Deps): WorkerHandle {
       fillerByEmail,
       effectiveMinByEmail,
       requireMinByEmail,
-      fillerPool: parallelism.fillerPool,
+      fillerAttempts: parallelism.fillerAttempts,
       surgicalCashbackRecovery: parallelism.surgicalCashbackRecovery,
     };
   };
@@ -2412,9 +2414,9 @@ export async function runForProfile(
    *  entirely and default a missing /spc reading to 5%. See
    *  shared/cashbackGate.ts. */
   requireMinCashback: boolean,
-  /** Filler-mode search-term pool. Re-read per claim by the caller.
+  /** Per-attempt filler-pool plan. Re-read per claim by the caller.
    *  Single-mode buys ignore. */
-  fillerPool: FillerPool,
+  fillerAttempts: FillerPool[],
   /** Live experimental.surgicalCashbackRecovery toggle. Re-read per
    *  claim. Filler-mode only (single-mode buys never hit the cashback
    *  gate's recovery paths in the same way). */
@@ -2681,7 +2683,7 @@ export async function runForProfile(
         .update(attemptId, { stage }, { forceFlush: true })
         .then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, fillerPool, surgicalCashbackRecovery, info, preflightCleared, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, fillerAttempts, surgicalCashbackRecovery, info, preflightCleared, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       cartAsins = r.cartAsins;

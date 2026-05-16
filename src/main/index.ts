@@ -947,7 +947,7 @@ async function startWorkerNow(): Promise<void> {
       const s = await loadSettings();
       return {
         maxConcurrentBuys: s.maxConcurrentBuys,
-        fillerPool: s.fillerPool,
+        fillerAttempts: s.fillerAttempts,
         surgicalCashbackRecovery: s.experimental?.surgicalCashbackRecovery === true,
       };
     },

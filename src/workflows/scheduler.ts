@@ -61,7 +61,7 @@ type Tuple = {
     useFiller: boolean;
     effectiveMinCashbackPct: number;
     requireMinCashback: boolean;
-    fillerPool: FillerPool;
+    fillerAttempts: FillerPool[];
     surgicalCashbackRecovery: boolean;
   };
 };
@@ -113,7 +113,7 @@ export type JobContext = {
   fillerByEmail: Map<string, boolean>;
   effectiveMinByEmail: Map<string, number>;
   requireMinByEmail: Map<string, boolean>;
-  fillerPool: FillerPool;
+  fillerAttempts: FillerPool[];
   surgicalCashbackRecovery: boolean;
   // Optional: the verify/tracking job carries placedEmail at the
   // job level. For those phases the eligible list is already filtered
@@ -432,7 +432,7 @@ export class StreamingScheduler {
             this.sd.deps.minCashbackPct,
           requireMinCashback:
             ctx.requireMinByEmail.get(account) ?? true,
-          fillerPool: ctx.fillerPool,
+          fillerAttempts: ctx.fillerAttempts,
           surgicalCashbackRecovery: ctx.surgicalCashbackRecovery,
         };
       }
@@ -626,7 +626,7 @@ export class StreamingScheduler {
           useFiller: tuple.buyCtx.useFiller,
           effectiveMinCashbackPct: tuple.buyCtx.effectiveMinCashbackPct,
           requireMinCashback: tuple.buyCtx.requireMinCashback,
-          fillerPool: tuple.buyCtx.fillerPool,
+          fillerAttempts: tuple.buyCtx.fillerAttempts,
           surgicalCashbackRecovery: tuple.buyCtx.surgicalCashbackRecovery,
           abortSignal: bundle.abortController.signal,
           abortSiblings: (reason) => bundle.abortController.abort(reason),

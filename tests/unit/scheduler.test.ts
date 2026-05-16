@@ -122,7 +122,7 @@ function makeDeps(opts: {
         fillerByEmail: new Map(),
         effectiveMinByEmail: new Map(),
         requireMinByEmail: new Map(),
-        fillerPool: 'general' as const,
+        fillerAttempts: ['general'],
         surgicalCashbackRecovery: false,
       };
     },

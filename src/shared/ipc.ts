@@ -237,17 +237,20 @@ export type Settings = {
    */
   buyWithFillers: boolean;
   /**
-   * Which search-term pool the filler picker uses (filler-mode only).
-   *   - 'general'        — broad mix (legacy default behavior pre-v0.13.x)
-   *   - 'eero'           — eero / Amazon Eero networking gear (default)
+   * Per-attempt filler-pool plan (filler-mode only). The array length
+   * is the number of attempts a filler buy makes; each entry is the
+   * search-term pool that attempt uses:
+   *   - 'general'        — broad impulse mix
+   *   - 'eero'           — eero / Amazon Eero networking gear
    *   - 'amazon-basics'  — Amazon Basics house brand
-   * No effect when filler mode is off. Pre-v0.13.36 setting was a
-   * boolean `wheyProteinFillerOnly`; the 'whey' pool itself was
-   * removed in v0.13.40 (food items are non-refundable, so they
-   * weren't usable as cancellable fillers). Existing 'whey' values
-   * are migrated to 'eero' on load.
+   * e.g. ['eero'] = a single eero attempt with no retries; the
+   * default ['eero','amazon-basics','amazon-basics'] retries twice on
+   * amazon-basics. Length is clamped to 1–5 on load. No effect when
+   * filler mode is off. Replaces the pre-v0.13.62 single `fillerPool`
+   * enum (migrated on load); that itself replaced the pre-v0.13.36
+   * boolean `wheyProteinFillerOnly`.
    */
-  fillerPool: FillerPool;
+  fillerAttempts: FillerPool[];
   /**
    * When set, the Dashboard's Failed counter + the failures-by-reason
    * popover ignore every attempt whose createdAt predates this

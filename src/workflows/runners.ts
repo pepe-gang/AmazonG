@@ -40,7 +40,7 @@ export type BuyTupleCtx = {
   useFiller: boolean;
   effectiveMinCashbackPct: number;
   requireMinCashback: boolean;
-  fillerPool: FillerPool;
+  fillerAttempts: FillerPool[];
   surgicalCashbackRecovery: boolean;
   abortSignal: AbortSignal;
   abortSiblings: (reason: 'out_of_stock' | 'price_exceeds') => void;
@@ -56,7 +56,7 @@ export async function runBuyTuple(ctx: BuyTupleCtx): Promise<ProfileResult> {
     ctx.useFiller,
     ctx.effectiveMinCashbackPct,
     ctx.requireMinCashback,
-    ctx.fillerPool,
+    ctx.fillerAttempts,
     ctx.surgicalCashbackRecovery,
     ctx.abortSignal,
     ctx.abortSiblings,

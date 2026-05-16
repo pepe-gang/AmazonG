@@ -22,7 +22,10 @@ const DEFAULTS: Settings = {
   snapshotOnFailure: false,
   snapshotGroups: [],
   buyWithFillers: false,
-  fillerPool: 'eero',
+  // 3 attempts: eero first, then amazon-basics on retry. Mirrors the
+  // pre-v0.13.62 hardcoded behavior (single 'eero' pool + the
+  // eero→amazon-basics retry fallback).
+  fillerAttempts: ['eero', 'amazon-basics', 'amazon-basics'],
   failedHiddenBeforeTs: null,
   hiddenAttemptIds: [],
   autoEnqueueEnabled: false,
@@ -56,12 +59,21 @@ function filePath(): string {
 
 /** Pre-v0.13.19 settings.json shape — single + filler split into two
  *  fields. Pre-v0.13.36: wheyProteinFillerOnly was a boolean before
- *  the multi-pool refactor. Used only by `loadSettings` for migration. */
+ *  the multi-pool refactor. Pre-v0.13.62: `fillerPool` was a single
+ *  enum before the per-attempt `fillerAttempts` array. Used only by
+ *  `loadSettings` for migration. */
 type LegacyKnobs = {
   maxConcurrentSingleBuys?: number;
   maxConcurrentFillerBuys?: number;
   wheyProteinFillerOnly?: boolean;
+  fillerPool?: FillerPool | 'whey';
 };
+
+const VALID_FILLER_POOLS: readonly FillerPool[] = [
+  'general',
+  'eero',
+  'amazon-basics',
+];
 
 export async function loadSettings(): Promise<Settings> {
   try {
@@ -88,25 +100,41 @@ export async function loadSettings(): Promise<Settings> {
       }
     }
 
-    // v0.13.36 migration: wheyProteinFillerOnly (boolean) →
-    // fillerPool (enum). Pre-v0.13.40 this set 'whey' when true /
-    // 'general' when false. v0.13.40 removed the 'whey' pool entirely
-    // (food items are non-refundable, so they were unusable as
-    // cancellable fillers), so true now maps to 'eero' — the current
-    // default — instead.
-    if (migrated.fillerPool === undefined && parsed.wheyProteinFillerOnly !== undefined) {
-      migrated.fillerPool = parsed.wheyProteinFillerOnly ? 'eero' : 'general';
+    // v0.13.62 migration: the single `fillerPool` enum became the
+    // `fillerAttempts` array (per-attempt pool plan — sets both the
+    // retry count and each attempt's pool). Resolve the legacy value
+    // through the older chain first:
+    //   - pre-v0.13.36 it was the boolean `wheyProteinFillerOnly`
+    //     (true → 'eero', false → 'general')
+    //   - v0.13.40 removed the 'whey' pool → 'eero'
+    // Then expand to a 3-attempt array preserving prior behavior: an
+    // 'eero' pool retried on 'amazon-basics' (the old hardcoded
+    // retryPoolFallback); any other pool repeated as-is.
+    if (migrated.fillerAttempts === undefined) {
+      let legacyPool: FillerPool | 'whey' | undefined = parsed.fillerPool;
+      if (legacyPool === undefined && parsed.wheyProteinFillerOnly !== undefined) {
+        legacyPool = parsed.wheyProteinFillerOnly ? 'eero' : 'general';
+      }
+      if (legacyPool === 'whey' || legacyPool === undefined) {
+        legacyPool = 'eero';
+      }
+      migrated.fillerAttempts =
+        legacyPool === 'eero'
+          ? ['eero', 'amazon-basics', 'amazon-basics']
+          : [legacyPool, legacyPool, legacyPool];
     }
+    // The legacy single-pool field no longer exists on Settings.
+    delete (migrated as { fillerPool?: unknown }).fillerPool;
 
-    // v0.13.40 migration: 'whey' is no longer a valid FillerPool.
-    // Move any existing 'whey' value to 'eero'. (v0.13.39 already did
-    // this once as a soft default-bump, but a saved settings.json
-    // can still hold 'whey' if it was last written before v0.13.39 or
-    // if the bump migration ever fails to apply.)
-    if (
-      (migrated.fillerPool as FillerPool | 'whey' | undefined) === 'whey'
-    ) {
-      migrated.fillerPool = 'eero';
+    // Normalize fillerAttempts to a sane shape regardless of source:
+    // drop unknown pool values, clamp to 1–5 entries.
+    {
+      let fa = (migrated.fillerAttempts ?? []).filter(
+        (p): p is FillerPool => VALID_FILLER_POOLS.includes(p),
+      );
+      if (fa.length === 0) fa = ['eero'];
+      if (fa.length > 5) fa = fa.slice(0, 5);
+      migrated.fillerAttempts = fa;
     }
 
     return { ...DEFAULTS, ...migrated };
