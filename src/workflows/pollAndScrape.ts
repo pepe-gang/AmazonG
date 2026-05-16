@@ -2851,7 +2851,13 @@ export async function runForProfile(
         ...(useFillers
           ? { fillerOrderIds, cartAsins, preBuyOrderIds, productTitle }
           : {}),
-      })
+      },
+      // forceFlush: a buy that placed an order MUST hit disk the
+      // instant its orderId/status is known. The normal debounced
+      // write can be deferred up to MAX_DEBOUNCE_MS, and a process
+      // restart/crash in that window would drop the placed order's
+      // record entirely (the ghost-order bug).
+      { forceFlush: true })
       .catch(() => undefined);
     return {
       email: profile,

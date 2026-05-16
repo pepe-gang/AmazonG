@@ -19,8 +19,22 @@ type Stored = {
 
 const MAX_ATTEMPTS = 1_000; // ring-buffer cap; oldest evicted on overflow
 
+// Debounce window for the disk write, and a HARD cap on how long the
+// debounce may keep deferring. scheduleSave restarts the 250ms timer
+// on every store mutation — under a busy run (a full deal list fanned
+// across accounts) mutations arrive closer than 250ms apart, so the
+// timer was perpetually reset and `persist()` never ran: the whole
+// run's attempt rows lived only in `cache`, and a process restart /
+// crash / quit dropped them (the ghost-order bug). MAX_DEBOUNCE_MS
+// forces a flush even under continuous activity.
+const SAVE_DEBOUNCE_MS = 250;
+const MAX_DEBOUNCE_MS = 2_000;
+
 let cache: Stored | null = null;
 let saveTimer: NodeJS.Timeout | null = null;
+// Timestamp of the OLDEST un-persisted mutation. null when the store
+// is clean (everything on disk). Used to enforce MAX_DEBOUNCE_MS.
+let dirtySince: number | null = null;
 
 function attemptsPath(): string {
   return join(app.getPath('userData'), 'job-attempts.json');
@@ -81,13 +95,31 @@ async function persist(): Promise<void> {
 }
 
 function scheduleSave(): void {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
+  const now = Date.now();
+  if (dirtySince === null) dirtySince = now;
+  // Hard cap: if the debounce has been deferring writes longer than
+  // MAX_DEBOUNCE_MS, stop resetting and flush NOW. Without this, a
+  // sustained run starves the timer indefinitely (see MAX_DEBOUNCE_MS
+  // comment) and nothing reaches disk until activity pauses.
+  if (now - dirtySince >= MAX_DEBOUNCE_MS) {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    dirtySince = null;
     void persist().catch(() => {
       // silent — next mutation will retry
     });
-  }, 250);
+    return;
+  }
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    dirtySince = null;
+    void persist().catch(() => {
+      // silent — next mutation will retry
+    });
+  }, SAVE_DEBOUNCE_MS);
 }
 
 /**
@@ -104,7 +136,19 @@ async function persistNow(): Promise<void> {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
+  dirtySince = null;
   await persist().catch(() => undefined);
+}
+
+/**
+ * Flush any pending (debounced) attempt-row writes to disk
+ * synchronously. Call from the app's `before-quit` handler — without
+ * it, a quit / restart abandons the in-memory `cache` and every row
+ * not yet persisted is lost (the ghost-order bug). Safe to call when
+ * the store is already clean (cheap no-op-ish write).
+ */
+export async function flushAttempts(): Promise<void> {
+  await persistNow();
 }
 
 function evictOldestIfNeeded(): void {

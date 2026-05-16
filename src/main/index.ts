@@ -16,6 +16,7 @@ import {
   createAttempt as storeCreateAttempt,
   deleteAttempt as storeDeleteAttempt,
   deleteAttempts as storeDeleteAttempts,
+  flushAttempts as storeFlushAttempts,
   getAttempt as storeGetAttempt,
   listAttempts as storeListAttempts,
   pruneOlderThan,
@@ -1250,6 +1251,15 @@ app.on('before-quit', async (e) => {
       await closeAllChromiumSessions();
     } catch (err) {
       logger.warn('app.quit.cleanup.error', { error: String(err) });
+    }
+    // Flush any pending (debounced) attempt-row writes. Without this a
+    // quit / restart abandons jobStore's in-memory cache and every row
+    // not yet on disk is lost — the ghost-order bug (placed order,
+    // zero local trace). Awaited so the write completes before exit.
+    try {
+      await storeFlushAttempts();
+    } catch {
+      // best-effort — never block shutdown on this
     }
     // Drain buffered logs before exit. The IPC drain is best-effort (the
     // renderer may already be torn down); the disk drain is awaited so
