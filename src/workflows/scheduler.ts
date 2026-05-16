@@ -446,7 +446,17 @@ export class StreamingScheduler {
     // missing). Lifecycle phases (verify/fetch_tracking) handle
     // their own row creation via ensureLifecycleAttempt — skip here.
     if (job.phase === 'buy' && tuples.length > 0) {
-      await Promise.all(
+      // GHOST-ORDER GUARD. A buy tuple whose attempt row was never
+      // created is poison: runForProfile only ever calls
+      // jobAttempts.update, and updateAttempt is a silent no-op when
+      // the row is missing — so the buy would place a REAL order on
+      // Amazon and leave zero local trace (no row, no orderId, no
+      // status). Previously a per-create `.catch()` swallowed the
+      // failure and dispatched the tuple anyway. Now: a tuple whose
+      // create fails is DROPPED — that profile skips this deal (a
+      // recoverable miss, BG re-queues) rather than placing an
+      // untracked order (unrecoverable money loss).
+      const created = await Promise.all(
         tuples.map((t) =>
           this.sd.deps.jobAttempts
             .create({
@@ -479,22 +489,27 @@ export class StreamingScheduler {
               productTitle: null,
               stage: null,
             })
+            .then(() => t) // create ok → keep the tuple
             .catch((err) => {
-              // Per-row failures shouldn't block the whole job —
-              // runForProfile's update will still no-op and the
-              // BG report path is unaffected. Log and continue.
-              logger.warn(
-                'scheduler.attempts.create.error',
+              // create failed → DROP this tuple. Running its buy
+              // would place an untracked order (see GHOST-ORDER
+              // GUARD above). Logged at error level so the skipped
+              // deal is visible.
+              logger.error(
+                'scheduler.attempts.create.failed',
                 {
                   jobId: job.id,
                   email: t.profile.email,
                   error: err instanceof Error ? err.message : String(err),
+                  note: 'profile skipped this deal — attempt row could not be created',
                 },
                 this.sd.parentCid,
               );
+              return null;
             }),
         ),
       );
+      return created.filter((t): t is Tuple => t !== null);
     }
 
     return tuples;

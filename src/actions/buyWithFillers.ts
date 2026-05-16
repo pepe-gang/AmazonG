@@ -9,6 +9,7 @@ const logger = loggerImport;
 import { cancelFillerOrder } from './cancelFillerOrder.js';
 import { clearCart, removeCartItemsByAsin, type ClearCartResult } from './clearCart.js';
 import { appendResearchEvent } from '../shared/researchLog.js';
+import { recordPlacedOrderEvent } from '../main/placedOrderLedger.js';
 import { scrapeProduct } from './scrapeProduct.js';
 import {
   captureDebugSnapshot,
@@ -1743,6 +1744,20 @@ export async function buyWithFillers(
     logger.info('step.fillerBuy.purchaseId.captured', { amazonPurchaseId }, cid);
   }
 
+  // DURABLE LEDGER. The confirmation page is up — a real order IS
+  // placed on Amazon. Append it synchronously NOW, before orderId
+  // capture or any reporting, so the placement survives every
+  // downstream failure mode (debounce loss, missing attempt row,
+  // crash, restart). See placedOrderLedger.ts.
+  recordPlacedOrderEvent({
+    event: 'order_confirmed',
+    profile: opts.profile ?? '(unknown)',
+    jobId: opts.jobId ?? null,
+    productUrl: opts.productUrl,
+    url: page.url(),
+    amazonPurchaseId,
+  });
+
   // Parse the confirmation page for `finalPrice` + `finalPriceText`.
   // NOTE: we intentionally ignore the orderId parsed here — Amazon's
   // confirmation body can contain stale ids in "Recommended for you"
@@ -1799,6 +1814,20 @@ export async function buyWithFillers(
       ? orderMatches.find((m) => m.matchedAsins.includes(targetAsin))?.orderId ??
         null
       : orderMatches[0]?.orderId ?? null;
+
+  // Durable ledger: record the capture outcome so the ledger line can
+  // be diffed against job-attempts.json / BG to localize a ghost.
+  recordPlacedOrderEvent({
+    event: orderId ? 'orderid_captured' : 'orderid_missing',
+    profile: opts.profile ?? '(unknown)',
+    jobId: opts.jobId ?? null,
+    productUrl: opts.productUrl,
+    orderId,
+    amazonPurchaseId,
+    ...(orderMatches.length > 0
+      ? { detail: `orderIds=${orderMatches.map((m) => m.orderId).join(',')}` }
+      : {}),
+  });
 
   if (orderMatches.length === 0) {
     logger.warn(

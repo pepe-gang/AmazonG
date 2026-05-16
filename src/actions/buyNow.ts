@@ -16,6 +16,7 @@ import { addFillerViaHttp, waitForDeliverySettle } from './buyWithFillers.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
 import { HTTP_BROWSERY_HEADERS, SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHttp.js';
 import { resolvePlacedQuantity } from '../shared/quantityResolver.js';
+import { recordPlacedOrderEvent } from '../main/placedOrderLedger.js';
 
 type BuyOptions = {
   dryRun: boolean;
@@ -637,6 +638,18 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     if (amazonPurchaseId) {
       step('step.buy.purchaseId.captured', { amazonPurchaseId });
     }
+
+    // DURABLE LEDGER. Confirmation page reached — a real order IS
+    // placed on Amazon. Append synchronously NOW, before orderId
+    // capture or reporting, so the placement survives every
+    // downstream failure mode. See placedOrderLedger.ts.
+    recordPlacedOrderEvent({
+      event: 'order_confirmed',
+      profile: opts.profile ?? '(unknown)',
+      jobId: opts.jobId ?? null,
+      url: page.url(),
+      amazonPurchaseId,
+    });
     // Optional: parse the confirmation page for the final price (the
     // orderId pulled from it is unreliable — recommendation sections and
     // "items you may like" carousels can contain stale order ids that
@@ -694,6 +707,17 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         orderId = null;
       }
     }
+
+    // Durable ledger: record the capture outcome so the ledger line
+    // can be diffed against job-attempts.json / BG to localize a ghost.
+    recordPlacedOrderEvent({
+      event: orderId ? 'orderid_captured' : 'orderid_missing',
+      profile: opts.profile ?? '(unknown)',
+      jobId: opts.jobId ?? null,
+      url: page.url(),
+      orderId,
+      amazonPurchaseId,
+    });
 
     step('step.buy.placed', {
       orderId,
