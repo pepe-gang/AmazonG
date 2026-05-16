@@ -843,6 +843,9 @@ export type PaymentCardFill = {
    *  requires one, so a null-expiry card can't be auto-added. */
   expiry: string | null;
   cvv: string | null;
+  /** Billing address — set as the card's billing address (distinct
+   *  from the shipping address). Null when the card has none. */
+  billingAddress: BillingAddress | null;
 };
 
 /**

@@ -1119,22 +1119,33 @@ async function reenterCheckout(
   }
 }
 
+const WALLET_URL =
+  'https://www.amazon.com/cpe/yourpayments/wallet?ref_=ya_d_c_pmt_mpo';
+
 /**
- * Fill + submit Amazon's checkout "Add a credit or debit card" form
- * from a saved payment card. Called by waitForCheckout when checkout
- * parks on the no-payment-method state and the account has a card
- * assigned.
+ * Add a payment card to the Amazon account from a saved card.
+ * Called by waitForCheckout when checkout parks on the no-payment
+ * state and the account has a card assigned.
  *
- * Recipe verified live 2026-05-16. The card fields render inside a
- * cross-origin PCI iframe (apx-security.amazon.com) — Playwright
- * drives it via a frame locator. Field `id`s are randomized; the
- * `name` attributes are stable.
+ * Navigates OFF the checkout to the Wallet page and drives the
+ * add-card flow there (more reliable than the in-checkout iframe);
+ * the caller re-enters checkout afterwards via reenterCheckout().
+ *
+ * Recipe verified live 2026-05-16:
+ *   1. goto Wallet → "Add a payment method" → "Add a credit or debit
+ *      card".
+ *   2. Card fields render in a cross-origin PCI iframe
+ *      (apx-security.amazon.com) — stable `name` attributes. Fill +
+ *      "Add your card".
+ *   3. Billing step: "Change" → "Add an address" → fill the card's
+ *      billing address (ppw-* fields) → "Use this address". Amazon's
+ *      address verifier may show a correction — accept the suggested
+ *      one. Skipped entirely when the card has no billing address.
+ *   4. Tick "Set as default payment method" → "Save".
  *
  * Returns false (never throws) when the card lacks an expiry or CVV
  * — Amazon's form requires both — or on any failure. The caller then
- * falls through to the action_required path. Success is confirmed by
- * the caller re-polling (the no_payment state clears once the card
- * lands), so this only needs to drive the form.
+ * falls through to the action_required path.
  */
 async function addPaymentCard(
   page: Page,
@@ -1159,10 +1170,21 @@ async function addPaymentCard(
   const month = String(Number(m[1]));
   const year = `20${m[2].slice(-2)}`;
   try {
-    await page.locator('a.pmts-add-cc-default-trigger-link').first().click();
+    await page.goto(WALLET_URL);
+    await page
+      .locator('a.apx-wallet-add-link[aria-label="Add a payment method"]')
+      .first()
+      .click();
+    await page
+      .locator('span.apx-secure-registration-content-trigger-js')
+      .filter({ hasText: 'Add a credit or debit card' })
+      .first()
+      .click();
+
+    // Card form — inside the cross-origin apx-secure iframe.
     const frame = page.frameLocator('iframe.apx-secure-iframe');
     const numberField = frame.locator('input[name="addCreditCardNumber"]');
-    await numberField.waitFor({ state: 'visible', timeout: 15_000 });
+    await numberField.waitFor({ state: 'visible', timeout: 20_000 });
     await numberField.fill(card.number);
     await frame
       .locator('input[name="ppw-accountHolderName"]')
@@ -1179,6 +1201,58 @@ async function addPaymentCard(
     await frame
       .locator('input[name="ppw-widgetEvent:AddCreditCardEvent"]')
       .click();
+
+    // Billing step. When the card has its own billing address, switch
+    // the billing address off the default (shipping) one and enter it.
+    const ba = card.billingAddress;
+    if (ba) {
+      await frame
+        .getByRole('button', { name: 'Change' })
+        .click({ timeout: 20_000 });
+      await frame
+        .getByRole('button', { name: 'Add an address' })
+        .click({ timeout: 15_000 });
+      const fullName = frame.locator('input[name="ppw-fullName"]');
+      await fullName.waitFor({ state: 'visible', timeout: 15_000 });
+      await fullName.fill(ba.fullName);
+      await frame.locator('input[name="ppw-line1"]').fill(ba.line1);
+      if (ba.line2) {
+        await frame.locator('input[name="ppw-line2"]').fill(ba.line2);
+      }
+      await frame.locator('input[name="ppw-city"]').fill(ba.city);
+      await frame
+        .locator('input[name="ppw-stateOrRegion"]')
+        .fill(ba.state);
+      await frame.locator('input[name="ppw-postalCode"]').fill(ba.zip);
+      await frame
+        .locator('select[name="ppw-countryCode"]')
+        .selectOption(ba.country || 'US')
+        .catch(() => undefined);
+      await frame.locator('input[name="ppw-phoneNumber"]').fill(ba.phone);
+      await frame
+        .locator('input[name="ppw-widgetEvent:AddAddressEvent"]')
+        .click();
+      // Amazon's address verifier may show a "we suggest a correction"
+      // modal — accept the suggested address (the first "Use this
+      // address"). Absent when the address verified cleanly.
+      await page.waitForTimeout(2_500);
+      const useSuggested = frame
+        .getByRole('button', { name: 'Use this address' })
+        .first();
+      if (await useSuggested.count().catch(() => 0)) {
+        await useSuggested.click().catch(() => undefined);
+      }
+    }
+
+    // Tick "Set as default payment method" and Save.
+    await page.waitForTimeout(1_500);
+    const defaultCb = frame.getByRole('checkbox', {
+      name: /set as default payment method/i,
+    });
+    if (!(await defaultCb.isChecked().catch(() => true))) {
+      await defaultCb.click().catch(() => undefined);
+    }
+    await frame.getByRole('button', { name: 'Save' }).click({ timeout: 15_000 });
     await page.waitForTimeout(3_000);
     emit?.step('step.waitForCheckout.payment.submitted', {
       last4: card.number.replace(/\D/g, '').slice(-4),
@@ -1674,6 +1748,11 @@ export async function waitForCheckout(
         emit?.step('step.waitForCheckout.payment.adding', {});
         const added = await addPaymentCard(page, opts.paymentCard, emit);
         if (added) {
+          // The add navigated off-checkout (Wallet page) — re-enter
+          // via the cart and reset the poll budget for the fresh
+          // checkout pipeline.
+          await reenterCheckout(page, emit);
+          deadline = Date.now() + 30_000;
           await page.waitForTimeout(1_500);
           continue;
         }
