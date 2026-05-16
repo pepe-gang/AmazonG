@@ -4773,7 +4773,7 @@ async function waitForSpcOrHandleByg(
   // We have no idea where it parked — /errors/500, a BYG loop, a
   // signin redirect, a stalled nav. Probe the likely landmarks (always
   // on) + drop a dev-only HTML/PNG snapshot so the next occurrence is
-  // diagnosable. captureDebugSnapshot is internally NODE_ENV-gated.
+  // diagnosable. captureDebugSnapshot writes only on dev runs.
   const captureSpcMiss = async (): Promise<{ ok: false; reason: string }> => {
     const probe = await probePageDiag(page, {
       page_headings: 'h1, h2',

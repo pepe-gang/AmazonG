@@ -2903,7 +2903,7 @@ export async function runForProfile(
     // Dev-mode HTML+PNG + probe when scrape navigation fails. Gives us
     // the page state at the moment goto threw (often a /ap/signin
     // redirect, a captcha interstitial, or a stale-cart /spc redirect).
-    // captureDebugSnapshot is internally gated on NODE_ENV.
+    // captureDebugSnapshot writes only on unpackaged dev runs.
     if (page && /NavigationError/.test(raw)) {
       const probe = await probePageDiag(page, {
         signin_form: 'form#ap_signin_form, input#ap_email',

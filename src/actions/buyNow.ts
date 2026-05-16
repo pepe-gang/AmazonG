@@ -95,6 +95,27 @@ async function captureDebugShot(
 }
 
 /**
+ * True only when running unpackaged — `npm run dev` / electron-vite
+ * dev, not the built .app. Uses Electron's `app.isPackaged`, the
+ * ground-truth signal.
+ *
+ * NOT `process.env.NODE_ENV`: this electron-vite main-process build
+ * leaves NODE_ENV as 'production' even under `npm run dev`, which
+ * silently disabled debug capture in dev (the v0.13.x "we never
+ * captured the HTML" surprise). Lazy electron import so importing
+ * this module stays safe in non-Electron contexts (vitest).
+ */
+async function isUnpackagedRun(): Promise<boolean> {
+  try {
+    const electron = await import('electron');
+    const app = (electron as { app?: { isPackaged?: boolean } }).app;
+    return app?.isPackaged === false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Like captureDebugShot but ALSO drops a full HTML snapshot alongside
  * the PNG. Use at points where we want both visual context (screenshot)
  * AND the actual DOM for offline analysis (e.g., DOM-drift bugs that
@@ -102,12 +123,11 @@ async function captureDebugShot(
  * debugDir is unset or either capture fails. Tag is timestamp-prefixed
  * so multiple captures per attempt don't overwrite.
  *
- * DEV-MODE ONLY. Gated on `process.env.NODE_ENV !== 'production'`
- * (electron-vite sets NODE_ENV=development under `npm run dev`,
- * packaged builds run as production). The lighter captureDebugShot
- * (PNG only) stays always-on for real-user diagnostics; this heavier
- * HTML-capture path is purely for the developer's batch diagnostic
- * runs.
+ * DEV-RUN ONLY. Captures whenever running unpackaged (`npm run dev`)
+ * and is a no-op in the packaged build — gated on `app.isPackaged`
+ * via isUnpackagedRun(). The lighter captureDebugShot (PNG only)
+ * stays always-on for real-user diagnostics; this heavier
+ * HTML-capture path is for dev runs.
  */
 export async function captureDebugSnapshot(
   page: Page,
@@ -115,7 +135,7 @@ export async function captureDebugSnapshot(
   tag: string,
 ): Promise<{ pngPath: string; htmlPath: string } | null> {
   if (!debugDir) return null;
-  if (process.env.NODE_ENV === 'production') return null;
+  if (!(await isUnpackagedRun())) return null;
   try {
     await mkdir(debugDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1655,7 +1675,7 @@ export async function waitForCheckout(
   // changed banner, a stuck Chewbacca interstitial, a signin
   // redirect, captcha, or back on /cart. Probe the likely landmarks
   // (always on) + drop a dev-only HTML/PNG snapshot so the next
-  // occurrence is diagnosable. captureDebugSnapshot is NODE_ENV-gated.
+  // occurrence is diagnosable. captureDebugSnapshot: dev runs only.
   const timeoutProbe = await probePageDiag(page, {
     place_order_input: 'input[name="placeYourOrder1"]',
     place_order_by_id: '#submitOrderButtonId',
