@@ -752,3 +752,27 @@ export type CreditCardSafe = {
   id: string;
   last4: string;
 };
+
+/**
+ * One payment card in the cross-device sync blob — carries the full
+ * card number in cleartext. Main-process + BG-wire only; this type
+ * must never reach the renderer (see CreditCardSafe for that).
+ */
+export type SyncCard = {
+  id: string;
+  last4: string;
+  number: string;
+};
+
+/**
+ * Cross-device sync payload exchanged with BG's /api/autog/sync.
+ * `exists` is false (and the value fields null) when the user has no
+ * sync row on BG yet. `updatedAt` is BG's ISO timestamp.
+ */
+export type AutoGSyncBlob = {
+  exists: boolean;
+  cards: SyncCard[];
+  buyWithFillers: boolean | null;
+  fillerAttempts: string[] | null;
+  updatedAt: string | null;
+};

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
-import type { CreditCardSafe } from '../shared/types.js';
+import type { CreditCardSafe, SyncCard } from '../shared/types.js';
 import { writeJsonAtomic } from './atomicJson.js';
 
 /**
@@ -156,4 +156,54 @@ export async function getCardNumberByLast4(
  *  handler log when a match was ambiguous. */
 export async function countCardsByLast4(last4: string): Promise<number> {
   return (await loadAll()).filter((c) => c.last4 === last4).length;
+}
+
+/**
+ * Decrypt every stored card for cross-device sync. Main-process ONLY
+ * — the plaintext PAN must never cross IPC. A card whose ciphertext
+ * fails to decrypt is skipped (don't abort the whole sync on one bad
+ * row). See putSync in src/bg/client.ts.
+ */
+export async function exportCardsWithNumbers(): Promise<SyncCard[]> {
+  const cards = await loadAll();
+  const out: SyncCard[] = [];
+  for (const c of cards) {
+    try {
+      out.push({ id: c.id, last4: c.last4, number: decrypt(c.numberEnc) });
+    } catch (err) {
+      logger.warn('cardVault.exportDecryptFailed', {
+        id: c.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Replace the entire local vault with a set pulled from BG sync. Each
+ * number is re-encrypted with THIS device's OS keychain (the synced
+ * blob carries cleartext PANs — safeStorage keys are machine-bound
+ * and don't travel). Main-process ONLY.
+ *
+ * Wholesale replace: on a sync pull BG is the source of truth.
+ * Returns the resulting safe list. Throws if keychain encryption is
+ * unavailable (same guard as addCard) so the caller can skip the
+ * apply rather than silently lose cards.
+ */
+export async function replaceCardsFromSync(
+  cards: SyncCard[],
+): Promise<CardSafe[]> {
+  const next: StoredCard[] = [];
+  for (const c of cards) {
+    const digits = (c.number ?? '').replace(/\D/g, '');
+    if (digits.length < 13 || digits.length > 19) continue;
+    next.push({
+      id: c.id || randomUUID(),
+      last4: digits.slice(-4),
+      numberEnc: encrypt(digits),
+    });
+  }
+  await saveAll(next);
+  return next.map(toSafe);
 }

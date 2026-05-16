@@ -39,9 +39,13 @@ export function useSettings(): {
       refresh(detail);
     };
     window.addEventListener(SETTINGS_EVENT, onEvt);
+    // A BG cross-device sync at startup can rewrite settings.json on
+    // disk (Buy-with-Fillers config) — re-fetch when main signals it.
+    const unsubSync = window.autog.onSyncApplied(() => refresh());
     return () => {
       cancelled = true;
       window.removeEventListener(SETTINGS_EVENT, onEvt);
+      unsubSync();
     };
   }, []);
   const update = useCallback(async (patch: Partial<Settings>) => {

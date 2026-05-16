@@ -169,6 +169,10 @@ export const IPC = {
    *  ChaseProfile rows (post-tick lastRunAt persistence). Renderer
    *  reconciles the Bank tab without a manual refresh. */
   evtChaseProfiles: 'evt:chase-profiles',
+  /** Fired after a startup BG cross-device sync applied new cards or
+   *  Buy-with-Fillers settings to disk. Renderer re-fetches settings
+   *  + cards so the synced state shows without a restart. */
+  evtSyncApplied: 'evt:sync-applied',
   fetchStatsGet: 'fetch-stats:get',
 } as const;
 
@@ -551,6 +555,10 @@ export type AutoGBridge = {
    *  persistence). Renderer reconciles the Bank tab without a
    *  manual refetch. */
   onChaseProfiles(cb: (profiles: ChaseProfile[]) => void): () => void;
+  /** Subscribe to "BG cross-device sync applied" — fired after
+   *  startup sync pulled new cards / Buy-with-Fillers settings.
+   *  Renderer re-fetches settings + cards in response. */
+  onSyncApplied(cb: () => void): () => void;
   /**
    * Read the BG.com fetch-stats summary (today/lifetime). Renderer's
    * header pill polls every 30s. Returns null on transport / auth

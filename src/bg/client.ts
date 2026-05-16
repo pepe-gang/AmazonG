@@ -1,6 +1,7 @@
 import { BGApiError } from '../shared/errors.js';
 import type {
   AutoGJob,
+  AutoGSyncBlob,
   FetchStatsSummary,
   IdentityInfo,
   JobAttemptStatus,
@@ -8,6 +9,7 @@ import type {
   RemoteFetchResult,
   ServerFillerCancelTask,
   ServerRemoteFetchJob,
+  SyncCard,
 } from '../shared/types.js';
 
 /**
@@ -262,6 +264,22 @@ export type BGClient = {
    * just renders a subset.
    */
   getFetchStatsSummary(range: 'today' | '7d' | 'lifetime'): Promise<FetchStatsSummary | null>;
+  /**
+   * Cross-device sync — pull this user's payment cards + Buy-with-
+   * Fillers config. Scoped server-side to the AutoG-key owner.
+   * `exists: false` means no sync row on BG yet.
+   */
+  getSync(): Promise<AutoGSyncBlob>;
+  /**
+   * Cross-device sync — replace this user's synced blob on BG.
+   * Returns BG's new `updatedAt`. Caller should `.catch()` — a sync
+   * failure must never break the local card/settings change.
+   */
+  putSync(blob: {
+    cards: SyncCard[];
+    buyWithFillers: boolean;
+    fillerAttempts: string[];
+  }): Promise<{ updatedAt: string }>;
 };
 
 /**
@@ -567,6 +585,30 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         { method: 'GET' },
       ).catch(() => null);
       return r ?? null;
+    },
+
+    async getSync() {
+      const r = await request<AutoGSyncBlob>('/api/autog/sync', {
+        method: 'GET',
+      });
+      return (
+        r ?? {
+          exists: false,
+          cards: [],
+          buyWithFillers: null,
+          fillerAttempts: null,
+          updatedAt: null,
+        }
+      );
+    },
+
+    async putSync(blob) {
+      const r = await request<{ ok: true; updatedAt: string }>(
+        '/api/autog/sync',
+        { method: 'PUT', body: JSON.stringify(blob) },
+      );
+      if (!r) throw new BGApiError(500, '/api/autog/sync', 'empty response');
+      return { updatedAt: r.updatedAt };
     },
   };
 }

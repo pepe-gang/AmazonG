@@ -42,7 +42,14 @@ import {
   updateProfile,
   upsertProfile,
 } from './profiles.js';
-import { addCard, getCardNumberByLast4, listCards, removeCard } from './cardVault.js';
+import {
+  addCard,
+  getCardNumberByLast4,
+  listCards,
+  removeCard,
+  exportCardsWithNumbers,
+  replaceCardsFromSync,
+} from './cardVault.js';
 import {
   createChaseProfile,
   loadChaseProfiles,
@@ -392,6 +399,99 @@ async function pullAmazonAccountsFromBG(): Promise<void> {
   if (added > 0) {
     logger.info('pullAmazonAccountsFromBG.added', { count: added });
     await broadcastProfiles();
+  }
+}
+
+/**
+ * Push the user's payment cards + Buy-with-Fillers config to BG's
+ * cross-device sync so other machines pick them up. Best-effort —
+ * never throws; callers fire-and-forget. See src/app/api/autog/sync
+ * on the BG side. A sync failure must never break the local
+ * card/settings change that triggered it.
+ */
+async function pushSyncToBG(): Promise<void> {
+  if (!apiKey) return;
+  try {
+    const settingsNow = await loadSettings();
+    const cards = await exportCardsWithNumbers();
+    const bg = createBGClient(settingsNow.bgBaseUrl, apiKey);
+    await bg.putSync({
+      cards,
+      buyWithFillers: settingsNow.buyWithFillers,
+      fillerAttempts: settingsNow.fillerAttempts,
+    });
+    logger.info('sync.push.ok', { cards: cards.length });
+  } catch (err) {
+    logger.info('sync.push.skip', {
+      reason: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Pull the user's synced cards + Buy-with-Fillers config from BG and
+ * apply them to local disk. Runs once at startup. When BG has no sync
+ * row yet, seeds it from this machine instead. Best-effort.
+ *
+ * Card-wipe guard: an empty BG card list never overwrites a populated
+ * local vault (that would be a fresh machine clobbering a configured
+ * one) — in that case we push local up instead.
+ */
+async function pullSyncFromBG(): Promise<void> {
+  if (!apiKey) return;
+  let settingsNow;
+  let blob;
+  try {
+    settingsNow = await loadSettings();
+    const bg = createBGClient(settingsNow.bgBaseUrl, apiKey);
+    blob = await bg.getSync();
+  } catch (err) {
+    logger.info('sync.pull.skip', {
+      reason: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  if (!blob.exists) {
+    // No row on BG yet — seed it from this machine.
+    await pushSyncToBG();
+    return;
+  }
+
+  let applied = false;
+
+  // Buy-with-Fillers settings — apply whatever BG carries.
+  const patch: Partial<Settings> = {};
+  if (typeof blob.buyWithFillers === 'boolean') {
+    patch.buyWithFillers = blob.buyWithFillers;
+  }
+  if (Array.isArray(blob.fillerAttempts) && blob.fillerAttempts.length > 0) {
+    patch.fillerAttempts = blob.fillerAttempts as Settings['fillerAttempts'];
+  }
+  if (Object.keys(patch).length > 0) {
+    await saveSettings({ ...settingsNow, ...patch });
+    applied = true;
+  }
+
+  // Cards — replace the local vault from BG. Never let an empty BG
+  // list wipe a populated local vault.
+  if (blob.cards.length > 0) {
+    try {
+      await replaceCardsFromSync(blob.cards);
+      applied = true;
+    } catch (err) {
+      logger.info('sync.pull.cards.skip', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else {
+    const local = await listCards().catch(() => []);
+    if (local.length > 0) await pushSyncToBG();
+  }
+
+  if (applied) {
+    logger.info('sync.pull.applied', { cards: blob.cards.length });
+    mainWindow?.webContents.send(IPC.evtSyncApplied);
   }
 }
 
@@ -1141,6 +1241,7 @@ app.whenReady().then(async () => {
   // block window creation on a network round-trip. Pull runs first
   // so the push has the merged list to operate on.
   void (async () => {
+    await pullSyncFromBG();
     await pullAmazonAccountsFromBG();
     await bulkSyncDisplayNamesToBG();
   })();
@@ -1360,6 +1461,13 @@ function registerIpcHandlers(): void {
     // hiddenAttemptIds feeds listMergedAttempts; toggling it must
     // re-broadcast so rows appear/disappear without a manual refresh.
     if (partial.hiddenAttemptIds !== undefined) scheduleBroadcastJobs();
+    // Buy-with-Fillers config is cross-device synced — push on change.
+    if (
+      partial.buyWithFillers !== undefined ||
+      partial.fillerAttempts !== undefined
+    ) {
+      void pushSyncToBG();
+    }
     return merged;
   });
 
@@ -3091,14 +3199,18 @@ function registerIpcHandlers(): void {
     async (_e, rawNumber: string): Promise<CreditCardSafe[]> => {
       // addCard validates + encrypts; it throws on a bad number, which
       // ipcMain.handle surfaces to the renderer as a rejected invoke.
-      return addCard(rawNumber);
+      const next = await addCard(rawNumber);
+      void pushSyncToBG();
+      return next;
     },
   );
 
   ipcMain.handle(
     IPC.cardsRemove,
     async (_e, id: string): Promise<CreditCardSafe[]> => {
-      return removeCard(id);
+      const next = await removeCard(id);
+      void pushSyncToBG();
+      return next;
     },
   );
 

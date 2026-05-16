@@ -105,16 +105,21 @@ function CreditCardsPanel() {
 
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
+    const reload = async () => {
       try {
         const list = await window.autog.cardsList();
         if (!cancelled) setCards(list);
       } catch {
         if (!cancelled) setCards([]);
       }
-    })();
+    };
+    void reload();
+    // A BG cross-device sync at startup can replace the local card
+    // vault — reload when main signals it so the list isn't stale.
+    const unsubSync = window.autog.onSyncApplied(() => void reload());
     return () => {
       cancelled = true;
+      unsubSync();
     };
   }, []);
 

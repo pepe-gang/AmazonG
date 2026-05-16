@@ -204,6 +204,11 @@ const bridge: AutoGBridge = {
     ipcRenderer.on(IPC.evtChaseProfiles, listener);
     return () => ipcRenderer.off(IPC.evtChaseProfiles, listener);
   },
+  onSyncApplied(cb) {
+    const listener = () => cb();
+    ipcRenderer.on(IPC.evtSyncApplied, listener);
+    return () => ipcRenderer.off(IPC.evtSyncApplied, listener);
+  },
   fetchStatsGet: (range) =>
     ipcRenderer.invoke(IPC.fetchStatsGet, range) as ReturnType<
       AutoGBridge['fetchStatsGet']
