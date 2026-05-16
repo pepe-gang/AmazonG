@@ -3,45 +3,54 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
-import type { CreditCardSafe, SyncCard } from '../shared/types.js';
+import type {
+  CreditCardSafe,
+  CreditCardInput,
+  SyncCard,
+} from '../shared/types.js';
 import { writeJsonAtomic } from './atomicJson.js';
 
 /**
  * Encrypted-at-rest local store for the user's Amazon payment cards.
- * Drives the auto-handler for Amazon's "Verify your card" checkout
- * challenge: when /spc interrupts Place Order asking the user to
- * re-type a card's full number, the worker matches the challenge's
- * "ending in NNNN" hint against this list and fills the number.
+ * Drives the "Verify your card" challenge handler and the per-account
+ * card assignment used at checkout.
  *
  * On disk: userData/card-vault.json
  *
- * Shape: { cards: [ { id, last4, numberEnc } ] }
- *   - numberEnc — base64 of safeStorage.encryptString(full PAN).
- *     The plaintext PAN is NEVER written to disk and NEVER logged.
- *   - last4 is plaintext — it's needed to match the challenge hint
- *     and isn't sensitive. (Cards saved before the label field was
- *     dropped may still carry a stray `label` key on disk; it's
- *     ignored on read and harmless.)
+ * Shape: { cards: [ { id, label, last4, numberEnc, expiry, cvvEnc } ] }
+ *   - numberEnc / cvvEnc — base64 of safeStorage.encryptString(...).
+ *     The plaintext PAN + CVV are NEVER written to disk and NEVER
+ *     logged. cvvEnc is null when no CVV was supplied.
+ *   - label / last4 / expiry are plaintext: label + last4 drive the
+ *     renderer's card dropdown, expiry (MM/YY) is low-sensitivity and
+ *     also shown there.
  *
- * Built on Electron's safeStorage (OS keychain — macOS Keychain,
- * Windows DPAPI, libsecret) — same mechanism as chaseCredentials.ts.
- * The PAN is only decryptable by the same OS user on the same machine.
+ * Legacy rows saved before this revision carry only { id, last4,
+ * numberEnc } — loaded gracefully (label defaults to "Card ••NNNN",
+ * expiry/cvv null).
  *
- * Renderer never receives the plaintext PAN. The IPC surface only
- * exposes the safe view ({ id, last4 }); decryption happens
- * exclusively in main-process worker code via getCardNumberByLast4.
+ * Built on Electron's safeStorage (OS keychain). Plaintext PAN/CVV are
+ * only decryptable by the same OS user on the same machine.
+ *
+ * Renderer never receives the PAN or CVV — the IPC surface exposes
+ * only the safe view ({ id, label, last4, expiry }).
  */
 
 type StoredCard = {
   id: string;
+  /** Optional on disk for legacy rows; toSafe() supplies a default. */
+  label?: string;
   last4: string;
   numberEnc: string;
+  /** MM/YY, plaintext. Absent on legacy rows. */
+  expiry?: string | null;
+  /** Encrypted CVV, or null/absent when none was supplied. */
+  cvvEnc?: string | null;
 };
 
 type StoreFile = { cards: StoredCard[] };
 
-/** Safe view handed to the renderer — no PAN, ever. Re-exported from
- *  shared/types so renderer + IPC code can reference it. */
+/** Safe view handed to the renderer — no PAN, no CVV, ever. */
 export type CardSafe = CreditCardSafe;
 
 function storePath(): string {
@@ -86,32 +95,57 @@ function decrypt(b64: string): string {
   return safeStorage.decryptString(Buffer.from(b64, 'base64'));
 }
 
+/** Normalize an MM/YY-ish expiry. Returns null when blank, throws on
+ *  an unparseable non-blank value. */
+function normalizeExpiry(raw: string): string | null {
+  const s = (raw ?? '').trim();
+  if (!s) return null;
+  const m = s.match(/^(\d{1,2})\s*\/?\s*(\d{2,4})$/);
+  if (!m || !m[1] || !m[2]) throw new Error('expiry must look like MM/YY');
+  const mm = m[1].padStart(2, '0');
+  const yy = m[2].slice(-2);
+  if (Number(mm) < 1 || Number(mm) > 12) {
+    throw new Error('expiry month must be 01–12');
+  }
+  return `${mm}/${yy}`;
+}
+
 const toSafe = (c: StoredCard): CardSafe => ({
   id: c.id,
+  label: c.label?.trim() || `Card ••${c.last4}`,
   last4: c.last4,
+  expiry: c.expiry ?? null,
 });
 
-/** Renderer-facing list — PAN stripped. */
+/** Renderer-facing list — PAN + CVV stripped. */
 export async function listCards(): Promise<CardSafe[]> {
   return (await loadAll()).map(toSafe);
 }
 
 /**
- * Add a card. `rawNumber` may contain spaces / dashes — they're
- * stripped before validation + storage. Returns the updated safe
- * list. Throws on an obviously invalid number so the renderer can
- * surface the error inline.
+ * Add a card. The number may contain spaces / dashes — stripped
+ * before validation. `expiry` and `cvv` may be blank (stored null).
+ * Returns the updated safe list. Throws on an invalid number / expiry
+ * / cvv so the renderer can surface the error inline.
  */
-export async function addCard(rawNumber: string): Promise<CardSafe[]> {
-  const digits = (rawNumber ?? '').replace(/\D/g, '');
+export async function addCard(input: CreditCardInput): Promise<CardSafe[]> {
+  const digits = (input.number ?? '').replace(/\D/g, '');
   if (digits.length < 13 || digits.length > 19) {
     throw new Error('card number must be 13–19 digits');
+  }
+  const expiry = normalizeExpiry(input.expiry ?? '');
+  const cvvDigits = (input.cvv ?? '').replace(/\D/g, '');
+  if (cvvDigits && (cvvDigits.length < 3 || cvvDigits.length > 4)) {
+    throw new Error('CVV must be 3–4 digits');
   }
   const cards = await loadAll();
   const card: StoredCard = {
     id: randomUUID(),
+    label: (input.label ?? '').trim(),
     last4: digits.slice(-4),
     numberEnc: encrypt(digits),
+    expiry,
+    cvvEnc: cvvDigits ? encrypt(cvvDigits) : null,
   };
   cards.push(card);
   await saveAll(cards);
@@ -159,8 +193,35 @@ export async function countCardsByLast4(last4: string): Promise<number> {
 }
 
 /**
+ * Resolve a card's full details by vault id. Main-process ONLY — used
+ * by the checkout payment-fill flow. Returns null when the id is
+ * unknown or the PAN can't be decrypted. `cvv` is null when the card
+ * was saved without one.
+ */
+export async function getFullCardById(
+  id: string,
+): Promise<{ label: string; number: string; expiry: string | null; cvv: string | null } | null> {
+  const match = (await loadAll()).find((c) => c.id === id);
+  if (!match) return null;
+  try {
+    return {
+      label: match.label?.trim() || `Card ••${match.last4}`,
+      number: decrypt(match.numberEnc),
+      expiry: match.expiry ?? null,
+      cvv: match.cvvEnc ? decrypt(match.cvvEnc) : null,
+    };
+  } catch (err) {
+    logger.warn('cardVault.fullCardDecryptFailed', {
+      id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
  * Decrypt every stored card for cross-device sync. Main-process ONLY
- * — the plaintext PAN must never cross IPC. A card whose ciphertext
+ * — the plaintext PAN + CVV must never cross IPC. A card whose PAN
  * fails to decrypt is skipped (don't abort the whole sync on one bad
  * row). See putSync in src/bg/client.ts.
  */
@@ -169,7 +230,14 @@ export async function exportCardsWithNumbers(): Promise<SyncCard[]> {
   const out: SyncCard[] = [];
   for (const c of cards) {
     try {
-      out.push({ id: c.id, last4: c.last4, number: decrypt(c.numberEnc) });
+      out.push({
+        id: c.id,
+        label: c.label?.trim() || `Card ••${c.last4}`,
+        last4: c.last4,
+        number: decrypt(c.numberEnc),
+        expiry: c.expiry ?? null,
+        cvv: c.cvvEnc ? decrypt(c.cvvEnc) : null,
+      });
     } catch (err) {
       logger.warn('cardVault.exportDecryptFailed', {
         id: c.id,
@@ -181,9 +249,9 @@ export async function exportCardsWithNumbers(): Promise<SyncCard[]> {
 }
 
 /**
- * Replace the entire local vault with a set pulled from BG sync. Each
- * number is re-encrypted with THIS device's OS keychain (the synced
- * blob carries cleartext PANs — safeStorage keys are machine-bound
+ * Replace the entire local vault with a set pulled from BG sync. The
+ * PAN + CVV are re-encrypted with THIS device's OS keychain (the
+ * synced blob carries cleartext — safeStorage keys are machine-bound
  * and don't travel). Main-process ONLY.
  *
  * Wholesale replace: on a sync pull BG is the source of truth.
@@ -198,10 +266,14 @@ export async function replaceCardsFromSync(
   for (const c of cards) {
     const digits = (c.number ?? '').replace(/\D/g, '');
     if (digits.length < 13 || digits.length > 19) continue;
+    const cvvDigits = (c.cvv ?? '').replace(/\D/g, '');
     next.push({
       id: c.id || randomUUID(),
+      label: (c.label ?? '').trim(),
       last4: digits.slice(-4),
       numberEnc: encrypt(digits),
+      expiry: c.expiry ?? null,
+      cvvEnc: cvvDigits ? encrypt(cvvDigits) : null,
     });
   }
   await saveAll(next);

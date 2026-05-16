@@ -7,6 +7,7 @@ import type {
   ChaseRedeemEntry,
   ChaseRedeemResult,
   CreditCardSafe,
+  CreditCardInput,
   FetchStatsSummary,
   IdentityInfo,
   JobAttempt,
@@ -48,6 +49,9 @@ export const IPC = {
    *  Pass null to clear. Returns the updated profile list so the
    *  renderer can reconcile its local state. */
   profilesSetBgAddress: 'profiles:set-bg-address',
+  /** Assign (or clear, with null) the saved payment card an Amazon
+   *  account uses. Returns the updated profile list. */
+  profilesSetCard: 'profiles:set-card',
   /** List stored payment cards (safe view — id/last4/label only, no
    *  full number). Drives the "Verify your card" auto-handler. */
   cardsList: 'cards:list',
@@ -422,12 +426,14 @@ export type AutoGBridge = {
   profilesAddBgAddress(email: string): Promise<{ ok: boolean; reason?: string; detail?: string }>;
   /** Save or clear the BG receiving address on one AmazonProfile. */
   profilesSetBgAddress(email: string, address: BGAddress | null): Promise<AmazonProfile[]>;
-  /** List stored payment cards — safe view only (no full number). */
+  /** Assign (or clear, with null) the saved card an account uses. */
+  profilesSetCard(email: string, cardId: string | null): Promise<AmazonProfile[]>;
+  /** List stored payment cards — safe view only (no full number/CVV). */
   cardsList(): Promise<CreditCardSafe[]>;
-  /** Add a payment card. `rawNumber` is encrypted at rest in the main
-   *  process; only the safe list is returned. Rejects on an invalid
-   *  number (13–19 digits after stripping separators). */
-  cardsAdd(rawNumber: string): Promise<CreditCardSafe[]>;
+  /** Add a payment card. The number + CVV are encrypted at rest in the
+   *  main process; only the safe list is returned. Rejects on an
+   *  invalid number / expiry / CVV. */
+  cardsAdd(input: CreditCardInput): Promise<CreditCardSafe[]>;
   /** Remove a stored payment card by id. Returns the updated list. */
   cardsRemove(id: string): Promise<CreditCardSafe[]>;
   dealsList(): Promise<AmazonDeal[]>;

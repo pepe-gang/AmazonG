@@ -28,12 +28,14 @@ export async function loadProfiles(): Promise<AmazonProfile[]> {
     //  - `autoBuy`: defaults to true (preserves prior behavior — every
     //    enabled account claimed buy jobs before this field existed).
     //  - `bgAddress`: defaults to null (opt-in, user fills in per profile).
+    //  - `cardId`: defaults to null (no card assigned).
     return list.map((p) => ({
       ...p,
       headless: p.headless ?? true,
       buyWithFillers: p.buyWithFillers ?? false,
       autoBuy: p.autoBuy ?? true,
       bgAddress: p.bgAddress ?? null,
+      cardId: p.cardId ?? null,
     }));
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
@@ -94,6 +96,7 @@ export function newProfile(email: string, displayName?: string): AmazonProfile {
     headless: true,
     buyWithFillers: false,
     bgAddress: null,
+    cardId: null,
   };
 }
 

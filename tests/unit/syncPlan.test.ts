@@ -4,8 +4,11 @@ import type { AutoGSyncBlob, SyncCard } from "../../src/shared/types.js";
 
 const card = (id: string): SyncCard => ({
   id,
+  label: `Card ${id}`,
   last4: id.slice(-4).padStart(4, "0"),
   number: `4111111111${id.slice(-4).padStart(4, "0")}`,
+  expiry: "12/27",
+  cvv: "123",
 });
 
 /** A populated BG blob (exists=true) with sensible defaults; override per test. */
@@ -13,6 +16,7 @@ function blob(over: Partial<AutoGSyncBlob> = {}): AutoGSyncBlob {
   return {
     exists: true,
     cards: [],
+    cardAssignments: null,
     buyWithFillers: false,
     fillerAttempts: ["eero"],
     updatedAt: "2026-05-16T00:00:00.000Z",
@@ -20,26 +24,30 @@ function blob(over: Partial<AutoGSyncBlob> = {}): AutoGSyncBlob {
   };
 }
 
+const emptyBlob: AutoGSyncBlob = {
+  exists: false,
+  cards: [],
+  cardAssignments: null,
+  buyWithFillers: null,
+  fillerAttempts: null,
+  updatedAt: null,
+};
+
 describe("planSync", () => {
   describe("when BG has no row yet (exists=false)", () => {
     it("seeds from local: push up, change nothing, not applied", () => {
-      const plan = planSync(
-        { exists: false, cards: [], buyWithFillers: null, fillerAttempts: null, updatedAt: null },
-        3,
-      );
+      const plan = planSync(emptyBlob, 3);
       expect(plan).toEqual({
         settingsPatch: {},
         cards: null,
+        cardAssignments: null,
         pushLocal: true,
         applied: false,
       });
     });
 
     it("seeds even when this machine has no cards either", () => {
-      const plan = planSync(
-        { exists: false, cards: [], buyWithFillers: null, fillerAttempts: null, updatedAt: null },
-        0,
-      );
+      const plan = planSync(emptyBlob, 0);
       expect(plan.pushLocal).toBe(true);
       expect(plan.applied).toBe(false);
     });
@@ -58,19 +66,13 @@ describe("planSync", () => {
       expect(plan.applied).toBe(true);
     });
 
-    it("omits fillerAttempts when BG carries an empty array", () => {
-      const plan = planSync(blob({ fillerAttempts: [] }), 0);
-      expect(plan.settingsPatch.fillerAttempts).toBeUndefined();
-    });
-
-    it("omits fillerAttempts when BG carries null", () => {
-      const plan = planSync(blob({ fillerAttempts: null }), 0);
-      expect(plan.settingsPatch.fillerAttempts).toBeUndefined();
+    it("omits fillerAttempts when BG carries an empty array or null", () => {
+      expect(planSync(blob({ fillerAttempts: [] }), 0).settingsPatch.fillerAttempts).toBeUndefined();
+      expect(planSync(blob({ fillerAttempts: null }), 0).settingsPatch.fillerAttempts).toBeUndefined();
     });
 
     it("omits buyWithFillers when BG carries null", () => {
-      const plan = planSync(blob({ buyWithFillers: null }), 0);
-      expect(plan.settingsPatch.buyWithFillers).toBeUndefined();
+      expect(planSync(blob({ buyWithFillers: null }), 0).settingsPatch.buyWithFillers).toBeUndefined();
     });
 
     it("applies buyWithFillers=false (a real value, not skipped)", () => {
@@ -102,6 +104,26 @@ describe("planSync", () => {
     });
   });
 
+  describe("card assignments", () => {
+    it("applies a non-empty assignment map from BG", () => {
+      const assignments = { "a@x.com": "c1" };
+      const plan = planSync(blob({ cards: [card("c1")], cardAssignments: assignments }), 0);
+      expect(plan.cardAssignments).toBe(assignments);
+      expect(plan.applied).toBe(true);
+    });
+
+    it("ignores an empty assignment map", () => {
+      const plan = planSync(blob({ cards: [card("c1")], cardAssignments: {} }), 0);
+      expect(plan.cardAssignments).toBeNull();
+    });
+
+    it("does NOT apply assignments when pushing local up (empty remote)", () => {
+      const plan = planSync(blob({ cards: [], cardAssignments: { "a@x.com": "c1" } }), 2);
+      expect(plan.pushLocal).toBe(true);
+      expect(plan.cardAssignments).toBeNull();
+    });
+  });
+
   describe("applied flag", () => {
     it("is true when only cards changed", () => {
       const plan = planSync(
@@ -111,8 +133,11 @@ describe("planSync", () => {
       expect(plan.applied).toBe(true);
     });
 
-    it("is true when only settings changed", () => {
-      const plan = planSync(blob({ cards: [], buyWithFillers: true }), 0);
+    it("is true when only assignments changed", () => {
+      const plan = planSync(
+        blob({ buyWithFillers: null, fillerAttempts: null, cardAssignments: { "a@x.com": "c1" } }),
+        0,
+      );
       expect(plan.applied).toBe(true);
     });
 

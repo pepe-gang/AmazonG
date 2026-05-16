@@ -408,6 +408,14 @@ export type AmazonProfile = {
    * auto-recovery on address-picker fail is skipped.
    */
   bgAddress: BGAddress | null;
+  /**
+   * Id of the saved payment card (cardVault) this account should use.
+   * Null when none is assigned. Multiple accounts may reference the
+   * same card id — it's just a pointer into the vault, so sharing is
+   * free. Settable per-account via the card dropdown on the account
+   * row. Synced across machines via the cross-device sync.
+   */
+  cardId: string | null;
 };
 
 /**
@@ -745,33 +753,59 @@ export type FetchStatsSummary = {
 
 /**
  * Renderer-safe view of a stored payment card. The full card number
- * is encrypted at rest in the main process (card-vault.json via OS
- * keychain) and NEVER crosses IPC — only this view does.
+ * and the CVV are encrypted at rest in the main process
+ * (card-vault.json via OS keychain) and NEVER cross IPC — only this
+ * view does. `label` + `last4` + `expiry` are shown so the renderer
+ * can render a card dropdown ("Label ···· 1234 · 12/27").
  */
 export type CreditCardSafe = {
   id: string;
+  label: string;
   last4: string;
+  /** MM/YY, or null for legacy cards saved before the expiry field. */
+  expiry: string | null;
+};
+
+/**
+ * Fields the renderer sends to add/save a payment card. `expiry` +
+ * `cvv` may be blank. The full number + CVV are encrypted in the main
+ * process the instant they arrive and never persist in plaintext.
+ */
+export type CreditCardInput = {
+  label: string;
+  number: string;
+  expiry: string;
+  cvv: string;
 };
 
 /**
  * One payment card in the cross-device sync blob — carries the full
- * card number in cleartext. Main-process + BG-wire only; this type
- * must never reach the renderer (see CreditCardSafe for that).
+ * card number, expiry and CVV in cleartext. Main-process + BG-wire
+ * only; this type must never reach the renderer (see CreditCardSafe).
  */
 export type SyncCard = {
   id: string;
+  label: string;
   last4: string;
   number: string;
+  /** MM/YY, or null for legacy cards. */
+  expiry: string | null;
+  cvv: string | null;
 };
 
 /**
  * Cross-device sync payload exchanged with BG's /api/autog/sync.
  * `exists` is false (and the value fields null) when the user has no
  * sync row on BG yet. `updatedAt` is BG's ISO timestamp.
+ *
+ * `cardAssignments` maps a lowercased Amazon-account email to the
+ * cardVault card id that account uses — synced so a second machine
+ * picks up the same per-account card choices.
  */
 export type AutoGSyncBlob = {
   exists: boolean;
   cards: SyncCard[];
+  cardAssignments: Record<string, string> | null;
   buyWithFillers: boolean | null;
   fillerAttempts: string[] | null;
   updatedAt: string | null;

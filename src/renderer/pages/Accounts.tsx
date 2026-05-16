@@ -99,7 +99,10 @@ export function AccountsView({
 function CreditCardsPanel() {
   const [cards, setCards] = useState<CreditCardSafe[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [labelDraft, setLabelDraft] = useState('');
   const [numberDraft, setNumberDraft] = useState('');
+  const [expiryDraft, setExpiryDraft] = useState('');
+  const [cvvDraft, setCvvDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -123,13 +126,25 @@ function CreditCardsPanel() {
     };
   }, []);
 
+  const resetDraft = () => {
+    setLabelDraft('');
+    setNumberDraft('');
+    setExpiryDraft('');
+    setCvvDraft('');
+  };
+
   const add = async () => {
     setError(null);
     setBusy(true);
     try {
-      const next = await window.autog.cardsAdd(numberDraft);
+      const next = await window.autog.cardsAdd({
+        label: labelDraft,
+        number: numberDraft,
+        expiry: expiryDraft,
+        cvv: cvvDraft,
+      });
       setCards(next);
-      setNumberDraft('');
+      resetDraft();
       setAdding(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'failed to add card');
@@ -172,11 +187,36 @@ function CreditCardsPanel() {
         <div className="prefix-edit" style={{ flexWrap: 'wrap' }}>
           <input
             type="text"
+            autoComplete="off"
+            value={labelDraft}
+            onChange={(e) => setLabelDraft(e.target.value)}
+            placeholder="Label (e.g. Chase Visa)"
+          />
+          <input
+            type="text"
             inputMode="numeric"
             autoComplete="off"
             value={numberDraft}
             onChange={(e) => setNumberDraft(e.target.value)}
             placeholder="Full card number"
+          />
+          <input
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={expiryDraft}
+            onChange={(e) => setExpiryDraft(e.target.value)}
+            placeholder="MM/YY"
+            style={{ maxWidth: 90 }}
+          />
+          <input
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={cvvDraft}
+            onChange={(e) => setCvvDraft(e.target.value)}
+            placeholder="CVV"
+            style={{ maxWidth: 80 }}
           />
           <button
             className="primary-action"
@@ -189,7 +229,7 @@ function CreditCardsPanel() {
             className="ghost-btn"
             onClick={() => {
               setAdding(false);
-              setNumberDraft('');
+              resetDraft();
               setError(null);
             }}
           >
@@ -211,7 +251,8 @@ function CreditCardsPanel() {
         ) : (
           cards.map((c) => (
             <span key={c.id} className="prefix-chip">
-              •••• {c.last4}
+              {c.label} ···· {c.last4}
+              {c.expiry ? ` · ${c.expiry}` : ''}
               <button
                 className="ghost-btn"
                 style={{ marginLeft: 6, padding: '0 4px' }}
@@ -529,6 +570,9 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
   // an item is selected so the user doesn't have to dismiss manually
   // after clicking through.
   const [openMenuEmail, setOpenMenuEmail] = useState<string | null>(null);
+  // Saved payment cards (safe view) — drives the per-account card
+  // dropdown. Reloaded on a BG cross-device sync.
+  const [cards, setCards] = useState<CreditCardSafe[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -548,6 +592,34 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
       cancelled = true;
     };
   }, []);
+
+  // Load saved payment cards for the per-account card dropdown, and
+  // reload on a BG cross-device sync (which can replace the vault).
+  useEffect(() => {
+    let cancelled = false;
+    const reload = async () => {
+      try {
+        const list = await window.autog.cardsList();
+        if (!cancelled) setCards(list);
+      } catch {
+        if (!cancelled) setCards([]);
+      }
+    };
+    void reload();
+    const unsubSync = window.autog.onSyncApplied(() => void reload());
+    return () => {
+      cancelled = true;
+      unsubSync();
+    };
+  }, []);
+
+  const setCard = async (email: string, cardId: string | null) => {
+    try {
+      await window.autog.profilesSetCard(email, cardId);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const doAddBgAddress = async (email: string) => {
     if (addingAddrEmail) return;
@@ -1005,6 +1077,37 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                             {bg.label}
                           </option>
                         ))}
+                      </select>
+                    </label>
+                    {/* Per-account payment card. Multiple accounts may
+                        point at the same card — it's just a reference
+                        into the vault. */}
+                    <label
+                      className="flex items-center gap-2"
+                      title="The saved payment card AmazonG uses for this Amazon account at checkout."
+                    >
+                      <span className="text-xs font-medium text-foreground/80 whitespace-nowrap">
+                        Payment card
+                      </span>
+                      <select
+                        value={p.cardId ?? ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          void setCard(p.email, v === '' ? null : v);
+                        }}
+                        className="text-xs bg-white/[0.03] border border-white/10 rounded-md px-2 py-1 text-foreground/90 focus:outline-none focus:border-white/30"
+                      >
+                        <option value="">None</option>
+                        {cards.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.label} ···· {c.last4}
+                          </option>
+                        ))}
+                        {/* Keep a stale assignment visible even if the
+                            card was removed from the vault. */}
+                        {p.cardId && !cards.some((c) => c.id === p.cardId) && (
+                          <option value={p.cardId}>(card removed)</option>
+                        )}
                       </select>
                     </label>
                   </div>

@@ -14,6 +14,9 @@ export type SyncPlan = {
   settingsPatch: { buyWithFillers?: boolean; fillerAttempts?: FillerPool[] };
   /** Cards to replace the local vault with, or null to leave it alone. */
   cards: SyncCard[] | null;
+  /** Account→card assignments (email → cardId) to apply to profiles,
+   *  or null to leave local assignments alone. */
+  cardAssignments: Record<string, string> | null;
   /** Push local state up to BG after applying — BG had no row yet, or
    *  BG's card list was empty while this machine has cards (so an
    *  empty remote can't wipe a populated local vault). */
@@ -31,7 +34,13 @@ export function planSync(
 ): SyncPlan {
   // No row on BG yet — seed it from this machine, change nothing local.
   if (!blob.exists) {
-    return { settingsPatch: {}, cards: null, pushLocal: true, applied: false };
+    return {
+      settingsPatch: {},
+      cards: null,
+      cardAssignments: null,
+      pushLocal: true,
+      applied: false,
+    };
   }
 
   const settingsPatch: SyncPlan['settingsPatch'] = {};
@@ -52,6 +61,19 @@ export function planSync(
     pushLocal = true;
   }
 
-  const applied = Object.keys(settingsPatch).length > 0 || cards !== null;
-  return { settingsPatch, cards, pushLocal, applied };
+  // Apply account→card assignments unless we're pushing local up (an
+  // empty remote shouldn't clear local assignments either). An empty
+  // assignment map is treated as "nothing to apply".
+  const cardAssignments =
+    !pushLocal &&
+    blob.cardAssignments &&
+    Object.keys(blob.cardAssignments).length > 0
+      ? blob.cardAssignments
+      : null;
+
+  const applied =
+    Object.keys(settingsPatch).length > 0 ||
+    cards !== null ||
+    cardAssignments !== null;
+  return { settingsPatch, cards, cardAssignments, pushLocal, applied };
 }

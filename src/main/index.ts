@@ -87,7 +87,7 @@ import { openSession } from '../browser/driver.js';
 import { snapshotDir, snapshotsDiskUsage, clearAllSnapshots } from '../browser/snapshot.js';
 import { compareSemver } from '../shared/version.js';
 import { isLoggedInAmazon, loginAmazon } from '../actions/loginAmazon.js';
-import type { AmazonProfile, CreditCardSafe, IdentityInfo, RendererStatus } from '../shared/types.js';
+import type { AmazonProfile, CreditCardSafe, CreditCardInput, IdentityInfo, RendererStatus } from '../shared/types.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -415,13 +415,24 @@ async function pushSyncToBG(): Promise<void> {
   try {
     const settingsNow = await loadSettings();
     const cards = await exportCardsWithNumbers();
+    // Account→card assignments: { lowercased email → cardId } for
+    // every profile that has a card assigned.
+    const profiles = await loadProfiles().catch(() => [] as AmazonProfile[]);
+    const cardAssignments: Record<string, string> = {};
+    for (const p of profiles) {
+      if (p.cardId) cardAssignments[p.email.toLowerCase()] = p.cardId;
+    }
     const bg = createBGClient(settingsNow.bgBaseUrl, apiKey);
     await bg.putSync({
       cards,
+      cardAssignments,
       buyWithFillers: settingsNow.buyWithFillers,
       fillerAttempts: settingsNow.fillerAttempts,
     });
-    logger.info('sync.push.ok', { cards: cards.length });
+    logger.info('sync.push.ok', {
+      cards: cards.length,
+      assignments: Object.keys(cardAssignments).length,
+    });
   } catch (err) {
     logger.info('sync.push.skip', {
       reason: err instanceof Error ? err.message : String(err),
@@ -467,9 +478,25 @@ async function pullSyncFromBG(): Promise<void> {
       });
     }
   }
+  // Apply account→card assignments — set each profile's cardId.
+  if (plan.cardAssignments) {
+    const localProfiles = await loadProfiles().catch(() => [] as AmazonProfile[]);
+    const localEmails = new Set(localProfiles.map((p) => p.email.toLowerCase()));
+    for (const [email, cardId] of Object.entries(plan.cardAssignments)) {
+      if (localEmails.has(email)) {
+        await updateProfile(email, { cardId }).catch(() => undefined);
+      }
+    }
+    await broadcastProfiles();
+  }
   if (plan.pushLocal) await pushSyncToBG();
   if (plan.applied) {
-    logger.info('sync.pull.applied', { cards: plan.cards?.length ?? 0 });
+    logger.info('sync.pull.applied', {
+      cards: plan.cards?.length ?? 0,
+      assignments: plan.cardAssignments
+        ? Object.keys(plan.cardAssignments).length
+        : 0,
+    });
     mainWindow?.webContents.send(IPC.evtSyncApplied);
   }
 }
@@ -3169,16 +3196,27 @@ function registerIpcHandlers(): void {
     },
   );
 
+  ipcMain.handle(
+    IPC.profilesSetCard,
+    async (_e, email: string, cardId: string | null): Promise<AmazonProfile[]> => {
+      const list = await updateProfile(email, { cardId });
+      await broadcastProfiles();
+      // The account→card assignment is cross-device synced.
+      void pushSyncToBG();
+      return list;
+    },
+  );
+
   ipcMain.handle(IPC.cardsList, async (): Promise<CreditCardSafe[]> => {
     return listCards();
   });
 
   ipcMain.handle(
     IPC.cardsAdd,
-    async (_e, rawNumber: string): Promise<CreditCardSafe[]> => {
-      // addCard validates + encrypts; it throws on a bad number, which
+    async (_e, input: CreditCardInput): Promise<CreditCardSafe[]> => {
+      // addCard validates + encrypts; it throws on bad input, which
       // ipcMain.handle surfaces to the renderer as a rejected invoke.
-      const next = await addCard(rawNumber);
+      const next = await addCard(input);
       void pushSyncToBG();
       return next;
     },

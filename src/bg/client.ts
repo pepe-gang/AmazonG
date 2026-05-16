@@ -277,6 +277,7 @@ export type BGClient = {
    */
   putSync(blob: {
     cards: SyncCard[];
+    cardAssignments: Record<string, string>;
     buyWithFillers: boolean;
     fillerAttempts: string[];
   }): Promise<{ updatedAt: string }>;
@@ -595,6 +596,7 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         r ?? {
           exists: false,
           cards: [],
+          cardAssignments: null,
           buyWithFillers: null,
           fillerAttempts: null,
           updatedAt: null,
