@@ -22,10 +22,9 @@ const DEFAULTS: Settings = {
   snapshotOnFailure: false,
   snapshotGroups: [],
   buyWithFillers: false,
-  // 3 attempts: eero first, then amazon-basics on retry. Mirrors the
-  // pre-v0.13.62 hardcoded behavior (single 'eero' pool + the
-  // eero→amazon-basics retry fallback).
-  fillerAttempts: ['eero', 'amazon-basics', 'amazon-basics'],
+  // One eero attempt by default — no retries. Users add attempts (and
+  // pick each one's pool) via the Filler Attempts UI.
+  fillerAttempts: ['eero'],
   failedHiddenBeforeTs: null,
   hiddenAttemptIds: [],
   autoEnqueueEnabled: false,
@@ -107,9 +106,9 @@ export async function loadSettings(): Promise<Settings> {
     //   - pre-v0.13.36 it was the boolean `wheyProteinFillerOnly`
     //     (true → 'eero', false → 'general')
     //   - v0.13.40 removed the 'whey' pool → 'eero'
-    // Then expand to a 3-attempt array preserving prior behavior: an
-    // 'eero' pool retried on 'amazon-basics' (the old hardcoded
-    // retryPoolFallback); any other pool repeated as-is.
+    // Migrate to a SINGLE attempt on the saved pool — matches the new
+    // 1-attempt default. Retries are now opt-in: a user re-adds them
+    // (with whatever pool per attempt) via the Filler Attempts UI.
     if (migrated.fillerAttempts === undefined) {
       let legacyPool: FillerPool | 'whey' | undefined = parsed.fillerPool;
       if (legacyPool === undefined && parsed.wheyProteinFillerOnly !== undefined) {
@@ -118,10 +117,7 @@ export async function loadSettings(): Promise<Settings> {
       if (legacyPool === 'whey' || legacyPool === undefined) {
         legacyPool = 'eero';
       }
-      migrated.fillerAttempts =
-        legacyPool === 'eero'
-          ? ['eero', 'amazon-basics', 'amazon-basics']
-          : [legacyPool, legacyPool, legacyPool];
+      migrated.fillerAttempts = [legacyPool];
     }
     // The legacy single-pool field no longer exists on Settings.
     delete (migrated as { fillerPool?: unknown }).fillerPool;

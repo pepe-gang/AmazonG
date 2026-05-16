@@ -243,9 +243,9 @@ export type Settings = {
    *   - 'general'        — broad impulse mix
    *   - 'eero'           — eero / Amazon Eero networking gear
    *   - 'amazon-basics'  — Amazon Basics house brand
-   * e.g. ['eero'] = a single eero attempt with no retries; the
-   * default ['eero','amazon-basics','amazon-basics'] retries twice on
-   * amazon-basics. Length is clamped to 1–5 on load. No effect when
+   * Defaults to ['eero'] — a single eero attempt with no retries;
+   * users add attempts (and pick each one's pool) via the Filler
+   * Attempts UI. Length is clamped to 1–5 on load. No effect when
    * filler mode is off. Replaces the pre-v0.13.62 single `fillerPool`
    * enum (migrated on load); that itself replaced the pre-v0.13.36
    * boolean `wheyProteinFillerOnly`.

@@ -435,7 +435,7 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
               </select>
               {fillerAttempts.length > 1 && (
                 <button
-                  className="text-[11px] text-muted-foreground hover:text-foreground/90 px-1.5 py-1 rounded border border-white/10 cursor-pointer disabled:opacity-40"
+                  className="text-[11px] text-red-400 hover:text-red-300 px-1.5 py-1 rounded border border-red-500/30 hover:border-red-500/50 cursor-pointer disabled:opacity-40"
                   onClick={() => void removeAttempt(idx)}
                   disabled={busy}
                   title="Remove this attempt"
