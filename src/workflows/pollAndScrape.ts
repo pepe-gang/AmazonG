@@ -32,6 +32,7 @@ import { makeAttemptId, parseAsinFromUrl } from '../shared/sanitize.js';
 import type {
   AmazonProfile,
   AutoGJob,
+  BGAddress,
   BuyResult,
   JobAttempt,
   JobAttemptStatus,
@@ -633,6 +634,9 @@ async function runFillerBuyWithRetries(
    *  2/3 re-run the full clearCart since a previous attempt may have
    *  left the cart in an unknown state. */
   preflightCleared: Promise<ClearCartResult> | undefined,
+  /** The account's BG receiving address — auto-added at checkout when
+   *  Amazon parks on the "Add delivery address" state. */
+  bgAddress: BGAddress | null,
   onStage?: (stage: 'placing' | null) => void | Promise<void>,
 ): Promise<FillerRunResult> {
   let lastRaw: BuyWithFillersResult = {
@@ -693,6 +697,7 @@ async function runFillerBuyWithRetries(
       productUrl: job.productUrl,
       maxPrice: job.maxPrice,
       allowedAddressPrefixes: deps.allowedAddressPrefixes,
+      bgAddress,
       minCashbackPct,
       requireMinCashback,
       bypassPriceCheck: job.bypassPriceCheck === true,
@@ -2683,7 +2688,7 @@ export async function runForProfile(
         .update(attemptId, { stage }, { forceFlush: true })
         .then(() => undefined);
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, fillerAttempts, surgicalCashbackRecovery, info, preflightCleared, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, fillerAttempts, surgicalCashbackRecovery, info, preflightCleared, profileData.bgAddress, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       cartAsins = r.cartAsins;
@@ -2698,6 +2703,7 @@ export async function runForProfile(
         resolveCardNumber: deps.resolveCardNumber,
         maxPrice: job.maxPrice,
         allowedAddressPrefixes: deps.allowedAddressPrefixes,
+        bgAddress: profileData.bgAddress,
         correlationId: cid,
         // Routing fields — see BuyOptions.jobId docstring. Without these
         // every step.buy.* event silently drops at the disk-log sink.

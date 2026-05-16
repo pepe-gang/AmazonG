@@ -41,7 +41,7 @@ import {
 import { isTargetInActiveCart } from '../parsers/amazonCart.js';
 import { parsePrice } from '../parsers/amazonProduct.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
-import type { ProductInfo } from '../shared/types.js';
+import type { ProductInfo, BGAddress } from '../shared/types.js';
 import {
   CART_ADD_CLIENT_NAME,
   CART_ADD_URL,
@@ -67,6 +67,13 @@ type BuyWithFillersOptions = {
    * of these prefixes before clicking Deliver.
    */
   allowedAddressPrefixes: string[];
+  /**
+   * The account's BG receiving address. When checkout parks on the
+   * "Add delivery address" state and this is set, waitForCheckout
+   * auto-adds it instead of failing as action_required. Null when the
+   * account has no configured BG address.
+   */
+  bgAddress?: BGAddress | null;
   /**
    * Minimum cashback % required on the target line item (not the page
    * max — fillers can surface unrelated offers that would falsely pass
@@ -1121,6 +1128,7 @@ export async function buyWithFillers(
       targetAsin,
       targetTitle: info.title,
       resolveCardNumber: opts.resolveCardNumber,
+      bgAddress: opts.bgAddress,
     },
   );
   // QLA capped the target row: Amazon reduced our request from N to M.

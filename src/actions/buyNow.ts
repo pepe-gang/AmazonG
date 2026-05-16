@@ -9,7 +9,7 @@ import {
   parseOrderConfirmation,
 } from '../parsers/amazonCheckout.js';
 import { effectivePriceTolerance } from '../parsers/productConstraints.js';
-import type { BuyResult } from '../shared/types.js';
+import type { BuyResult, BGAddress } from '../shared/types.js';
 import { evaluateCashbackGate } from '../shared/cashbackGate.js';
 import { clearCart, type ClearCartResult } from './clearCart.js';
 import { addFillerViaHttp, waitForDeliverySettle } from './buyWithFillers.js';
@@ -31,6 +31,11 @@ type BuyOptions = {
   bypassPriceCheck?: boolean;
   maxPrice: number | null;
   allowedAddressPrefixes: string[];
+  /** The account's BG receiving address. When checkout lands on the
+   *  "Add delivery address" state and this is set, waitForCheckout
+   *  auto-adds it instead of failing as action_required. Null when the
+   *  account has no configured BG address. */
+  bgAddress?: BGAddress | null;
   correlationId?: string;
   /**
    * Routing context the disk-log sink uses to land step.buy.* events on
@@ -467,6 +472,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         },
         targetAsin: dealAsin,
         resolveCardNumber: opts.resolveCardNumber,
+        bgAddress: opts.bgAddress,
       },
     );
     if (!checkoutPage.ok) {
@@ -985,6 +991,88 @@ export type CheckoutReadyResult =
       kind?: 'unavailable' | 'quantity_limit' | 'timeout' | 'no_address';
     };
 
+/**
+ * Fill + submit Amazon's checkout "Add an address" modal from a saved
+ * BG address. Called by waitForCheckout when checkout parks on the
+ * "Add delivery address" state and the account has a bgAddress.
+ *
+ * Recipe verified live 2026-05-16 against the Chewbacca address page:
+ *   1. Open the modal via "Add a new delivery address".
+ *   2. Fill the stable `address-ui-widgets-*` fields (Country defaults
+ *      to United States — left as-is).
+ *   3. Tick "Make this my default address".
+ *   4. Click "Use this address" — up to twice: Amazon's address
+ *      verifier shows a "Review your address" warning on the first
+ *      click for addresses it can't verify; the second click accepts
+ *      the address as entered.
+ *
+ * Returns true when the modal closed (address accepted), false on any
+ * failure. Never throws — a failed add falls through to the
+ * action_required path in the caller.
+ */
+async function addDeliveryAddress(
+  page: Page,
+  addr: BGAddress,
+  emit?: { step: StepEmitter; warn: StepEmitter },
+): Promise<boolean> {
+  const FORM = '#address-ui-widgets-enterAddressFullName';
+  const SUBMIT =
+    'input[aria-labelledby="checkout-primary-continue-button-id-announce"]';
+  try {
+    await page
+      .locator('a.a-button-text:has-text("Add a new delivery address")')
+      .first()
+      .click();
+    await page.waitForSelector(FORM, { timeout: 15_000 });
+
+    await page.fill(FORM, addr.fullName);
+    await page.fill('#address-ui-widgets-enterAddressPhoneNumber', addr.phone);
+    await page.fill('#address-ui-widgets-enterAddressLine1', addr.street1);
+    if (addr.street2) {
+      await page.fill('#address-ui-widgets-enterAddressLine2', addr.street2);
+    }
+    await page.fill('#address-ui-widgets-enterAddressCity', addr.city);
+    // State <select> options are keyed by the 2-letter code (value
+    // "OR" / label "Oregon") — selectOption matches either.
+    await page
+      .locator(
+        '#address-ui-widgets-enterAddressStateOrRegion-dropdown-nativeId',
+      )
+      .selectOption(addr.state)
+      .catch(() => undefined);
+    await page.fill('#address-ui-widgets-enterAddressPostalCode', addr.zip);
+
+    // "Make this my default address" — tick if not already.
+    const def = page.locator('#address-ui-widgets-use-as-my-default');
+    if (!(await def.isChecked().catch(() => true))) {
+      await def.click().catch(() => undefined);
+    }
+
+    // "Use this address" — up to 2 clicks. The first can land on a
+    // "Review your address — couldn't verify" warning (modal stays
+    // open); the second accepts the address as entered. The modal
+    // disappearing (FORM gone) is the accepted signal.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await page.locator(SUBMIT).first().click();
+      await page.waitForTimeout(2_500);
+      const stillOpen = await page.locator(FORM).count().catch(() => 1);
+      if (stillOpen === 0) {
+        emit?.step('step.waitForCheckout.address.added', { clicks: attempt });
+        return true;
+      }
+    }
+    emit?.warn('step.waitForCheckout.address.addFailed', {
+      note: 'modal still open after 2 "Use this address" clicks',
+    });
+    return false;
+  } catch (err) {
+    emit?.warn('step.waitForCheckout.address.error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 export async function waitForCheckout(
   page: Page,
   allowedAddressPrefixes: string[] = [],
@@ -1009,6 +1097,10 @@ export async function waitForCheckout(
     /** Internal recursion guard — set true after one verify-card
      *  attempt so a re-challenge can't loop. Callers never pass this. */
     _verifyCardAttempted?: boolean;
+    /** The account's BG receiving address. When set and checkout
+     *  lands on the "Add delivery address" state, the address is
+     *  auto-added (once) instead of failing as action_required. */
+    bgAddress?: BGAddress | null;
   } = {},
 ): Promise<CheckoutReadyResult> {
   // Poll for either a Place Order button (success — we're on /spc), a
@@ -1033,6 +1125,9 @@ export async function waitForCheckout(
   // (address → billing → payment → /spc), each adding one click.
   const MAX_DELIVER_CLICKS = 5;
   let iteration = 0;
+  // One-shot guard: the "Add delivery address" auto-add runs at most
+  // once per waitForCheckout call, so a failed add can't loop.
+  let addressAddAttempted = false;
   // Captured on the QLA gate fall-through (when Amazon caps the target
   // row from N to M >= 1). Reported back to the caller so BG sees the
   // corrected qty instead of the cart-add target.
@@ -1405,10 +1500,20 @@ export async function waitForCheckout(
     }
 
     if (state.kind === 'no_address') {
-      // Account has no delivery address — checkout can't proceed and no
-      // amount of polling will fix it. Fail fast with an honest reason;
-      // the caller maps this to stage 'checkout_address' and the worker
-      // surfaces it as action_required ("Add delivery address").
+      // Account has no delivery address. If the account has a saved BG
+      // address, auto-add it (once) and re-poll — the checkout then
+      // proceeds normally. Otherwise fail fast: the caller maps this to
+      // stage 'checkout_address' and the worker surfaces it as
+      // action_required ("Add delivery address").
+      if (opts.bgAddress && !addressAddAttempted) {
+        addressAddAttempted = true;
+        emit?.step('step.waitForCheckout.address.adding', {});
+        const added = await addDeliveryAddress(page, opts.bgAddress, emit);
+        if (added) {
+          await page.waitForTimeout(1_500);
+          continue;
+        }
+      }
       return { ok: false, kind: 'no_address', reason: 'Add delivery address' };
     }
 
