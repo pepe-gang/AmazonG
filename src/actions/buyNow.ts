@@ -1206,8 +1206,12 @@ async function addPaymentCard(
     // the billing address off the default (shipping) one and enter it.
     const ba = card.billingAddress;
     if (ba) {
+      // "Change" / "Save" are apx widget submits — target by the
+      // stable ppw-widgetEvent name. (Their visible label lives in a
+      // sibling span, so the <input> itself has no accessible name —
+      // getByRole({name}) misses it.)
       await frame
-        .getByRole('button', { name: 'Change' })
+        .locator('input[name="ppw-widgetEvent:ChangeBillingAddressEvent"]')
         .click({ timeout: 20_000 });
       await frame
         .getByRole('button', { name: 'Add an address' })
@@ -1252,7 +1256,9 @@ async function addPaymentCard(
     if (!(await defaultCb.isChecked().catch(() => true))) {
       await defaultCb.click().catch(() => undefined);
     }
-    await frame.getByRole('button', { name: 'Save' }).click({ timeout: 15_000 });
+    await frame
+      .locator('input[name="ppw-widgetEvent:SavePaymentMethodDetailsEvent"]')
+      .click({ timeout: 15_000 });
     await page.waitForTimeout(3_000);
     emit?.step('step.waitForCheckout.payment.submitted', {
       last4: card.number.replace(/\D/g, '').slice(-4),
