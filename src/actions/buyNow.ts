@@ -484,6 +484,13 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         warn('step.buy.quantity_limit', { reason: checkoutPage.reason });
         return fail('item_unavailable', checkoutPage.reason);
       }
+      // Account has no delivery address — checkout can't proceed until
+      // the user adds one. Surface as checkout_address; the worker maps
+      // the "Add delivery address" reason to action_required.
+      if (checkoutPage.kind === 'no_address') {
+        warn('step.buy.no_address', { reason: checkoutPage.reason });
+        return fail('checkout_address', checkoutPage.reason);
+      }
       return fail('checkout_wait', checkoutPage.reason, checkoutPage.detail);
     }
     step('step.buy.checkout', { detected: checkoutPage.detected });
@@ -971,7 +978,12 @@ export type CheckoutReadyResult =
        *  dashboard shows M rather than N. Absent when no QLA gate fired. */
       adjustedQty?: number;
     }
-  | { ok: false; reason: string; detail?: string; kind?: 'unavailable' | 'quantity_limit' | 'timeout' };
+  | {
+      ok: false;
+      reason: string;
+      detail?: string;
+      kind?: 'unavailable' | 'quantity_limit' | 'timeout' | 'no_address';
+    };
 
 export async function waitForCheckout(
   page: Page,
@@ -1211,6 +1223,17 @@ export async function waitForCheckout(
         if (document.querySelector('[data-messageid="selectDeliveryOptionMessage"]')) {
           return { kind: 'delivery_options_changed' as const };
         }
+        // 1b. The Amazon account has NO delivery address. Amazon parks
+        //     checkout on an "Add delivery address" panel — no delivery
+        //     options, no payable total, and no Place Order button will
+        //     ever render. The page still shows a (dead) secondary
+        //     "Deliver to this address" button, so this MUST be checked
+        //     before the deliver block below, or it misclassifies as
+        //     deliver_pending and spins out the full 30s timeout.
+        //     Needs the user to add an address to the account.
+        if (/enter your address to see delivery options/i.test(body)) {
+          return { kind: 'no_address' as const };
+        }
         // Label resolver that also follows aria-labelledby references.
         // Amazon's Chewbacca pipeline commonly ships inputs with no value
         // and no textContent — the visible label lives in a separate
@@ -1379,6 +1402,14 @@ export async function waitForCheckout(
           deliverClickedTimes,
         });
       }
+    }
+
+    if (state.kind === 'no_address') {
+      // Account has no delivery address — checkout can't proceed and no
+      // amount of polling will fix it. Fail fast with an honest reason;
+      // the caller maps this to stage 'checkout_address' and the worker
+      // surfaces it as action_required ("Add delivery address").
+      return { ok: false, kind: 'no_address', reason: 'Add delivery address' };
     }
 
     if (state.kind === 'deliver_pending') {

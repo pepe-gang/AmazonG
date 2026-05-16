@@ -1154,6 +1154,16 @@ export async function buyWithFillers(
         ...(ready.detail ? { detail: ready.detail } : {}),
       };
     }
+    // Account has no delivery address — the user must add one to the
+    // Amazon account. Surface as checkout_address; the worker maps the
+    // "Add delivery address" reason to action_required.
+    if (ready.kind === 'no_address') {
+      return {
+        ok: false,
+        stage: 'checkout_address',
+        reason: ready.reason,
+      };
+    }
     return {
       ok: false,
       stage: 'spc_ready',

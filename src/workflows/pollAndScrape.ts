@@ -3011,10 +3011,10 @@ function actionRequired(email: string, error: string, stage: string | null = nul
 /**
  * Reasons the bot maps to action_required instead of failed. Kept narrow
  * intentionally — only situations where the user has a clear next step.
- * Verify-stage card challenges (PMTS "Verify your card") and signed-out
- * sessions both fit; product-side issues (out of stock, wrong region) do
- * not — those are environmental and the bot retries them on the next
- * round naturally.
+ * Verify-stage card challenges (PMTS "Verify your card"), signed-out
+ * sessions, and a missing delivery address all fit; product-side issues
+ * (out of stock, wrong region) do not — those are environmental and the
+ * bot retries them on the next round naturally.
  */
 function isActionRequiredReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
@@ -3025,6 +3025,10 @@ function isActionRequiredReason(reason: string | null | undefined): boolean {
   // PMTS "Verify your card" buyNow place_order failure, surfaced
   // verbatim by the place-order helper when the challenge is detected.
   if (s.includes('verify your card')) return true;
+  // The Amazon account has no delivery address — checkout can't
+  // proceed until the user adds one. waitForCheckout surfaces this
+  // verbatim as "Add delivery address".
+  if (s.includes('add delivery address')) return true;
   return false;
 }
 
