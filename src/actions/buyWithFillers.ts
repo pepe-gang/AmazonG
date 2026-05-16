@@ -339,7 +339,12 @@ export type BuyWithFillersResult =
         | 'checkout_payment'
         | 'cashback_gate'
         | 'place_order'
-        | 'confirm_parse';
+        | 'confirm_parse'
+        // Filler-search rate-limit — every term across the configured
+        // pool + fallback pool hit Amazon's meta-refresh stub, so there
+        // are no fillers to cart. Mirrors the `filler_search` member of
+        // BuyResult.stage in shared/types.ts.
+        | 'filler_search';
       reason: string;
       detail?: string;
     };
@@ -1760,27 +1765,33 @@ export async function buyWithFillers(
     },
   );
   let recoveredFromConfirmTimeout = false;
+  // Set when the confirmation page timed out AND detectOrderLikelyPlaced
+  // found no place-order signal on the page. We no longer bail as
+  // confirm_parse right here — the order-history scan below is the real
+  // source of truth. If that scan finds orders carrying our cart ASINs,
+  // the order DID place (the detector was wrong), and we recover it so
+  // the filler-cancel sweep gets the order IDs it needs. Bailing here
+  // instead left the ~8 filler orders live and untracked — the verify
+  // phase had no cartAsins/orderIds to cancel them with, so they shipped.
+  // An empty scan keeps the old behavior: return confirm_parse.
+  let confirmTimedOutNoSignal = false;
+  let confirmFailReason: string | null = null;
   if (!confirmWait.ok) {
-    // The confirmation page never loaded — but that does NOT mean the
-    // order wasn't placed. If the Place Order click was accepted,
-    // failing as confirm_parse here discards a real order (the
-    // ghost-order bug). Check the page state first.
+    confirmFailReason = confirmWait.reason;
     const placed = await detectOrderLikelyPlaced(page);
-    if (!placed.likelyPlaced) {
-      return {
-        ok: false,
-        stage: 'confirm_parse',
-        reason: confirmWait.reason,
-        detail: `url=${page.url()}`,
-      };
-    }
-    // Order was almost certainly placed despite the timeout — fall
-    // through to the order-id recovery scan below instead of
-    // discarding a real order.
     recoveredFromConfirmTimeout = true;
+    confirmTimedOutNoSignal = !placed.likelyPlaced;
     logger.warn(
       'step.fillerBuy.confirm.timeout.recovering',
-      { reason: confirmWait.reason, url: page.url(), signal: placed.reason },
+      {
+        reason: confirmWait.reason,
+        url: page.url(),
+        signal: placed.reason,
+        likelyPlaced: placed.likelyPlaced,
+        note: confirmTimedOutNoSignal
+          ? 'no place-order signal — order-history scan will confirm or reject'
+          : 'place-order signal present',
+      },
       cid,
     );
   }
@@ -1804,17 +1815,23 @@ export async function buyWithFillers(
   // capture or any reporting, so the placement survives every
   // downstream failure mode (debounce loss, missing attempt row,
   // crash, restart). See placedOrderLedger.ts.
-  recordPlacedOrderEvent({
-    event: 'order_confirmed',
-    profile: opts.profile ?? '(unknown)',
-    jobId: opts.jobId ?? null,
-    productUrl: opts.productUrl,
-    url: page.url(),
-    amazonPurchaseId,
-    ...(recoveredFromConfirmTimeout
-      ? { detail: 'recovered after confirmation-URL timeout' }
-      : {}),
-  });
+  //
+  // Skipped when confirmTimedOutNoSignal — placement is still
+  // unconfirmed there. The post-scan block below ledgers it only if
+  // the order-history scan actually finds the order.
+  if (!confirmTimedOutNoSignal) {
+    recordPlacedOrderEvent({
+      event: 'order_confirmed',
+      profile: opts.profile ?? '(unknown)',
+      jobId: opts.jobId ?? null,
+      productUrl: opts.productUrl,
+      url: page.url(),
+      amazonPurchaseId,
+      ...(recoveredFromConfirmTimeout
+        ? { detail: 'recovered after confirmation-URL timeout' }
+        : {}),
+    });
+  }
 
   // Parse the confirmation page for `finalPrice` + `finalPriceText`.
   // NOTE: we intentionally ignore the orderId parsed here — Amazon's
@@ -1931,6 +1948,47 @@ export async function buyWithFillers(
         cid,
       );
     }
+  }
+
+  // Confirmation timed out, no place-order signal on the page, AND the
+  // order-history scan matched none of our cart ASINs — the order
+  // genuinely did not place. Return the confirm_parse failure we
+  // deferred above. (When the scan DID find orders we fall through:
+  // the order placed despite the detector, and the filler-cancel sweep
+  // below now has the order IDs it needs to cancel them.)
+  if (confirmTimedOutNoSignal && orderMatches.length === 0) {
+    logger.warn(
+      'step.fillerBuy.confirm.timeout.not_placed',
+      { reason: confirmFailReason, url: page.url() },
+      cid,
+    );
+    return {
+      ok: false,
+      stage: 'confirm_parse',
+      reason: confirmFailReason ?? 'confirmation page never loaded',
+      detail: `url=${page.url()}`,
+    };
+  }
+  if (confirmTimedOutNoSignal) {
+    // Scan found orders despite no on-page signal — the order placed
+    // and the detector missed it. Ledger the placement now (the
+    // synchronous write above was skipped while it was still
+    // unconfirmed).
+    logger.warn(
+      'step.fillerBuy.confirm.timeout.recovered_by_scan',
+      { url: page.url(), orderIdsFound: orderMatches.map((m) => m.orderId) },
+      cid,
+    );
+    recordPlacedOrderEvent({
+      event: 'order_confirmed',
+      profile: opts.profile ?? '(unknown)',
+      jobId: opts.jobId ?? null,
+      productUrl: opts.productUrl,
+      url: page.url(),
+      amazonPurchaseId,
+      detail:
+        'recovered via order-history scan after confirmation-URL timeout (no on-page signal)',
+    });
   }
 
   // 16. Immediately cancel any filler-only orders (best-effort sweep).

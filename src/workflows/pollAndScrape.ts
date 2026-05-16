@@ -190,7 +190,15 @@ const DEFAULT_CONCURRENT_BUYS = 3;
  * depends on which fillers land in the cart — a fresh filler set
  * often re-rolls the target into a 6%-eligible group.
  */
-const NON_RETRYABLE_BUY_STAGES: ReadonlySet<string> = new Set([
+// Typed against BuyResult's failure-stage union (not bare `string`) so
+// a stage rename breaks this set at compile time instead of silently
+// turning the guard off — e.g. dropping `confirm_parse` from the guard
+// would make a confirmation-timeout failure retry and risk a duplicate
+// order, the exact thing this set exists to prevent.
+type BuyFailStage = Extract<BuyResult, { ok: false }>['stage'];
+const NON_RETRYABLE_BUY_STAGES: ReadonlySet<BuyFailStage> = new Set<
+  BuyFailStage
+>([
   'confirm_parse',
   'item_unavailable',
   'checkout_price',
