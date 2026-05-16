@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../shared/jsdom.js';
 import { logger } from '../shared/logger.js';
 import { NavigationError } from '../shared/errors.js';
 import { ACTIVE_CART_DELETE_SELECTOR as ACTIVE_CART_DELETE } from '../parsers/amazonCart.js';
@@ -240,7 +240,7 @@ async function clearCartViaHttp(page: Page): Promise<HttpClearResult> {
   const cartFetchMs = Date.now() - t0;
 
   // 2. Parse for csrf + action + every active-cart UUID.
-  const doc = new JSDOM(cartHtml).window.document;
+  const doc = htmlToDocument(cartHtml);
   const form = doc.getElementById('activeCartViewForm');
   if (!form) return { kind: 'failed', reason: 'no_activeCartViewForm' };
   const csrf = (
@@ -372,7 +372,7 @@ export async function removeCartItemsByAsin(
     return { ok: false, reason: 'cart_body_read_threw' };
   }
 
-  const doc = new JSDOM(cartHtml).window.document;
+  const doc = htmlToDocument(cartHtml);
   const form = doc.getElementById('activeCartViewForm');
   if (!form) return { ok: false, reason: 'no_activeCartViewForm' };
   const csrf = (

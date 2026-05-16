@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../../src/shared/jsdom.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readTargetCashbackFromDom } from '../../src/parsers/amazonCheckout';
@@ -11,7 +11,7 @@ import {
 const FIX = join(__dirname, '../../fixtures/spc');
 
 function docOf(file: string): Document {
-  return new JSDOM(readFileSync(join(FIX, file), 'utf8')).window.document;
+  return htmlToDocument(readFileSync(join(FIX, file), 'utf8'));
 }
 
 /**

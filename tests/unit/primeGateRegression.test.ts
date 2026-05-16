@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../../src/shared/jsdom.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { findIsPrime, findHasBuyNow, findHasAddToCart } from '../../src/parsers/amazonProduct';
@@ -60,7 +60,7 @@ const REGR_IS_PRIME_FIX = join(
 describe('Prime gate regression — INC-2026-05-05 (non-Prime iPad placed an order)', () => {
   it('IS-PRIME companion fixture: parser returns isPrime=TRUE (visible badge in qualifiedBuyBox)', () => {
     const html = readFileSync(REGR_IS_PRIME_FIX, 'utf8');
-    const doc = new JSDOM(html).window.document;
+    const doc = htmlToDocument(html);
     expect(findIsPrime(doc)).toBe(true);
   });
 
@@ -74,13 +74,13 @@ describe('Prime gate regression — INC-2026-05-05 (non-Prime iPad placed an ord
 
   it('static parser correctly returns isPrime=false on the saved fixture', () => {
     const html = readFileSync(FIX, 'utf8');
-    const doc = new JSDOM(html).window.document;
+    const doc = htmlToDocument(html);
     expect(findIsPrime(doc)).toBe(false);
   });
 
   it('static parser confirms this is a real PDP via #productTitle (the buy buttons happen to live in usedAccordionRow → visible:false is expected)', () => {
     const html = readFileSync(FIX, 'utf8');
-    const doc = new JSDOM(html).window.document;
+    const doc = htmlToDocument(html);
     expect(doc.querySelector('#productTitle')).not.toBeNull();
     // The Buy Now / Add to Cart buttons in this fixture are inside the
     // alternate-offer `usedAccordionRow` subtree (not the active row),

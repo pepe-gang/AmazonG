@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../../src/shared/jsdom.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -9,7 +9,7 @@ import {
 import { createBGClient } from '@bg/client';
 
 function docOf(html: string): Document {
-  return new JSDOM(html).window.document;
+  return htmlToDocument(html);
 }
 
 function fixture(name: string): string {

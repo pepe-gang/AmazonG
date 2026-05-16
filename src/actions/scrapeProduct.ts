@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import { JSDOM } from 'jsdom';
+import { htmlToDom } from '../shared/jsdom.js';
 import type { DriverSession } from '../browser/driver.js';
 import { NavigationError } from '../shared/errors.js';
 import { parseAmazonProduct } from '../parsers/amazonProduct.js';
@@ -236,6 +236,6 @@ async function loadProductPage(page: Page, url: string): Promise<void> {
 }
 
 export function parseProductHtml(html: string, url: string): ProductInfo {
-  const dom = new JSDOM(html);
+  const dom = htmlToDom(html);
   return parseAmazonProduct(dom.window.document, url);
 }

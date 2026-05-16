@@ -11,7 +11,7 @@
  * payload.
  */
 
-import { JSDOM } from 'jsdom';
+import { htmlToDom } from '../shared/jsdom.js';
 
 export type CancelFillerSignal =
   | 'cancel_confirmed'
@@ -135,7 +135,7 @@ export function extractTrackingIdsFromOrderHtml(html: string): string[] {
   // ?shipmentId= or ?packageIndex= — but we extract the tracking
   // number from the visible "Tracking ID: TBA123..." copy instead,
   // since that's stable across templates.
-  const dom = new JSDOM(html);
+  const dom = htmlToDom(html);
   const text = dom.window.document.body?.textContent ?? '';
   // Common carrier patterns. Order matters: most-specific first.
   const patterns: RegExp[] = [

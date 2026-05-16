@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../shared/jsdom.js';
 import {
   isPaymentRevisionRequired,
   readQuantityFromOrderDetailsHtml,
@@ -167,7 +167,7 @@ export async function verifyOrder(
   // 3. Active — orderId rendered in body + at least one order-section
   //    keyword. Use JSDOM's textContent so the keyword scan only sees
   //    rendered text (matches the previous body.innerText behavior).
-  const doc = new JSDOM(html).window.document;
+  const doc = htmlToDocument(html);
   const orderIdRendered = html.includes(orderId);
   const bodyText = (doc.body?.textContent ?? '').replace(/\s+/g, ' ');
   const hasOrderContent =

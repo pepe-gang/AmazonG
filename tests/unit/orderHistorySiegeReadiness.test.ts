@@ -47,7 +47,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../../src/shared/jsdom.js';
 
 const FIXTURE_PATH = join(
   __dirname,
@@ -60,7 +60,7 @@ const FIXTURE_PATH = join(
 describe('order-history Siege readiness — INC-2026-05-10', () => {
   function loadFixture(): Document {
     const html = readFileSync(FIXTURE_PATH, 'utf8');
-    return new JSDOM(html).window.document;
+    return htmlToDocument(html);
   }
 
   it('fixture has Siege wrappers still present (decryption not started)', () => {

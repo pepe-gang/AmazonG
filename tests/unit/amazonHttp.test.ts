@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../../src/shared/jsdom.js';
 import {
   asinsCommittedInResponse,
   extractSearchResultCandidates,
@@ -13,7 +13,7 @@ import {
  */
 
 function docOf(html: string): Document {
-  return new JSDOM(html).window.document;
+  return htmlToDocument(html);
 }
 
 describe('looksLikeCartResponse', () => {

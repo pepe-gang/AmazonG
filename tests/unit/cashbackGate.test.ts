@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../../src/shared/jsdom.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { findCashbackPct } from '../../src/parsers/amazonProduct.js';
@@ -149,7 +149,7 @@ describe('evaluateCashbackGate', () => {
       // page renders a "5% back" line but no 6%/8% option. Both strict
       // and permissive modes must fail here because 5 < 6.
       const html = fixture('spc/no-cashback-line-amex.html');
-      const doc = new JSDOM(html).window.document;
+      const doc = htmlToDocument(html);
       const pageCashbackPct = findCashbackPct(doc);
       expect(pageCashbackPct).toBe(5);
 
@@ -170,7 +170,7 @@ describe('evaluateCashbackGate', () => {
 
     it('a permissive account on a 5% deal passes when its floor is also 5%', () => {
       const html = fixture('spc/no-cashback-line-amex.html');
-      const doc = new JSDOM(html).window.document;
+      const doc = htmlToDocument(html);
       const pageCashbackPct = findCashbackPct(doc);
 
       const v = evaluateCashbackGate({

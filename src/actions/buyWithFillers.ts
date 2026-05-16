@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../shared/jsdom.js';
 import { logger as loggerImport } from '../shared/logger.js';
 // Top-level alias so existing call sites in helper functions that don't
 // shadow the import (most of the file) keep working — and so `buyWithFillers`
@@ -1751,7 +1751,7 @@ export async function buyWithFillers(
   const confirmationHtml = await page.content().catch(() => '');
   const parsed = confirmationHtml
     ? parseOrderConfirmation(
-        new JSDOM(confirmationHtml).window.document,
+        htmlToDocument(confirmationHtml),
         page.url(),
       )
     : { orderId: null, finalPrice: null, finalPriceText: null, quantity: null };
@@ -4146,7 +4146,7 @@ async function searchFillerCandidatesViaBrowser(
       .catch(() => undefined);
     const html = await searchPage.content().catch(() => '');
     if (!html) return [];
-    const doc = new JSDOM(html).window.document;
+    const doc = htmlToDocument(html);
     const all = extractSearchResultCandidates(doc);
     const { min: minPrice, max: maxPrice } = priceBandForPool(pool);
     return all.filter((c) => {
@@ -4209,7 +4209,7 @@ async function searchFillerCandidatesViaHttp(
     /Type the characters you see in this image|Sorry, we just need to make sure|automated access to our website|api-services-support@amazon\.com/i.test(
       html.slice(0, 8_000),
     );
-  const doc = new JSDOM(html).window.document;
+  const doc = htmlToDocument(html);
   const all = extractSearchResultCandidates(doc);
   let notPrime = 0;
   let noPrice = 0;
@@ -4319,7 +4319,7 @@ export async function addFillerViaHttp(
   //    optimization with graceful degradation.
   let pdpHtml: string | null = null;
   if (prefetchedHtml && prefetchedHtml.length > 0) {
-    const prefetchedDoc = new JSDOM(prefetchedHtml).window.document;
+    const prefetchedDoc = htmlToDocument(prefetchedHtml);
     if (extractCartAddTokens(prefetchedDoc)) {
       pdpHtml = prefetchedHtml;
     }
@@ -4342,7 +4342,7 @@ export async function addFillerViaHttp(
   //    carousels POST to (`/cart/add-to-cart/ref=...`), which only wants
   //    csrf + asin + offerListingId + quantity + clientName. Token
   //    extraction is shared with the unit test in fixtures/product/.
-  const doc = new JSDOM(pdpHtml).window.document;
+  const doc = htmlToDocument(pdpHtml);
   const tokens = extractCartAddTokens(doc);
   if (!tokens) {
     // Distinguish form-missing vs field-missing for log fidelity.
@@ -4796,5 +4796,5 @@ async function hasTargetInCart(page: Page, asin: string | null): Promise<boolean
   // rendered; the parser scopes strictly to `[data-name="Active Cart"]`.
   const html = await page.content().catch(() => '');
   if (!html) return false;
-  return isTargetInActiveCart(new JSDOM(html).window.document, asin);
+  return isTargetInActiveCart(htmlToDocument(html), asin);
 }

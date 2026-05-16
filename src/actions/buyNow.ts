@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../shared/jsdom.js';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../shared/logger.js';
@@ -643,7 +643,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     // would false-match our regex). Order id comes from Your Orders below.
     const confirmationHtml = await page.content();
     const confirmation = parseOrderConfirmation(
-      new JSDOM(confirmationHtml).window.document,
+      htmlToDocument(confirmationHtml),
       page.url(),
     );
 
@@ -1529,7 +1529,7 @@ export async function waitForCheckout(
   // the catch-all for genuinely unrelated failures.
   try {
     const html = await page.content();
-    const doc = new JSDOM(html).window.document;
+    const doc = htmlToDocument(html);
     if (isVerifyCardChallenge(doc)) {
       // Auto-handle when a card resolver is wired AND we haven't
       // already tried once this call. The resolver looks up the full

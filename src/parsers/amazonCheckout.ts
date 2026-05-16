@@ -1,4 +1,4 @@
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../shared/jsdom.js';
 import type { OrderConfirmation } from '../shared/types.js';
 import { parsePrice } from './amazonProduct.js';
 
@@ -65,7 +65,7 @@ export function readQuantityFromOrderDetailsHtml(
   const normalized = html.replace(/\\(["/n])/g, (_, c) => (c === 'n' ? ' ' : c));
   let doc: Document;
   try {
-    doc = new JSDOM(normalized).window.document;
+    doc = htmlToDocument(normalized);
   } catch {
     return null;
   }

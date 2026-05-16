@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../../src/shared/jsdom.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -14,7 +14,7 @@ import {
 } from '@parsers/amazonProduct';
 
 function docOf(html: string): Document {
-  return new JSDOM(html).window.document;
+  return htmlToDocument(html);
 }
 
 describe('parsePrice', () => {

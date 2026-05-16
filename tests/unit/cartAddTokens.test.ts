@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../../src/shared/jsdom.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { extractCartAddTokens } from '../../src/actions/amazonHttp';
@@ -7,7 +7,7 @@ import { extractCartAddTokens } from '../../src/actions/amazonHttp';
 const FIXTURES_DIR = join(__dirname, '../../fixtures/product');
 
 function docOf(html: string): Document {
-  return new JSDOM(html).window.document;
+  return htmlToDocument(html);
 }
 
 describe('extractCartAddTokens', () => {

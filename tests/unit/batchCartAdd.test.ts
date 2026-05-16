@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../../src/shared/jsdom.js';
 import {
   asinsCommittedInResponse,
   buildBatchCartAddBody,
@@ -8,7 +8,7 @@ import {
 } from '../../src/actions/amazonHttp';
 
 function docOf(html: string): Document {
-  return new JSDOM(html).window.document;
+  return htmlToDocument(html);
 }
 
 /** Mirror the structure Amazon renders for one search-result card. The

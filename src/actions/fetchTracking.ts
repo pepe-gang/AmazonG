@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import { JSDOM } from 'jsdom';
+import { htmlToDocument } from '../shared/jsdom.js';
 import { verifyOrder } from './verifyOrder.js';
 import { shipTrackLinksFor, trackingIdFromShipTrack } from '../parsers/amazonTracking.js';
 import type { FetchTrackingOutcome } from '../shared/types.js';
@@ -72,7 +72,7 @@ export async function fetchTracking(
   } catch {
     return { kind: 'retry', reason: 'verify_error' };
   }
-  const orderDoc = new JSDOM(orderHtml).window.document;
+  const orderDoc = htmlToDocument(orderHtml);
   const urls = shipTrackLinksFor(orderDoc, orderId);
 
   if (urls.length === 0) {
@@ -127,7 +127,7 @@ async function readTrackingIdViaHttp(page: Page, url: string): Promise<string | 
     });
     if (!res.ok()) return null;
     const html = await res.text();
-    const doc = new JSDOM(html).window.document;
+    const doc = htmlToDocument(html);
     return trackingIdFromShipTrack(doc);
   } catch {
     return null;
