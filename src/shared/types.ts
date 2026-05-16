@@ -768,6 +768,23 @@ export type CreditCardSafe = {
 };
 
 /**
+ * Billing address for a saved payment card — distinct from the
+ * shipping address. Typed into Amazon's card "billing address" form
+ * when adding the card at checkout. `line2` may be blank.
+ */
+export type BillingAddress = {
+  fullName: string;
+  line1: string;
+  line2: string;
+  city: string;
+  state: string;
+  zip: string;
+  /** ISO-ish country, e.g. 'US'. */
+  country: string;
+  phone: string;
+};
+
+/**
  * Fields the renderer sends to add/save a payment card. `expiry` +
  * `cvv` may be blank. The full number + CVV are encrypted in the main
  * process the instant they arrive and never persist in plaintext.
@@ -779,6 +796,8 @@ export type CreditCardInput = {
   number: string;
   expiry: string;
   cvv: string;
+  /** Billing address for the card. */
+  billingAddress: BillingAddress;
 };
 
 /**
@@ -796,6 +815,8 @@ export type SyncCard = {
   /** MM/YY, or null for legacy cards. */
   expiry: string | null;
   cvv: string | null;
+  /** Billing address; null for legacy cards / when not provided. */
+  billingAddress: BillingAddress | null;
 };
 
 /**

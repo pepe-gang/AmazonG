@@ -10,6 +10,7 @@ const card = (id: string): SyncCard => ({
   number: `4111111111${id.slice(-4).padStart(4, "0")}`,
   expiry: "12/27",
   cvv: "123",
+  billingAddress: null,
 });
 
 /** A populated BG blob (exists=true) with sensible defaults; override per test. */

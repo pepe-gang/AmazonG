@@ -104,14 +104,8 @@ export function AccountsView({
    ============================================================ */
 function CreditCardsPanel() {
   const [cards, setCards] = useState<CreditCardSafe[] | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [labelDraft, setLabelDraft] = useState('');
-  const [nameDraft, setNameDraft] = useState('');
-  const [numberDraft, setNumberDraft] = useState('');
-  const [expiryDraft, setExpiryDraft] = useState('');
-  const [cvvDraft, setCvvDraft] = useState('');
+  const [showAdd, setShowAdd] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -133,36 +127,6 @@ function CreditCardsPanel() {
     };
   }, []);
 
-  const resetDraft = () => {
-    setLabelDraft('');
-    setNameDraft('');
-    setNumberDraft('');
-    setExpiryDraft('');
-    setCvvDraft('');
-  };
-
-  const add = async () => {
-    setError(null);
-    setBusy(true);
-    try {
-      const next = await window.autog.cardsAdd({
-        label: labelDraft,
-        cardholderName: nameDraft,
-        number: numberDraft,
-        expiry: expiryDraft,
-        cvv: cvvDraft,
-      });
-      setCards(next);
-      window.dispatchEvent(new CustomEvent(CARDS_EVENT));
-      resetDraft();
-      setAdding(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'failed to add card');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const remove = async (id: string) => {
     setBusy(true);
     try {
@@ -181,92 +145,19 @@ function CreditCardsPanel() {
         <div>
           <div className="prefix-title">Payment Cards</div>
           <div className="prefix-sub">
-            When Amazon interrupts checkout with a “Verify your card”
-            prompt, AmazonG matches the card’s last 4 digits against this
-            list and re-enters the full number automatically. Numbers are
-            encrypted on this device via the OS keychain — never logged,
-            never shown again, never sent to BetterBG.
+            Saved cards (with their billing address) are used to add a
+            payment method at checkout when an account has none. Card
+            numbers + CVV are encrypted on this device via the OS
+            keychain — never logged, never shown again.
           </div>
         </div>
-        {!adding && (
-          <button className="ghost-btn" onClick={() => setAdding(true)}>
-            Add card
-          </button>
-        )}
+        <button className="ghost-btn" onClick={() => setShowAdd(true)}>
+          Add card
+        </button>
       </div>
-      {adding && (
-        <div className="prefix-edit" style={{ flexWrap: 'wrap' }}>
-          <input
-            type="text"
-            autoComplete="off"
-            value={labelDraft}
-            onChange={(e) => setLabelDraft(e.target.value)}
-            placeholder="Label (e.g. Chase Visa)"
-          />
-          <input
-            type="text"
-            autoComplete="off"
-            value={nameDraft}
-            onChange={(e) => setNameDraft(e.target.value)}
-            placeholder="Name on card"
-          />
-          <input
-            type="text"
-            inputMode="numeric"
-            autoComplete="off"
-            value={numberDraft}
-            onChange={(e) => setNumberDraft(e.target.value)}
-            placeholder="Full card number"
-          />
-          <input
-            type="text"
-            inputMode="numeric"
-            autoComplete="off"
-            value={expiryDraft}
-            onChange={(e) => setExpiryDraft(e.target.value)}
-            placeholder="MM/YY (optional)"
-            title="Expiry is optional — Amazon store cards have none. Leave blank if the card has no expiry."
-            style={{ maxWidth: 150 }}
-          />
-          <input
-            type="text"
-            inputMode="numeric"
-            autoComplete="off"
-            value={cvvDraft}
-            onChange={(e) => setCvvDraft(e.target.value)}
-            placeholder="CVV"
-            style={{ maxWidth: 80 }}
-          />
-          <button
-            className="primary-action"
-            onClick={() => void add()}
-            disabled={busy || numberDraft.replace(/\D/g, '').length < 13}
-          >
-            Save
-          </button>
-          <button
-            className="ghost-btn"
-            onClick={() => {
-              setAdding(false);
-              resetDraft();
-              setError(null);
-            }}
-          >
-            Cancel
-          </button>
-          {error && (
-            <span style={{ color: '#fca5a5', fontSize: 12, width: '100%' }}>
-              {error}
-            </span>
-          )}
-        </div>
-      )}
       <div className="prefix-chips">
         {cards.length === 0 ? (
-          <span className="prefix-empty">
-            No cards saved — “Verify your card” prompts will still fail to
-            a manual step
-          </span>
+          <span className="prefix-empty">No cards saved</span>
         ) : (
           cards.map((c) => (
             <span key={c.id} className="prefix-chip">
@@ -284,6 +175,247 @@ function CreditCardsPanel() {
             </span>
           ))
         )}
+      </div>
+      {showAdd && (
+        <CardDialog
+          onClose={() => setShowAdd(false)}
+          onSaved={(next) => setCards(next)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Modal for adding a payment card — card details + billing address.
+ *  Card number + CVV are encrypted in the main process on save. */
+function CardDialog(props: {
+  onClose: () => void;
+  onSaved: (cards: CreditCardSafe[]) => void;
+}) {
+  const [label, setLabel] = useState('');
+  const [cardholderName, setCardholderName] = useState('');
+  const [number, setNumber] = useState('');
+  const [expiry, setExpiry] = useState('');
+  const [cvv, setCvv] = useState('');
+  const [bFullName, setBFullName] = useState('');
+  const [bLine1, setBLine1] = useState('');
+  const [bLine2, setBLine2] = useState('');
+  const [bCity, setBCity] = useState('');
+  const [bState, setBState] = useState('');
+  const [bZip, setBZip] = useState('');
+  const [bCountry, setBCountry] = useState('US');
+  const [bPhone, setBPhone] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const canSave = number.replace(/\D/g, '').length >= 13;
+
+  const save = async () => {
+    if (saving || !canSave) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await window.autog.cardsAdd({
+        label,
+        cardholderName,
+        number,
+        expiry,
+        cvv,
+        billingAddress: {
+          fullName: bFullName,
+          line1: bLine1,
+          line2: bLine2,
+          city: bCity,
+          state: bState,
+          zip: bZip,
+          country: bCountry,
+          phone: bPhone,
+        },
+      });
+      window.dispatchEvent(new CustomEvent(CARDS_EVENT));
+      props.onSaved(next);
+      props.onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed to add card');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fieldCls =
+    'w-full bg-black/40 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-zinc-600';
+  const labelCls =
+    'block text-[10px] uppercase tracking-wide text-zinc-500 mb-1';
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onClick={props.onClose}
+    >
+      <div
+        className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 w-[460px] max-w-[95vw] max-h-[88vh] overflow-y-auto shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-sm font-semibold text-zinc-100 mb-3">
+          Add payment card
+        </div>
+
+        <div className="text-[10px] uppercase tracking-wide text-zinc-400 mb-1.5">
+          Card
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="col-span-2">
+            <label className={labelCls}>Label</label>
+            <input
+              className={fieldCls}
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="e.g. Chase Visa"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className={labelCls}>Name on card</label>
+            <input
+              className={fieldCls}
+              value={cardholderName}
+              onChange={(e) => setCardholderName(e.target.value)}
+              placeholder="Cuong Ngo"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className={labelCls}>Card number *</label>
+            <input
+              className={fieldCls}
+              inputMode="numeric"
+              autoComplete="off"
+              value={number}
+              onChange={(e) => setNumber(e.target.value)}
+              placeholder="Full card number"
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Expiry (MM/YY)</label>
+            <input
+              className={fieldCls}
+              inputMode="numeric"
+              value={expiry}
+              onChange={(e) => setExpiry(e.target.value)}
+              placeholder="optional"
+              title="Optional — Amazon store cards have none."
+            />
+          </div>
+          <div>
+            <label className={labelCls}>CVV</label>
+            <input
+              className={fieldCls}
+              inputMode="numeric"
+              value={cvv}
+              onChange={(e) => setCvv(e.target.value)}
+              placeholder="optional"
+            />
+          </div>
+        </div>
+
+        <div className="text-[10px] uppercase tracking-wide text-zinc-400 mt-4 mb-1.5">
+          Billing address
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="col-span-2">
+            <label className={labelCls}>Full name</label>
+            <input
+              className={fieldCls}
+              value={bFullName}
+              onChange={(e) => setBFullName(e.target.value)}
+              placeholder="Cuong Ngo"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className={labelCls}>Address line 1</label>
+            <input
+              className={fieldCls}
+              value={bLine1}
+              onChange={(e) => setBLine1(e.target.value)}
+              placeholder="Street number and name"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className={labelCls}>Address line 2</label>
+            <input
+              className={fieldCls}
+              value={bLine2}
+              onChange={(e) => setBLine2(e.target.value)}
+              placeholder="(optional)"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className={labelCls}>City</label>
+            <input
+              className={fieldCls}
+              value={bCity}
+              onChange={(e) => setBCity(e.target.value)}
+              placeholder="Portland"
+            />
+          </div>
+          <div>
+            <label className={labelCls}>State / Province / Region</label>
+            <input
+              className={fieldCls}
+              value={bState}
+              onChange={(e) => setBState(e.target.value)}
+              placeholder="OR"
+            />
+          </div>
+          <div>
+            <label className={labelCls}>ZIP</label>
+            <input
+              className={fieldCls}
+              value={bZip}
+              onChange={(e) => setBZip(e.target.value)}
+              placeholder="97230"
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Country</label>
+            <input
+              className={fieldCls}
+              value={bCountry}
+              onChange={(e) => setBCountry(e.target.value)}
+              placeholder="US"
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Phone number</label>
+            <input
+              className={fieldCls}
+              inputMode="numeric"
+              value={bPhone}
+              onChange={(e) => setBPhone(e.target.value)}
+              placeholder="5035550100"
+            />
+          </div>
+        </div>
+
+        {error && (
+          <div className="mt-3 text-xs text-rose-300">{error}</div>
+        )}
+        <div className="mt-4 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded-full text-xs border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+            onClick={props.onClose}
+            disabled={saving}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded-full text-xs border bg-amber-500/10 border-amber-500/30 text-amber-200 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!canSave || saving}
+            onClick={() => void save()}
+          >
+            {saving ? 'Saving…' : 'Save card'}
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ import { logger } from '../shared/logger.js';
 import type {
   CreditCardSafe,
   CreditCardInput,
+  BillingAddress,
   SyncCard,
 } from '../shared/types.js';
 import { writeJsonAtomic } from './atomicJson.js';
@@ -48,7 +49,29 @@ type StoredCard = {
   expiry?: string | null;
   /** Encrypted CVV, or null/absent when none was supplied. */
   cvvEnc?: string | null;
+  /** Billing address, plaintext. Absent on legacy rows / when none. */
+  billingAddress?: BillingAddress | null;
 };
+
+/** Trim a billing address; an all-blank one collapses to null. */
+function normalizeBilling(
+  b: BillingAddress | null | undefined,
+): BillingAddress | null {
+  if (!b) return null;
+  const t = (s: string | undefined) => (s ?? '').trim();
+  const out: BillingAddress = {
+    fullName: t(b.fullName),
+    line1: t(b.line1),
+    line2: t(b.line2),
+    city: t(b.city),
+    state: t(b.state),
+    zip: t(b.zip),
+    country: t(b.country) || 'US',
+    phone: t(b.phone),
+  };
+  const hasContent = out.fullName || out.line1 || out.city || out.zip;
+  return hasContent ? out : null;
+}
 
 type StoreFile = { cards: StoredCard[] };
 
@@ -149,6 +172,7 @@ export async function addCard(input: CreditCardInput): Promise<CardSafe[]> {
     numberEnc: encrypt(digits),
     expiry,
     cvvEnc: cvvDigits ? encrypt(cvvDigits) : null,
+    billingAddress: normalizeBilling(input.billingAddress),
   };
   cards.push(card);
   await saveAll(cards);
@@ -209,6 +233,7 @@ export async function getFullCardById(
   number: string;
   expiry: string | null;
   cvv: string | null;
+  billingAddress: BillingAddress | null;
 } | null> {
   const match = (await loadAll()).find((c) => c.id === id);
   if (!match) return null;
@@ -219,6 +244,7 @@ export async function getFullCardById(
       number: decrypt(match.numberEnc),
       expiry: match.expiry ?? null,
       cvv: match.cvvEnc ? decrypt(match.cvvEnc) : null,
+      billingAddress: match.billingAddress ?? null,
     };
   } catch (err) {
     logger.warn('cardVault.fullCardDecryptFailed', {
@@ -248,6 +274,7 @@ export async function exportCardsWithNumbers(): Promise<SyncCard[]> {
         number: decrypt(c.numberEnc),
         expiry: c.expiry ?? null,
         cvv: c.cvvEnc ? decrypt(c.cvvEnc) : null,
+        billingAddress: c.billingAddress ?? null,
       });
     } catch (err) {
       logger.warn('cardVault.exportDecryptFailed', {
@@ -286,6 +313,7 @@ export async function replaceCardsFromSync(
       numberEnc: encrypt(digits),
       expiry: c.expiry ?? null,
       cvvEnc: cvvDigits ? encrypt(cvvDigits) : null,
+      billingAddress: normalizeBilling(c.billingAddress),
     });
   }
   await saveAll(next);
