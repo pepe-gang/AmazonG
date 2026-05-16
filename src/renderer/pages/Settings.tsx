@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
-import type { CreditCardSafe, RendererStatus } from '../../shared/types.js';
+import type { RendererStatus } from '../../shared/types.js';
 import { SNAPSHOT_ERROR_GROUPS } from '../../shared/snapshotGroups.js';
 import { useSettings } from '../hooks/useSettings.js';
 import { useConfirm } from '../components/ConfirmDialog.js';
@@ -61,10 +61,6 @@ export function SettingsView({
         <ExperimentalPanel />
         <BetterBGConnectionPanel identity={identity} workerRunning={workerRunning} />
       </div>
-      {/* Cards panel sits OUTSIDE the worker-locked block: the
-          "Verify your card" challenge fires mid-buy, so the user must
-          be able to add a card while the worker is running. */}
-      <CreditCardsPanel />
       {lockedToast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 glass-strong px-4 py-2 text-sm rounded-full shadow-lg z-50" role="status">
           Stop the worker first — settings can't be changed while jobs are polling.
@@ -520,142 +516,3 @@ function AllowedPrefixesPanel() {
   );
 }
 
-/* ============================================================
-   Credit cards — feeds the "Verify your card" auto-handler.
-   When Amazon interrupts Place Order asking for a card's full
-   number, the worker matches the "ending in NNNN" hint against
-   this list and fills it. Full numbers are encrypted at rest via
-   the OS keychain and never leave the main process.
-   ============================================================ */
-function CreditCardsPanel() {
-  const [cards, setCards] = useState<CreditCardSafe[] | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [numberDraft, setNumberDraft] = useState('');
-  const [labelDraft, setLabelDraft] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    try {
-      setCards(await window.autog.cardsList());
-    } catch {
-      setCards([]);
-    }
-  }, []);
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  const add = async () => {
-    setError(null);
-    setBusy(true);
-    try {
-      const next = await window.autog.cardsAdd(numberDraft, labelDraft);
-      setCards(next);
-      setNumberDraft('');
-      setLabelDraft('');
-      setAdding(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'failed to add card');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async (id: string) => {
-    setBusy(true);
-    try {
-      setCards(await window.autog.cardsRemove(id));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (!cards) return null;
-
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Payment Cards</div>
-          <div className="prefix-sub">
-            When Amazon interrupts checkout with a “Verify your card” prompt,
-            AmazonG matches the card’s last 4 digits against this list and
-            re-enters the full number automatically. Numbers are encrypted on
-            this device via the OS keychain — they’re never logged, never
-            shown again, and never sent to BetterBG.
-          </div>
-        </div>
-        {!adding && (
-          <button className="ghost-btn" onClick={() => setAdding(true)}>
-            Add card
-          </button>
-        )}
-      </div>
-      {adding && (
-        <div className="prefix-edit" style={{ flexWrap: 'wrap' }}>
-          <input
-            type="text"
-            inputMode="numeric"
-            autoComplete="off"
-            value={numberDraft}
-            onChange={(e) => setNumberDraft(e.target.value)}
-            placeholder="Full card number"
-          />
-          <input
-            type="text"
-            value={labelDraft}
-            onChange={(e) => setLabelDraft(e.target.value)}
-            placeholder="Label (e.g. Chase Prime)"
-          />
-          <button
-            className="primary-action"
-            onClick={() => void add()}
-            disabled={busy || numberDraft.replace(/\D/g, '').length < 13}
-          >
-            Save
-          </button>
-          <button
-            className="ghost-btn"
-            onClick={() => {
-              setAdding(false);
-              setNumberDraft('');
-              setLabelDraft('');
-              setError(null);
-            }}
-          >
-            Cancel
-          </button>
-          {error && (
-            <span style={{ color: '#fca5a5', fontSize: 12, width: '100%' }}>
-              {error}
-            </span>
-          )}
-        </div>
-      )}
-      <div className="prefix-chips">
-        {cards.length === 0 ? (
-          <span className="prefix-empty">
-            No cards saved — “Verify your card” prompts will still fail to a
-            manual step
-          </span>
-        ) : (
-          cards.map((c) => (
-            <span key={c.id} className="prefix-chip">
-              {c.label ? `${c.label} · ` : ''}•••• {c.last4}
-              <button
-                className="ghost-btn"
-                style={{ marginLeft: 6, padding: '0 4px' }}
-                onClick={() => void remove(c.id)}
-                disabled={busy}
-                title="Remove this card"
-              >
-                ✕
-              </button>
-            </span>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}

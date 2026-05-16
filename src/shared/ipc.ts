@@ -420,7 +420,7 @@ export type AutoGBridge = {
   /** Add a payment card. `rawNumber` is encrypted at rest in the main
    *  process; only the safe list is returned. Rejects on an invalid
    *  number (13–19 digits after stripping separators). */
-  cardsAdd(rawNumber: string, label: string): Promise<CreditCardSafe[]>;
+  cardsAdd(rawNumber: string): Promise<CreditCardSafe[]>;
   /** Remove a stored payment card by id. Returns the updated list. */
   cardsRemove(id: string): Promise<CreditCardSafe[]>;
   dealsList(): Promise<AmazonDeal[]>;

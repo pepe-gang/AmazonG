@@ -3078,10 +3078,10 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     IPC.cardsAdd,
-    async (_e, rawNumber: string, label: string): Promise<CreditCardSafe[]> => {
+    async (_e, rawNumber: string): Promise<CreditCardSafe[]> => {
       // addCard validates + encrypts; it throws on a bad number, which
       // ipcMain.handle surfaces to the renderer as a rejected invoke.
-      return addCard(rawNumber, label);
+      return addCard(rawNumber);
     },
   );
 

@@ -15,25 +15,26 @@ import { writeJsonAtomic } from './atomicJson.js';
  *
  * On disk: userData/card-vault.json
  *
- * Shape: { cards: [ { id, last4, label, numberEnc } ] }
+ * Shape: { cards: [ { id, last4, numberEnc } ] }
  *   - numberEnc — base64 of safeStorage.encryptString(full PAN).
  *     The plaintext PAN is NEVER written to disk and NEVER logged.
- *   - last4 / label are plaintext: last4 is needed to match the
- *     challenge hint, label is a user nickname. Neither is sensitive.
+ *   - last4 is plaintext — it's needed to match the challenge hint
+ *     and isn't sensitive. (Cards saved before the label field was
+ *     dropped may still carry a stray `label` key on disk; it's
+ *     ignored on read and harmless.)
  *
  * Built on Electron's safeStorage (OS keychain — macOS Keychain,
  * Windows DPAPI, libsecret) — same mechanism as chaseCredentials.ts.
  * The PAN is only decryptable by the same OS user on the same machine.
  *
  * Renderer never receives the plaintext PAN. The IPC surface only
- * exposes the safe view ({ id, last4, label }); decryption happens
+ * exposes the safe view ({ id, last4 }); decryption happens
  * exclusively in main-process worker code via getCardNumberByLast4.
  */
 
 type StoredCard = {
   id: string;
   last4: string;
-  label: string;
   numberEnc: string;
 };
 
@@ -88,7 +89,6 @@ function decrypt(b64: string): string {
 const toSafe = (c: StoredCard): CardSafe => ({
   id: c.id,
   last4: c.last4,
-  label: c.label,
 });
 
 /** Renderer-facing list — PAN stripped. */
@@ -102,10 +102,7 @@ export async function listCards(): Promise<CardSafe[]> {
  * list. Throws on an obviously invalid number so the renderer can
  * surface the error inline.
  */
-export async function addCard(
-  rawNumber: string,
-  label: string,
-): Promise<CardSafe[]> {
+export async function addCard(rawNumber: string): Promise<CardSafe[]> {
   const digits = (rawNumber ?? '').replace(/\D/g, '');
   if (digits.length < 13 || digits.length > 19) {
     throw new Error('card number must be 13–19 digits');
@@ -114,7 +111,6 @@ export async function addCard(
   const card: StoredCard = {
     id: randomUUID(),
     last4: digits.slice(-4),
-    label: (label ?? '').trim(),
     numberEnc: encrypt(digits),
   };
   cards.push(card);

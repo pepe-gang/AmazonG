@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Switch } from '@/components/ui/switch';
-import type { AmazonProfile } from '../../shared/types.js';
+import type { AmazonProfile, CreditCardSafe } from '../../shared/types.js';
 import { useSettings } from '../hooks/useSettings.js';
 import { useConfirm } from '../components/ConfirmDialog.js';
 import { PencilIcon, PlusIcon, UsersIcon } from '../components/icons.js';
@@ -60,11 +60,150 @@ export function AccountsView({
         <HeadlessTogglePanel profiles={profiles} />
         <AccountsList profiles={profiles} />
       </div>
+      {/* Cards panel sits OUTSIDE the worker-locked block — the
+          "Verify your card" challenge fires mid-buy, so a card must
+          be addable while the worker is running. */}
+      <CreditCardsPanel />
       {lockedToast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 glass-strong px-4 py-2 text-sm rounded-full shadow-lg z-50" role="status">
           Stop the worker first — accounts can't be changed while jobs are polling.
         </div>
       )}
+    </div>
+  );
+}
+
+/* ============================================================
+   Payment cards — feeds the worker's "Verify your card" handler.
+   When Amazon interrupts Place Order asking for a card's full
+   number, the worker matches the "ending in NNNN" hint against this
+   list and fills it. Numbers are encrypted at rest via the OS
+   keychain and never leave the main process.
+   ============================================================ */
+function CreditCardsPanel() {
+  const [cards, setCards] = useState<CreditCardSafe[] | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [numberDraft, setNumberDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await window.autog.cardsList();
+        if (!cancelled) setCards(list);
+      } catch {
+        if (!cancelled) setCards([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const add = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const next = await window.autog.cardsAdd(numberDraft);
+      setCards(next);
+      setNumberDraft('');
+      setAdding(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed to add card');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (id: string) => {
+    setBusy(true);
+    try {
+      setCards(await window.autog.cardsRemove(id));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!cards) return null;
+
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Payment Cards</div>
+          <div className="prefix-sub">
+            When Amazon interrupts checkout with a “Verify your card”
+            prompt, AmazonG matches the card’s last 4 digits against this
+            list and re-enters the full number automatically. Numbers are
+            encrypted on this device via the OS keychain — never logged,
+            never shown again, never sent to BetterBG.
+          </div>
+        </div>
+        {!adding && (
+          <button className="ghost-btn" onClick={() => setAdding(true)}>
+            Add card
+          </button>
+        )}
+      </div>
+      {adding && (
+        <div className="prefix-edit" style={{ flexWrap: 'wrap' }}>
+          <input
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={numberDraft}
+            onChange={(e) => setNumberDraft(e.target.value)}
+            placeholder="Full card number"
+          />
+          <button
+            className="primary-action"
+            onClick={() => void add()}
+            disabled={busy || numberDraft.replace(/\D/g, '').length < 13}
+          >
+            Save
+          </button>
+          <button
+            className="ghost-btn"
+            onClick={() => {
+              setAdding(false);
+              setNumberDraft('');
+              setError(null);
+            }}
+          >
+            Cancel
+          </button>
+          {error && (
+            <span style={{ color: '#fca5a5', fontSize: 12, width: '100%' }}>
+              {error}
+            </span>
+          )}
+        </div>
+      )}
+      <div className="prefix-chips">
+        {cards.length === 0 ? (
+          <span className="prefix-empty">
+            No cards saved — “Verify your card” prompts will still fail to
+            a manual step
+          </span>
+        ) : (
+          cards.map((c) => (
+            <span key={c.id} className="prefix-chip">
+              •••• {c.last4}
+              <button
+                className="ghost-btn"
+                style={{ marginLeft: 6, padding: '0 4px' }}
+                onClick={() => void remove(c.id)}
+                disabled={busy}
+                title="Remove this card"
+              >
+                ✕
+              </button>
+            </span>
+          ))
+        )}
+      </div>
     </div>
   );
 }

@@ -751,5 +751,4 @@ export type FetchStatsSummary = {
 export type CreditCardSafe = {
   id: string;
   last4: string;
-  label: string;
 };
