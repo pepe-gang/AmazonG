@@ -6,6 +6,7 @@ import { logger } from '../shared/logger.js';
 import type {
   CreditCardSafe,
   CreditCardInput,
+  CreditCardEdit,
   BillingAddress,
   SyncCard,
 } from '../shared/types.js';
@@ -140,6 +141,8 @@ const toSafe = (c: StoredCard): CardSafe => ({
   label: c.label?.trim() || `Card ••${c.last4}`,
   last4: c.last4,
   expiry: c.expiry ?? null,
+  cardholderName: c.cardholderName?.trim() ?? '',
+  billingAddress: c.billingAddress ?? null,
 });
 
 /** Renderer-facing list — PAN + CVV stripped. */
@@ -185,6 +188,32 @@ export async function removeCard(id: string): Promise<CardSafe[]> {
   const next = cards.filter((c) => c.id !== id);
   if (next.length !== cards.length) await saveAll(next);
   return next.map(toSafe);
+}
+
+/**
+ * Update a card's editable fields — label, cardholder name, expiry,
+ * billing address. The card number + CVV are write-once (encrypted,
+ * not readable back) and left untouched; to change those, remove and
+ * re-add the card. Returns the updated safe list. Throws on an
+ * invalid expiry (same as addCard).
+ */
+export async function updateCard(
+  id: string,
+  patch: CreditCardEdit,
+): Promise<CardSafe[]> {
+  const cards = await loadAll();
+  const idx = cards.findIndex((c) => c.id === id);
+  if (idx < 0) return cards.map(toSafe);
+  const existing = cards[idx]!;
+  cards[idx] = {
+    ...existing,
+    label: (patch.label ?? '').trim(),
+    cardholderName: (patch.cardholderName ?? '').trim(),
+    expiry: normalizeExpiry(patch.expiry ?? ''),
+    billingAddress: normalizeBilling(patch.billingAddress),
+  };
+  await saveAll(cards);
+  return cards.map(toSafe);
 }
 
 /**

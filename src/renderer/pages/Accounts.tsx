@@ -105,6 +105,7 @@ export function AccountsView({
 function CreditCardsPanel() {
   const [cards, setCards] = useState<CreditCardSafe[] | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [editing, setEditing] = useState<CreditCardSafe | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -161,8 +162,16 @@ function CreditCardsPanel() {
         ) : (
           cards.map((c) => (
             <span key={c.id} className="prefix-chip">
-              {c.label} ···· {c.last4}
-              {c.expiry ? ` · ${c.expiry}` : ''}
+              <button
+                className="ghost-btn"
+                style={{ padding: 0, font: 'inherit', color: 'inherit' }}
+                onClick={() => setEditing(c)}
+                disabled={busy}
+                title="Edit this card"
+              >
+                {c.label} ···· {c.last4}
+                {c.expiry ? ` · ${c.expiry}` : ''}
+              </button>
               <button
                 className="ghost-btn"
                 style={{ marginLeft: 6, padding: '0 4px' }}
@@ -176,9 +185,13 @@ function CreditCardsPanel() {
           ))
         )}
       </div>
-      {showAdd && (
+      {(showAdd || editing) && (
         <CardDialog
-          onClose={() => setShowAdd(false)}
+          editCard={editing}
+          onClose={() => {
+            setShowAdd(false);
+            setEditing(null);
+          }}
           onSaved={(next) => setCards(next)}
         />
       )}
@@ -189,54 +202,71 @@ function CreditCardsPanel() {
 /** Modal for adding a payment card — card details + billing address.
  *  Card number + CVV are encrypted in the main process on save. */
 function CardDialog(props: {
+  /** When set, the dialog edits this card instead of adding a new
+   *  one. The card number + CVV aren't editable (write-once). */
+  editCard?: CreditCardSafe | null;
   onClose: () => void;
   onSaved: (cards: CreditCardSafe[]) => void;
 }) {
-  const [label, setLabel] = useState('');
-  const [cardholderName, setCardholderName] = useState('');
+  const editing = props.editCard ?? null;
+  const ba = editing?.billingAddress ?? null;
+  const [label, setLabel] = useState(editing?.label ?? '');
+  const [cardholderName, setCardholderName] = useState(
+    editing?.cardholderName ?? '',
+  );
   const [number, setNumber] = useState('');
-  const [expiry, setExpiry] = useState('');
+  const [expiry, setExpiry] = useState(editing?.expiry ?? '');
   const [cvv, setCvv] = useState('');
-  const [bFullName, setBFullName] = useState('');
-  const [bLine1, setBLine1] = useState('');
-  const [bLine2, setBLine2] = useState('');
-  const [bCity, setBCity] = useState('');
-  const [bState, setBState] = useState('');
-  const [bZip, setBZip] = useState('');
-  const [bCountry, setBCountry] = useState('US');
-  const [bPhone, setBPhone] = useState('');
+  const [bFullName, setBFullName] = useState(ba?.fullName ?? '');
+  const [bLine1, setBLine1] = useState(ba?.line1 ?? '');
+  const [bLine2, setBLine2] = useState(ba?.line2 ?? '');
+  const [bCity, setBCity] = useState(ba?.city ?? '');
+  const [bState, setBState] = useState(ba?.state ?? '');
+  const [bZip, setBZip] = useState(ba?.zip ?? '');
+  const [bCountry, setBCountry] = useState(ba?.country ?? 'US');
+  const [bPhone, setBPhone] = useState(ba?.phone ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canSave = number.replace(/\D/g, '').length >= 13;
+  // In edit mode the number isn't entered (write-once) so there's
+  // nothing to gate on; adding requires a valid number.
+  const canSave = editing !== null || number.replace(/\D/g, '').length >= 13;
 
   const save = async () => {
     if (saving || !canSave) return;
     setSaving(true);
     setError(null);
+    const billingAddress = {
+      fullName: bFullName,
+      line1: bLine1,
+      line2: bLine2,
+      city: bCity,
+      state: bState,
+      zip: bZip,
+      country: bCountry,
+      phone: bPhone,
+    };
     try {
-      const next = await window.autog.cardsAdd({
-        label,
-        cardholderName,
-        number,
-        expiry,
-        cvv,
-        billingAddress: {
-          fullName: bFullName,
-          line1: bLine1,
-          line2: bLine2,
-          city: bCity,
-          state: bState,
-          zip: bZip,
-          country: bCountry,
-          phone: bPhone,
-        },
-      });
+      const next = editing
+        ? await window.autog.cardsUpdate(editing.id, {
+            label,
+            cardholderName,
+            expiry,
+            billingAddress,
+          })
+        : await window.autog.cardsAdd({
+            label,
+            cardholderName,
+            number,
+            expiry,
+            cvv,
+            billingAddress,
+          });
       window.dispatchEvent(new CustomEvent(CARDS_EVENT));
       props.onSaved(next);
       props.onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'failed to add card');
+      setError(err instanceof Error ? err.message : 'failed to save card');
     } finally {
       setSaving(false);
     }
@@ -247,7 +277,11 @@ function CardDialog(props: {
   const labelCls =
     'block text-[10px] uppercase tracking-wide text-zinc-500 mb-1';
 
-  return (
+  // Portal to <body> — the panel this renders inside establishes a
+  // containing block, which would otherwise scope `fixed` to the
+  // panel and let the modal overflow past the viewport (Save button
+  // unreachable). At body level `fixed`/`vh` are viewport-relative.
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       onClick={props.onClose}
@@ -257,7 +291,7 @@ function CardDialog(props: {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="text-sm font-semibold text-zinc-100 mb-3">
-          Add payment card
+          {editing ? 'Edit payment card' : 'Add payment card'}
         </div>
 
         <div className="text-[10px] uppercase tracking-wide text-zinc-400 mb-1.5">
@@ -283,15 +317,26 @@ function CardDialog(props: {
             />
           </div>
           <div className="col-span-2">
-            <label className={labelCls}>Card number *</label>
-            <input
-              className={fieldCls}
-              inputMode="numeric"
-              autoComplete="off"
-              value={number}
-              onChange={(e) => setNumber(e.target.value)}
-              placeholder="Full card number"
-            />
+            <label className={labelCls}>
+              Card number {editing ? '' : '*'}
+            </label>
+            {editing ? (
+              <input
+                className={`${fieldCls} opacity-60`}
+                value={`•••• ${editing.last4}`}
+                disabled
+                title="The card number is write-once — remove and re-add the card to change it."
+              />
+            ) : (
+              <input
+                className={fieldCls}
+                inputMode="numeric"
+                autoComplete="off"
+                value={number}
+                onChange={(e) => setNumber(e.target.value)}
+                placeholder="Full card number"
+              />
+            )}
           </div>
           <div>
             <label className={labelCls}>Expiry (MM/YY)</label>
@@ -306,13 +351,22 @@ function CardDialog(props: {
           </div>
           <div>
             <label className={labelCls}>CVV</label>
-            <input
-              className={fieldCls}
-              inputMode="numeric"
-              value={cvv}
-              onChange={(e) => setCvv(e.target.value)}
-              placeholder="optional"
-            />
+            {editing ? (
+              <input
+                className={`${fieldCls} opacity-60`}
+                value="•••"
+                disabled
+                title="The CVV is write-once — remove and re-add the card to change it."
+              />
+            ) : (
+              <input
+                className={fieldCls}
+                inputMode="numeric"
+                value={cvv}
+                onChange={(e) => setCvv(e.target.value)}
+                placeholder="optional"
+              />
+            )}
           </div>
         </div>
 
@@ -413,11 +467,12 @@ function CardDialog(props: {
             disabled={!canSave || saving}
             onClick={() => void save()}
           >
-            {saving ? 'Saving…' : 'Save card'}
+            {saving ? 'Saving…' : editing ? 'Save changes' : 'Save card'}
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

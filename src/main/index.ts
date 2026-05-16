@@ -45,6 +45,7 @@ import {
 } from './profiles.js';
 import {
   addCard,
+  updateCard,
   getCardNumberByLast4,
   getFullCardById,
   listCards,
@@ -88,7 +89,7 @@ import { openSession } from '../browser/driver.js';
 import { snapshotDir, snapshotsDiskUsage, clearAllSnapshots } from '../browser/snapshot.js';
 import { compareSemver } from '../shared/version.js';
 import { isLoggedInAmazon, loginAmazon } from '../actions/loginAmazon.js';
-import type { AmazonProfile, CreditCardSafe, CreditCardInput, IdentityInfo, RendererStatus } from '../shared/types.js';
+import type { AmazonProfile, CreditCardSafe, CreditCardInput, CreditCardEdit, IdentityInfo, RendererStatus } from '../shared/types.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -3221,6 +3222,15 @@ function registerIpcHandlers(): void {
       // addCard validates + encrypts; it throws on bad input, which
       // ipcMain.handle surfaces to the renderer as a rejected invoke.
       const next = await addCard(input);
+      void pushSyncToBG();
+      return next;
+    },
+  );
+
+  ipcMain.handle(
+    IPC.cardsUpdate,
+    async (_e, id: string, patch: CreditCardEdit): Promise<CreditCardSafe[]> => {
+      const next = await updateCard(id, patch);
       void pushSyncToBG();
       return next;
     },

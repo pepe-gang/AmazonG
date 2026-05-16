@@ -8,6 +8,7 @@ import type {
   ChaseRedeemResult,
   CreditCardSafe,
   CreditCardInput,
+  CreditCardEdit,
   FetchStatsSummary,
   IdentityInfo,
   JobAttempt,
@@ -58,6 +59,9 @@ export const IPC = {
   /** Add a payment card. Inbound full number is encrypted at rest
    *  via the OS keychain; only the safe list comes back. */
   cardsAdd: 'cards:add',
+  /** Update a saved card's editable fields (label, name, expiry,
+   *  billing address). Number + CVV are write-once. */
+  cardsUpdate: 'cards:update',
   /** Remove a stored payment card by id. Returns the updated list. */
   cardsRemove: 'cards:remove',
   /** Fetch the current live Amazon deals catalog from BetterBG's
@@ -434,6 +438,9 @@ export type AutoGBridge = {
    *  main process; only the safe list is returned. Rejects on an
    *  invalid number / expiry / CVV. */
   cardsAdd(input: CreditCardInput): Promise<CreditCardSafe[]>;
+  /** Update a saved card's editable fields. The number + CVV are
+   *  write-once (encrypted) and left untouched. */
+  cardsUpdate(id: string, patch: CreditCardEdit): Promise<CreditCardSafe[]>;
   /** Remove a stored payment card by id. Returns the updated list. */
   cardsRemove(id: string): Promise<CreditCardSafe[]>;
   dealsList(): Promise<AmazonDeal[]>;

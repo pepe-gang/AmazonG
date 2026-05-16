@@ -765,6 +765,11 @@ export type CreditCardSafe = {
   last4: string;
   /** MM/YY, or null for legacy cards saved before the expiry field. */
   expiry: string | null;
+  /** Cardholder name — shown so the edit modal can pre-fill it. */
+  cardholderName: string;
+  /** Billing address — non-sensitive, shown so the edit modal can
+   *  pre-fill it. The card number + CVV are NOT in the safe view. */
+  billingAddress: BillingAddress | null;
 };
 
 /**
@@ -799,6 +804,13 @@ export type CreditCardInput = {
   /** Billing address for the card. */
   billingAddress: BillingAddress;
 };
+
+/**
+ * Editable fields of a saved card. The card number + CVV are
+ * write-once (encrypted, can't be read back) — to change those,
+ * remove and re-add the card.
+ */
+export type CreditCardEdit = Omit<CreditCardInput, 'number' | 'cvv'>;
 
 /**
  * One payment card in the cross-device sync blob — carries the full

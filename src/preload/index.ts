@@ -69,6 +69,10 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.cardsAdd, input) as ReturnType<
       AutoGBridge['cardsAdd']
     >,
+  cardsUpdate: (id, patch) =>
+    ipcRenderer.invoke(IPC.cardsUpdate, id, patch) as ReturnType<
+      AutoGBridge['cardsUpdate']
+    >,
   cardsRemove: (id) =>
     ipcRenderer.invoke(IPC.cardsRemove, id) as ReturnType<AutoGBridge['cardsRemove']>,
   dealsList: () =>
