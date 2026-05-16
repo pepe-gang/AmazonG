@@ -59,12 +59,27 @@ export function AccountsView({
         <EnabledTogglePanel profiles={profiles} />
         <BuyWithFillersPanel profiles={profiles} />
         <HeadlessTogglePanel profiles={profiles} />
-        <AccountsList profiles={profiles} />
       </div>
       {/* Cards panel sits OUTSIDE the worker-locked block — the
           "Verify your card" challenge fires mid-buy, so a card must
-          be addable while the worker is running. */}
+          be addable while the worker is running. It renders above the
+          accounts list so payment setup is the first thing visible. */}
       <CreditCardsPanel />
+      <div
+        className={
+          'flex flex-col gap-3 ' +
+          (workerRunning ? 'opacity-60 pointer-events-none' : '')
+        }
+        aria-disabled={workerRunning}
+        onClickCapture={(e) => {
+          if (!workerRunning) return;
+          e.preventDefault();
+          e.stopPropagation();
+          handleLockedClick();
+        }}
+      >
+        <AccountsList profiles={profiles} />
+      </div>
       {lockedToast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 glass-strong px-4 py-2 text-sm rounded-full shadow-lg z-50" role="status">
           Stop the worker first — accounts can't be changed while jobs are polling.
