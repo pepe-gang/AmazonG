@@ -1102,7 +1102,9 @@ export async function buyWithFillers(
   const ready = await waitForCheckout(
     page,
     opts.allowedAddressPrefixes,
-    undefined,
+    // Plumb debugDir so a checkout-stuck failure (e.g. "Place Order
+    // button never appeared") drops an HTML/PNG snapshot on dev runs.
+    opts.debugDir,
     {
       step: (m, d) => logger.info(m, d, cid),
       warn: (m, d) => logger.warn(m, d, cid),
