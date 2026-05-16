@@ -1075,7 +1075,7 @@ export async function buyWithFillers(
         detail: `url=${page.url()}`,
       };
     }
-    const transition = await waitForSpcOrHandleByg(page, cid, logCtx);
+    const transition = await waitForSpcOrHandleByg(page, cid, logCtx, opts.debugDir);
     if (!transition.ok) {
       return {
         ok: false,
@@ -4707,6 +4707,7 @@ async function waitForSpcOrHandleByg(
   page: Page,
   cid: string | undefined,
   logCtx: Record<string, unknown> = {},
+  debugDir?: string,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   // Shadow `logger` so the 2 call sites in this function get the disk-log
   // routing fields (jobId+profile) merged in. See makeBoundLogger above.
@@ -4717,12 +4718,43 @@ async function waitForSpcOrHandleByg(
   const start = Date.now();
   let bygClicks = 0;
 
+  // Proceed-to-Checkout was clicked but the page never landed on /spc.
+  // We have no idea where it parked — /errors/500, a BYG loop, a
+  // signin redirect, a stalled nav. Probe the likely landmarks (always
+  // on) + drop a dev-only HTML/PNG snapshot so the next occurrence is
+  // diagnosable. captureDebugSnapshot is internally NODE_ENV-gated.
+  const captureSpcMiss = async (): Promise<{ ok: false; reason: string }> => {
+    const probe = await probePageDiag(page, {
+      page_headings: 'h1, h2',
+      byg_header: BYG_HEADER_SELECTOR,
+      byg_button: BYG_BUTTON_SELECTOR,
+      signin_form: 'form#ap_signin_form, input#ap_email',
+      captcha: 'form[action*="validateCaptcha"], #captchacharacters',
+      spc_place_order: 'input[name="placeYourOrder1"]',
+      cart_proceed: 'input[name="proceedToRetailCheckout"]',
+    }).catch(() => null);
+    logger.warn(
+      'step.fillerBuy.spc.notReached.probe',
+      { url: page.url(), probe },
+      cid,
+    );
+    const snap = await captureDebugSnapshot(page, debugDir, 'spc_not_reached');
+    if (snap) {
+      logger.info(
+        'step.fillerBuy.spc.notReached.snapshot',
+        { png: snap.pngPath, html: snap.htmlPath },
+        cid,
+      );
+    }
+    return { ok: false, reason: 'did not reach /spc after Proceed to Checkout' };
+  };
+
   while (true) {
     if (SPC_URL_MATCH.test(page.url())) return { ok: true };
 
     const remaining = TOTAL_DEADLINE_MS - (Date.now() - start);
     if (remaining <= 0) {
-      return { ok: false, reason: 'did not reach /spc after Proceed to Checkout' };
+      return captureSpcMiss();
     }
 
     const winner = await Promise.race([
@@ -4740,7 +4772,7 @@ async function waitForSpcOrHandleByg(
 
     if (winner === 'spc') return { ok: true };
     if (winner === 'timeout') {
-      return { ok: false, reason: 'did not reach /spc after Proceed to Checkout' };
+      return captureSpcMiss();
     }
 
     if (bygClicks >= MAX_BYG_CLICKS) {
