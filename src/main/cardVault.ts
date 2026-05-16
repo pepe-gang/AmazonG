@@ -316,12 +316,19 @@ export async function exportCardsWithNumbers(): Promise<SyncCard[]> {
 }
 
 /**
- * Replace the entire local vault with a set pulled from BG sync. The
- * PAN + CVV are re-encrypted with THIS device's OS keychain (the
- * synced blob carries cleartext — safeStorage keys are machine-bound
- * and don't travel). Main-process ONLY.
+ * Replace the local vault with a set pulled from BG sync. The PAN +
+ * CVV are re-encrypted with THIS device's OS keychain (the synced
+ * blob carries cleartext — safeStorage keys are machine-bound and
+ * don't travel). Main-process ONLY.
  *
- * Wholesale replace: on a sync pull BG is the source of truth.
+ * FIELD-PRESERVING MERGE — not a blind overwrite. A synced field is
+ * applied only when it carries a value; when it's blank/null the
+ * existing local value is kept. This defends against a sync round-
+ * trip through a BG deploy that doesn't yet know the extended card
+ * shape (label / cardholderName / expiry / cvv / billingAddress) and
+ * strips those fields — without the merge, every startup pull would
+ * gut a fully-entered card down to just its number.
+ *
  * Returns the resulting safe list. Throws if keychain encryption is
  * unavailable (same guard as addCard) so the caller can skip the
  * apply rather than silently lose cards.
@@ -329,20 +336,24 @@ export async function exportCardsWithNumbers(): Promise<SyncCard[]> {
 export async function replaceCardsFromSync(
   cards: SyncCard[],
 ): Promise<CardSafe[]> {
+  const prevById = new Map((await loadAll()).map((c) => [c.id, c]));
   const next: StoredCard[] = [];
   for (const c of cards) {
     const digits = (c.number ?? '').replace(/\D/g, '');
     if (digits.length < 13 || digits.length > 19) continue;
+    const prev = c.id ? prevById.get(c.id) : undefined;
     const cvvDigits = (c.cvv ?? '').replace(/\D/g, '');
     next.push({
       id: c.id || randomUUID(),
-      label: (c.label ?? '').trim(),
-      cardholderName: (c.cardholderName ?? '').trim(),
+      label: (c.label ?? '').trim() || prev?.label || '',
+      cardholderName:
+        (c.cardholderName ?? '').trim() || prev?.cardholderName || '',
       last4: digits.slice(-4),
       numberEnc: encrypt(digits),
-      expiry: c.expiry ?? null,
-      cvvEnc: cvvDigits ? encrypt(cvvDigits) : null,
-      billingAddress: normalizeBilling(c.billingAddress),
+      expiry: c.expiry ?? prev?.expiry ?? null,
+      cvvEnc: cvvDigits ? encrypt(cvvDigits) : (prev?.cvvEnc ?? null),
+      billingAddress:
+        normalizeBilling(c.billingAddress) ?? prev?.billingAddress ?? null,
     });
   }
   await saveAll(next);
