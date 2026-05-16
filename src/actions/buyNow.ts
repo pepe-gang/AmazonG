@@ -1557,6 +1557,37 @@ export async function waitForCheckout(
   } catch {
     // ignore — fall through to the generic message
   }
+  // Generic 30s timeout — NOT a recognized interstitial. We have no
+  // idea where the page parked: /errors/500, a delivery-options-
+  // changed banner, a stuck Chewbacca interstitial, a signin
+  // redirect, captcha, or back on /cart. Probe the likely landmarks
+  // (always on) + drop a dev-only HTML/PNG snapshot so the next
+  // occurrence is diagnosable. captureDebugSnapshot is NODE_ENV-gated.
+  const timeoutProbe = await probePageDiag(page, {
+    place_order_input: 'input[name="placeYourOrder1"]',
+    place_order_by_id: '#submitOrderButtonId',
+    page_headings: 'h1, h2',
+    delivery_options_changed:
+      '[id*="delivery-options-changed" i], [class*="delivery-options-changed" i]',
+    signin_form: 'form#ap_signin_form, input#ap_email',
+    captcha: 'form[action*="validateCaptcha"], #captchacharacters',
+    cart_proceed: 'input[name="proceedToRetailCheckout"]',
+  }).catch(() => null);
+  emit?.warn?.('step.buy.placeOrder.notAppeared.probe', {
+    url: page.url(),
+    probe: timeoutProbe,
+  });
+  const timeoutSnap = await captureDebugSnapshot(
+    page,
+    debugDir,
+    'place_order_never_appeared',
+  );
+  if (timeoutSnap) {
+    emit?.step?.('step.buy.placeOrder.notAppeared.snapshot', {
+      png: timeoutSnap.pngPath,
+      html: timeoutSnap.htmlPath,
+    });
+  }
   return { ok: false, reason: 'Place Order button never appeared in 30s' };
 }
 
