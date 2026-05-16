@@ -986,14 +986,35 @@ async function startWorkerNow(): Promise<void> {
     resolveCardNumber: (last4: string) => getCardNumberByLast4(last4),
     jobAttempts: {
       async create(partial) {
-        const a = await storeCreateAttempt(partial);
-        scheduleBroadcastJobs();
-        return a;
+        try {
+          const a = await storeCreateAttempt(partial);
+          scheduleBroadcastJobs();
+          return a;
+        } catch (err) {
+          // Many worker call sites do `.catch(() => undefined)` on
+          // these store writes — a failure here previously vanished
+          // with zero signal, letting on-disk state silently diverge
+          // from memory (verify could then miss filler context).
+          // Log centrally, then rethrow so the existing call-site
+          // contract is unchanged.
+          logger.warn('jobAttempts.create.failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          throw err;
+        }
       },
       async update(attemptId, patch, opts) {
-        const a = await storeUpdateAttempt(attemptId, patch, opts);
-        scheduleBroadcastJobs();
-        return a;
+        try {
+          const a = await storeUpdateAttempt(attemptId, patch, opts);
+          scheduleBroadcastJobs();
+          return a;
+        } catch (err) {
+          logger.warn('jobAttempts.update.failed', {
+            attemptId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          throw err;
+        }
       },
       get: storeGetAttempt,
       async recentOrderIdsForEmail(amazonEmail, withinMs) {

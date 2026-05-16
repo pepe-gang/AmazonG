@@ -34,8 +34,19 @@ export function log(
   for (const sink of sinks) {
     try {
       sink(event);
-    } catch {
-      // sink errors shouldn't break the program
+    } catch (err) {
+      // A sink error must never break the program — but it also must
+      // not vanish silently (a broken disk sink would drop the audit
+      // trail with zero signal). Surface it on stderr directly, which
+      // bypasses the sink chain that just failed.
+      try {
+        console.error(
+          'log sink threw — event dropped from that sink:',
+          err instanceof Error ? err.message : String(err),
+        );
+      } catch {
+        // console itself unavailable — nothing more we can do
+      }
     }
   }
 }

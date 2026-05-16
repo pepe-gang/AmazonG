@@ -23,7 +23,12 @@ export type ErrorGroupId = (typeof SNAPSHOT_ERROR_GROUPS)[number]['id'];
 export function classifyError(error: string): ErrorGroupId | null {
   const e = error.toLowerCase();
 
-  if (/exceeds (max|retail cap) \$/.test(error) || /exceeds max \$/.test(e)) return 'price_exceeded';
+  // Test the lowercased copy so the match is case-insensitive for BOTH
+  // "max" and "retail cap" — the old two-part test was case-sensitive
+  // on the first regex and the lowercase fallback only covered "max",
+  // so an all-caps "EXCEEDS RETAIL CAP $…" error never classified and
+  // no debug snapshot was captured.
+  if (/exceeds (max|retail cap) \$/.test(e)) return 'price_exceeded';
   if (e.includes('not in stock') || e.includes('out of stock') || e.includes('currently unavailable') || e.includes('item_unavailable')) return 'out_of_stock';
   if (e.includes('no saved address starts with') || e.includes('no allowed prefixes configured')) return 'address_mismatch';
   if (e.includes('address picker') || e.includes('address submitted but') || e.includes('deliver button persisted') || e.includes('change-address link not found') || e.includes('did not re-render')) return 'address_stuck';

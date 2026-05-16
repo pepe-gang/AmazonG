@@ -2101,7 +2101,29 @@ async function handleCancelFillersJob(
     const list = await deps.bg
       .listFillerCancelTasks(job.id)
       .catch(() => null);
-    const tasks = list?.tasks ?? [];
+    if (!list) {
+      // Task-list fetch failed AND the profile is signed out. We
+      // can't enumerate the tasks to signal profile_signed_out per
+      // task, and reporting `completed` would orphan them. Fail the
+      // job so BG reschedules — a later claim retries the fetch.
+      logger.warn(
+        'job.cancelFillers.profile_missing.list_failed',
+        { jobId: job.id, targetEmail },
+        cid,
+      );
+      await reportSafe(
+        deps,
+        job.id,
+        {
+          status: 'failed',
+          error:
+            'cancel_fillers: profile signed out and the task-list fetch failed — will retry',
+        },
+        cid,
+      );
+      return;
+    }
+    const tasks = list.tasks;
     logger.warn(
       'job.cancelFillers.profile_missing',
       { jobId: job.id, targetEmail, taskCount: tasks.length },
@@ -2133,10 +2155,28 @@ async function handleCancelFillersJob(
     );
     return null;
   });
-  if (!list || list.tasks.length === 0) {
-    // Nothing to do — could happen if rescheduling raced or all
-    // tasks just terminated. Report as completed (no updates) so
-    // the AutoBuyJob row flips out of in_progress.
+  if (!list) {
+    // The task-list FETCH failed (transient BG error / network).
+    // This is NOT the same as "no tasks" — reporting `completed`
+    // here would flip the AutoBuyJob out of in_progress and orphan
+    // whatever pending cancel tasks actually exist, so the fillers
+    // ship uncancelled. Report `failed` instead so BG reschedules
+    // and a later claim retries the fetch.
+    await reportSafe(
+      deps,
+      job.id,
+      {
+        status: 'failed',
+        error: 'cancel_fillers: could not fetch the task list from BG — will retry',
+      },
+      cid,
+    );
+    return;
+  }
+  if (list.tasks.length === 0) {
+    // Genuinely empty — rescheduling raced, or every task already
+    // terminated. Safe to report completed (no updates) so the
+    // AutoBuyJob row flips out of in_progress.
     logger.info('job.cancelFillers.empty', logCtx, cid);
     await reportSafe(deps, job.id, { status: 'completed' }, cid);
     return;
