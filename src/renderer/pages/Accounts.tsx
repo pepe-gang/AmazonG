@@ -63,6 +63,7 @@ export function AccountsView({
         }}
       >
         <EnabledTogglePanel profiles={profiles} />
+        <AutoBuyTogglePanel profiles={profiles} />
         <BuyWithFillersPanel profiles={profiles} />
         <HeadlessTogglePanel profiles={profiles} />
       </div>
@@ -574,6 +575,61 @@ function EnabledTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
         <label
           className="flex items-center gap-2 cursor-pointer"
           title={on ? 'All accounts enabled' : 'At least one account is disabled'}
+        >
+          <Switch
+            checked={on}
+            onCheckedChange={() => void toggle()}
+            disabled={busy || applying}
+          />
+          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
+            {on ? 'All on' : `${profiles.length - offCount}/${profiles.length}`}
+          </span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function AutoBuyTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
+  const { busy } = useSettings();
+  const [applying, setApplying] = useState(false);
+  if (profiles.length === 0) return null;
+  const on = profiles.every((p) => p.autoBuy);
+  const offCount = profiles.filter((p) => !p.autoBuy).length;
+  const toggle = async () => {
+    const next = !on;
+    setApplying(true);
+    try {
+      for (const p of profiles) {
+        await window.autog.profilesSetAutoBuy(p.email, next);
+      }
+    } finally {
+      setApplying(false);
+    }
+  };
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Auto Buy</div>
+          <div className="prefix-sub">
+            Master switch — toggle Auto Buy on or off for every account at once. Accounts
+            with Auto Buy on claim new buy jobs; accounts with it off skip new buys but
+            still verify and track existing orders. Ignored while an account is Disabled.
+            Flipping an individual account below updates this switch automatically.
+            {offCount > 0 && (
+              <>
+                {' '}
+                <span className="muted">
+                  ({offCount} of {profiles.length} currently off)
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+        <label
+          className="flex items-center gap-2 cursor-pointer"
+          title={on ? 'Auto Buy on — all accounts' : 'At least one account has Auto Buy off'}
         >
           <Switch
             checked={on}

@@ -1,9 +1,14 @@
-import type { AutoGSyncBlob, SyncCard } from '../shared/types.js';
+import type {
+  AutoGSyncBlob,
+  SyncCard,
+  SyncChaseProfile,
+} from '../shared/types.js';
 import type { FillerPool } from '../shared/ipc.js';
 
 /**
  * The local actions a startup BG cross-device sync pull should take,
- * derived purely from the BG blob + the local card count.
+ * derived purely from the BG blob + the local card / Chase-profile
+ * counts.
  *
  * Kept electron-free so the merge decision is unit-testable in
  * isolation (tests/unit/syncPlan.test.ts) — `pullSyncFromBG` in
@@ -17,9 +22,12 @@ export type SyncPlan = {
   /** Account→card assignments (email → cardId) to apply to profiles,
    *  or null to leave local assignments alone. */
   cardAssignments: Record<string, string> | null;
+  /** Chase profiles to replace the local list with, or null to leave
+   *  the local list alone. */
+  chaseProfiles: SyncChaseProfile[] | null;
   /** Push local state up to BG after applying — BG had no row yet, or
-   *  BG's card list was empty while this machine has cards (so an
-   *  empty remote can't wipe a populated local vault). */
+   *  BG's card / Chase list was empty while this machine has entries
+   *  (so an empty remote can't wipe a populated local store). */
   pushLocal: boolean;
   /** Something changed locally — caller emits evt:sync-applied. */
   applied: boolean;
@@ -31,6 +39,7 @@ export type SyncPlan = {
 export function planSync(
   blob: AutoGSyncBlob,
   localCardCount: number,
+  localChaseProfileCount: number,
 ): SyncPlan {
   // No row on BG yet — seed it from this machine, change nothing local.
   if (!blob.exists) {
@@ -38,6 +47,7 @@ export function planSync(
       settingsPatch: {},
       cards: null,
       cardAssignments: null,
+      chaseProfiles: null,
       pushLocal: true,
       applied: false,
     };
@@ -61,6 +71,16 @@ export function planSync(
     pushLocal = true;
   }
 
+  // Chase profiles — same empty-remote guard as cards. `chaseProfiles`
+  // may be absent on a BG that predates the field; treat that as [].
+  const remoteChase = blob.chaseProfiles ?? [];
+  let chaseProfiles: SyncChaseProfile[] | null = null;
+  if (remoteChase.length > 0) {
+    chaseProfiles = remoteChase;
+  } else if (localChaseProfileCount > 0) {
+    pushLocal = true;
+  }
+
   // Apply account→card assignments unless we're pushing local up (an
   // empty remote shouldn't clear local assignments either). An empty
   // assignment map is treated as "nothing to apply".
@@ -74,6 +94,7 @@ export function planSync(
   const applied =
     Object.keys(settingsPatch).length > 0 ||
     cards !== null ||
-    cardAssignments !== null;
-  return { settingsPatch, cards, cardAssignments, pushLocal, applied };
+    cardAssignments !== null ||
+    chaseProfiles !== null;
+  return { settingsPatch, cards, cardAssignments, chaseProfiles, pushLocal, applied };
 }

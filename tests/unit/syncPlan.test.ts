@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { planSync } from "../../src/main/syncPlan.js";
-import type { AutoGSyncBlob, SyncCard } from "../../src/shared/types.js";
+import type {
+  AutoGSyncBlob,
+  SyncCard,
+  SyncChaseProfile,
+} from "../../src/shared/types.js";
 
 const card = (id: string): SyncCard => ({
   id,
@@ -13,6 +17,14 @@ const card = (id: string): SyncCard => ({
   billingAddress: null,
 });
 
+const chaseProf = (id: string): SyncChaseProfile => ({
+  id,
+  label: `Chase ${id}`,
+  cardAccountId: null,
+  autoRedeem: null,
+  createdAt: "2026-05-16T00:00:00.000Z",
+});
+
 /** A populated BG blob (exists=true) with sensible defaults; override per test. */
 function blob(over: Partial<AutoGSyncBlob> = {}): AutoGSyncBlob {
   return {
@@ -21,6 +33,7 @@ function blob(over: Partial<AutoGSyncBlob> = {}): AutoGSyncBlob {
     cardAssignments: null,
     buyWithFillers: false,
     fillerAttempts: ["eero"],
+    chaseProfiles: [],
     updatedAt: "2026-05-16T00:00:00.000Z",
     ...over,
   };
@@ -32,24 +45,26 @@ const emptyBlob: AutoGSyncBlob = {
   cardAssignments: null,
   buyWithFillers: null,
   fillerAttempts: null,
+  chaseProfiles: [],
   updatedAt: null,
 };
 
 describe("planSync", () => {
   describe("when BG has no row yet (exists=false)", () => {
     it("seeds from local: push up, change nothing, not applied", () => {
-      const plan = planSync(emptyBlob, 3);
+      const plan = planSync(emptyBlob, 3, 0);
       expect(plan).toEqual({
         settingsPatch: {},
         cards: null,
         cardAssignments: null,
+        chaseProfiles: null,
         pushLocal: true,
         applied: false,
       });
     });
 
     it("seeds even when this machine has no cards either", () => {
-      const plan = planSync(emptyBlob, 0);
+      const plan = planSync(emptyBlob, 0, 0);
       expect(plan.pushLocal).toBe(true);
       expect(plan.applied).toBe(false);
     });
@@ -60,6 +75,7 @@ describe("planSync", () => {
       const plan = planSync(
         blob({ buyWithFillers: true, fillerAttempts: ["eero", "amazon-basics"] }),
         0,
+        0,
       );
       expect(plan.settingsPatch).toEqual({
         buyWithFillers: true,
@@ -69,16 +85,16 @@ describe("planSync", () => {
     });
 
     it("omits fillerAttempts when BG carries an empty array or null", () => {
-      expect(planSync(blob({ fillerAttempts: [] }), 0).settingsPatch.fillerAttempts).toBeUndefined();
-      expect(planSync(blob({ fillerAttempts: null }), 0).settingsPatch.fillerAttempts).toBeUndefined();
+      expect(planSync(blob({ fillerAttempts: [] }), 0, 0).settingsPatch.fillerAttempts).toBeUndefined();
+      expect(planSync(blob({ fillerAttempts: null }), 0, 0).settingsPatch.fillerAttempts).toBeUndefined();
     });
 
     it("omits buyWithFillers when BG carries null", () => {
-      expect(planSync(blob({ buyWithFillers: null }), 0).settingsPatch.buyWithFillers).toBeUndefined();
+      expect(planSync(blob({ buyWithFillers: null }), 0, 0).settingsPatch.buyWithFillers).toBeUndefined();
     });
 
     it("applies buyWithFillers=false (a real value, not skipped)", () => {
-      const plan = planSync(blob({ buyWithFillers: false, fillerAttempts: [] }), 0);
+      const plan = planSync(blob({ buyWithFillers: false, fillerAttempts: [] }), 0, 0);
       expect(plan.settingsPatch).toEqual({ buyWithFillers: false });
       expect(plan.applied).toBe(true);
     });
@@ -87,20 +103,20 @@ describe("planSync", () => {
   describe("cards", () => {
     it("replaces the local vault when BG has cards", () => {
       const bgCards = [card("c1"), card("c2")];
-      const plan = planSync(blob({ cards: bgCards }), 5);
+      const plan = planSync(blob({ cards: bgCards }), 5, 0);
       expect(plan.cards).toBe(bgCards);
       expect(plan.pushLocal).toBe(false);
       expect(plan.applied).toBe(true);
     });
 
     it("does NOT wipe a populated local vault when BG card list is empty — pushes local instead", () => {
-      const plan = planSync(blob({ cards: [] }), 2);
+      const plan = planSync(blob({ cards: [] }), 2, 0);
       expect(plan.cards).toBeNull();
       expect(plan.pushLocal).toBe(true);
     });
 
     it("leaves the vault alone when both BG and local have no cards", () => {
-      const plan = planSync(blob({ cards: [] }), 0);
+      const plan = planSync(blob({ cards: [] }), 0, 0);
       expect(plan.cards).toBeNull();
       expect(plan.pushLocal).toBe(false);
     });
@@ -109,20 +125,50 @@ describe("planSync", () => {
   describe("card assignments", () => {
     it("applies a non-empty assignment map from BG", () => {
       const assignments = { "a@x.com": "c1" };
-      const plan = planSync(blob({ cards: [card("c1")], cardAssignments: assignments }), 0);
+      const plan = planSync(blob({ cards: [card("c1")], cardAssignments: assignments }), 0, 0);
       expect(plan.cardAssignments).toBe(assignments);
       expect(plan.applied).toBe(true);
     });
 
     it("ignores an empty assignment map", () => {
-      const plan = planSync(blob({ cards: [card("c1")], cardAssignments: {} }), 0);
+      const plan = planSync(blob({ cards: [card("c1")], cardAssignments: {} }), 0, 0);
       expect(plan.cardAssignments).toBeNull();
     });
 
     it("does NOT apply assignments when pushing local up (empty remote)", () => {
-      const plan = planSync(blob({ cards: [], cardAssignments: { "a@x.com": "c1" } }), 2);
+      const plan = planSync(blob({ cards: [], cardAssignments: { "a@x.com": "c1" } }), 2, 0);
       expect(plan.pushLocal).toBe(true);
       expect(plan.cardAssignments).toBeNull();
+    });
+  });
+
+  describe("chase profiles", () => {
+    it("replaces the local list when BG has chase profiles", () => {
+      const bgChase = [chaseProf("p1"), chaseProf("p2")];
+      const plan = planSync(blob({ chaseProfiles: bgChase }), 0, 5);
+      expect(plan.chaseProfiles).toBe(bgChase);
+      expect(plan.pushLocal).toBe(false);
+      expect(plan.applied).toBe(true);
+    });
+
+    it("does NOT wipe a populated local list when BG chase list is empty — pushes local instead", () => {
+      const plan = planSync(blob({ chaseProfiles: [] }), 0, 3);
+      expect(plan.chaseProfiles).toBeNull();
+      expect(plan.pushLocal).toBe(true);
+    });
+
+    it("leaves the list alone when both BG and local have no chase profiles", () => {
+      const plan = planSync(blob({ chaseProfiles: [] }), 0, 0);
+      expect(plan.chaseProfiles).toBeNull();
+      expect(plan.pushLocal).toBe(false);
+    });
+
+    it("treats an absent chaseProfiles field (older BG) as empty", () => {
+      const b = blob();
+      delete b.chaseProfiles;
+      const plan = planSync(b, 0, 0);
+      expect(plan.chaseProfiles).toBeNull();
+      expect(plan.pushLocal).toBe(false);
     });
   });
 
@@ -130,6 +176,7 @@ describe("planSync", () => {
     it("is true when only cards changed", () => {
       const plan = planSync(
         blob({ cards: [card("c1")], buyWithFillers: null, fillerAttempts: null }),
+        0,
         0,
       );
       expect(plan.applied).toBe(true);
@@ -139,6 +186,16 @@ describe("planSync", () => {
       const plan = planSync(
         blob({ buyWithFillers: null, fillerAttempts: null, cardAssignments: { "a@x.com": "c1" } }),
         0,
+        0,
+      );
+      expect(plan.applied).toBe(true);
+    });
+
+    it("is true when only chase profiles changed", () => {
+      const plan = planSync(
+        blob({ buyWithFillers: null, fillerAttempts: null, chaseProfiles: [chaseProf("p1")] }),
+        0,
+        0,
       );
       expect(plan.applied).toBe(true);
     });
@@ -146,6 +203,7 @@ describe("planSync", () => {
     it("is false when nothing changed (BG empty of cards + settings, local empty)", () => {
       const plan = planSync(
         blob({ cards: [], buyWithFillers: null, fillerAttempts: null }),
+        0,
         0,
       );
       expect(plan.applied).toBe(false);

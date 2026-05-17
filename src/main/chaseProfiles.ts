@@ -3,7 +3,7 @@ import { mkdir, readFile, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { writeJsonAtomic } from './atomicJson.js';
-import type { ChaseProfile } from '../shared/types.js';
+import type { ChaseProfile, SyncChaseProfile } from '../shared/types.js';
 
 // re-exported below alongside chaseProfileDir; centralised so the
 // driver doesn't have to know about path layout.
@@ -133,6 +133,72 @@ export async function updateChaseProfile(
   list[idx] = { ...existing, ...patch };
   await saveChaseProfiles(list);
   return list;
+}
+
+/**
+ * Export the syncable subset of every local Chase profile for BG
+ * cross-device sync. Strips machine-bound state (`loggedIn`,
+ * `lastLoginAt`, the user-data dir / cookies) and the per-run
+ * auto-redeem history — see SyncChaseProfile.
+ */
+export async function exportChaseProfilesForSync(): Promise<
+  SyncChaseProfile[]
+> {
+  const list = await loadChaseProfiles();
+  return list.map((p) => ({
+    id: p.id,
+    label: p.label,
+    cardAccountId: p.cardAccountId,
+    autoRedeem: p.autoRedeem
+      ? { enabled: p.autoRedeem.enabled, time: p.autoRedeem.time }
+      : null,
+    createdAt: p.createdAt,
+  }));
+}
+
+/**
+ * Replace the local Chase-profile list with the set pulled from BG
+ * sync (mirror semantics — a profile removed on another device is
+ * removed here too). Field-preserving merge: for a profile that
+ * already exists locally, the machine-bound `loggedIn` / `lastLoginAt`
+ * and the per-run auto-redeem history are kept; everything else takes
+ * the synced value. A profile new to this machine lands logged-out —
+ * the user does OTP once. The orphaned user-data dir of a dropped
+ * profile is intentionally left on disk (a sync-driven recursive `rm`
+ * is riskier than the few MB it reclaims); a manual remove still
+ * cleans it.
+ */
+export async function replaceChaseProfilesFromSync(
+  synced: SyncChaseProfile[],
+): Promise<ChaseProfile[]> {
+  const prevById = new Map(
+    (await loadChaseProfiles()).map((p) => [p.id, p]),
+  );
+  const next: ChaseProfile[] = synced.map((s) => {
+    const prev = prevById.get(s.id);
+    const autoRedeem: ChaseProfile['autoRedeem'] = s.autoRedeem
+      ? {
+          enabled: s.autoRedeem.enabled,
+          time: s.autoRedeem.time,
+          // Run history is per-device — keep whatever this machine has.
+          lastRunAt: prev?.autoRedeem?.lastRunAt ?? null,
+          lastRunResult: prev?.autoRedeem?.lastRunResult ?? null,
+          lastRunError: prev?.autoRedeem?.lastRunError ?? null,
+        }
+      : (prev?.autoRedeem ?? { ...DEFAULT_AUTO_REDEEM });
+    return {
+      id: s.id,
+      label: s.label,
+      // Machine-bound — a profile new to this device starts logged-out.
+      loggedIn: prev?.loggedIn ?? false,
+      lastLoginAt: prev?.lastLoginAt ?? null,
+      cardAccountId: s.cardAccountId ?? prev?.cardAccountId ?? null,
+      autoRedeem,
+      createdAt: s.createdAt || prev?.createdAt || new Date().toISOString(),
+    };
+  });
+  await saveChaseProfiles(next);
+  return next;
 }
 
 /**

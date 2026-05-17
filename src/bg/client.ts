@@ -10,6 +10,7 @@ import type {
   ServerFillerCancelTask,
   ServerRemoteFetchJob,
   SyncCard,
+  SyncChaseProfile,
 } from '../shared/types.js';
 
 /**
@@ -280,6 +281,7 @@ export type BGClient = {
     cardAssignments: Record<string, string>;
     buyWithFillers: boolean;
     fillerAttempts: string[];
+    chaseProfiles: SyncChaseProfile[];
   }): Promise<{ updatedAt: string }>;
 };
 

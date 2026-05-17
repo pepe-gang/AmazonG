@@ -58,6 +58,8 @@ import {
   loadChaseProfiles,
   removeChaseProfile,
   updateChaseProfile,
+  exportChaseProfilesForSync,
+  replaceChaseProfilesFromSync,
 } from './chaseProfiles.js';
 import {
   attachChaseKeepalive,
@@ -424,16 +426,31 @@ async function pushSyncToBG(): Promise<void> {
     for (const p of profiles) {
       if (p.cardId) cardAssignments[p.email.toLowerCase()] = p.cardId;
     }
+    const chaseProfilesMeta = await exportChaseProfilesForSync().catch(
+      () => [] as Awaited<ReturnType<typeof exportChaseProfilesForSync>>,
+    );
+    // Attach Chase login credentials (plaintext) so a second machine
+    // can auto-fill the login form — only the OTP step stays manual.
+    const chaseProfiles = await Promise.all(
+      chaseProfilesMeta.map(async (p) => {
+        const creds = await getChaseCredentials(p.id).catch(() => null);
+        return creds
+          ? { ...p, username: creds.username, password: creds.password }
+          : p;
+      }),
+    );
     const bg = createBGClient(settingsNow.bgBaseUrl, apiKey);
     await bg.putSync({
       cards,
       cardAssignments,
       buyWithFillers: settingsNow.buyWithFillers,
       fillerAttempts: settingsNow.fillerAttempts,
+      chaseProfiles,
     });
     logger.info('sync.push.ok', {
       cards: cards.length,
       assignments: Object.keys(cardAssignments).length,
+      chaseProfiles: chaseProfiles.length,
     });
   } catch (err) {
     logger.info('sync.push.skip', {
@@ -466,7 +483,8 @@ async function pullSyncFromBG(): Promise<void> {
   }
 
   const localCards = await listCards().catch(() => []);
-  const plan = planSync(blob, localCards.length);
+  const localChaseProfiles = await loadChaseProfiles().catch(() => []);
+  const plan = planSync(blob, localCards.length, localChaseProfiles.length);
 
   if (Object.keys(plan.settingsPatch).length > 0) {
     await saveSettings({ ...settingsNow, ...plan.settingsPatch });
@@ -491,6 +509,30 @@ async function pullSyncFromBG(): Promise<void> {
     }
     await broadcastProfiles();
   }
+  // Apply synced Chase profiles — mirror semantics, see
+  // replaceChaseProfilesFromSync. Login session stays local.
+  if (plan.chaseProfiles) {
+    try {
+      await replaceChaseProfilesFromSync(plan.chaseProfiles);
+      // Apply synced login credentials, re-encrypted into this
+      // machine's keychain. Field-preserving: a profile synced
+      // without credentials leaves any local copy untouched (the
+      // source device may simply have failed to decrypt its own).
+      for (const p of plan.chaseProfiles) {
+        if (p.username && p.password) {
+          await setChaseCredentials(p.id, {
+            username: p.username,
+            password: p.password,
+          }).catch(() => undefined);
+        }
+      }
+      await broadcastChaseProfiles();
+    } catch (err) {
+      logger.info('sync.pull.chaseProfiles.skip', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   if (plan.pushLocal) await pushSyncToBG();
   if (plan.applied) {
     logger.info('sync.pull.applied', {
@@ -498,6 +540,7 @@ async function pullSyncFromBG(): Promise<void> {
       assignments: plan.cardAssignments
         ? Object.keys(plan.cardAssignments).length
         : 0,
+      chaseProfiles: plan.chaseProfiles?.length ?? 0,
     });
     mainWindow?.webContents.send(IPC.evtSyncApplied);
   }
@@ -1757,6 +1800,8 @@ function registerIpcHandlers(): void {
           });
         }
       }
+      // Propagate the new profile to the user's other machines.
+      void pushSyncToBG();
       return list;
     },
   );
@@ -1771,7 +1816,10 @@ function registerIpcHandlers(): void {
     await clearRedeemHistory(id).catch(() => undefined);
     await clearAccountSnapshot(id).catch(() => undefined);
     await clearChaseCredentials(id).catch(() => undefined);
-    return removeChaseProfile(id);
+    const list = await removeChaseProfile(id);
+    // Mirror the removal to the user's other machines.
+    void pushSyncToBG();
+    return list;
   });
 
   ipcMain.handle(
@@ -1782,11 +1830,18 @@ function registerIpcHandlers(): void {
       credentials: { username: string; password: string },
     ) => {
       await setChaseCredentials(id, credentials);
+      // Credentials are part of the synced profile shape — propagate.
+      void pushSyncToBG();
     },
   );
 
   ipcMain.handle(IPC.chaseCredentialsClear, async (_e, id: string) => {
     await clearChaseCredentials(id);
+    // Push the now-credential-less profile up. A device that already
+    // has the credentials keeps them (the pull merge is field-
+    // preserving — guards against a keychain glitch wiping good
+    // creds); a fresh device picks up the cleared state.
+    void pushSyncToBG();
   });
 
   ipcMain.handle(IPC.chaseCredentialsHas, async (_e, id: string) => {
@@ -1918,6 +1973,9 @@ function registerIpcHandlers(): void {
           label: profile.label,
           cardAccountId: capturedCardAccountId,
         });
+        // Sync the captured cardAccountId up — loggedIn / lastLoginAt
+        // stay local, but cardAccountId is part of the synced shape.
+        void pushSyncToBG();
         return { ok: true };
       } catch (err) {
         stopAutoSave();
@@ -2263,6 +2321,8 @@ function registerIpcHandlers(): void {
         enabled: patch.enabled,
         skippedToday: nextLastRunAt !== current.lastRunAt,
       });
+      // autoRedeem config is part of the synced shape — propagate it.
+      void pushSyncToBG();
       return updated;
     },
   );
@@ -2477,41 +2537,96 @@ function registerIpcHandlers(): void {
         chasePayInFlight.delete(id);
       });
 
-      // Background watcher: poll the page for Chase's success-text
-      // (the "You've scheduled a …" header that shows up on the
-      // confirmation screen). When it appears, give the user a few
-      // seconds to read it, then close the window automatically.
-      // Doesn't block this IPC return — the watcher races the user's
-      // own close + a 15-minute hard timeout.
+      // Background watcher: poll every frame of the page for a
+      // pay-flow end state, then auto-close the window. Two end states
+      // close it:
+      //   - "You've scheduled a …"               → payment scheduled
+      //   - "There is no amount due on this …"   → nothing owed; Chase
+      //                                            blocks the payment
+      // CRITICAL: Chase renders this flow with mds-* design-system web
+      // components whose text lives inside SHADOW DOM. Neither
+      // document.body.textContent nor page.waitForFunction pierce
+      // shadow roots — verified live 2026-05-16 via Playwright (the
+      // "no amount due" text sat inside <mds-alert>, body.textContent
+      // false, deep shadow walk true, zero iframes). The detector
+      // below walks shadow roots explicitly. Doesn't block this IPC
+      // return — races the user's manual close + a 15-min hard timeout.
       void (async () => {
-        try {
-          await result.session.page.waitForFunction(
-            () => {
-              const body = document.body?.textContent || '';
-              // Matches "You've scheduled a $X payment to ..." and
-              // related variants Chase has shown across layouts.
-              return /you'?ve\s+scheduled\s+a/i.test(body);
-            },
-            { timeout: 15 * 60_000, polling: 1_000 },
+        const watchStarted = Date.now();
+        const WATCH_TIMEOUT_MS = 15 * 60_000;
+        // Runs in the browser, per frame. Deep-collects text across
+        // every shadow root (mds-* components hide their text there),
+        // normalizes curly/typographic apostrophes (Chase renders
+        // U+2019 in "You've"), and matches either close-state. Amount +
+        // card last-4 are intentionally not part of the patterns.
+        const frameMatchesCloseSignal = () => {
+          const collect = (root: Node): string => {
+            let txt = '';
+            const kids = (root as ParentNode & Node).childNodes;
+            if (!kids) return txt;
+            for (const node of Array.from(kids)) {
+              if (node.nodeType === 3) {
+                txt += node.textContent ?? '';
+                continue;
+              }
+              const sr = (node as Element).shadowRoot;
+              if (sr) txt += collect(sr);
+              txt += collect(node);
+            }
+            return txt;
+          };
+          const text = collect(document).replace(/[‘’]/g, "'");
+          return (
+            /you'?ve\s+scheduled\s+a\b/i.test(text) ||
+            /there\s+is\s+no\s+amount\s+due\s+on\s+this\s+account/i.test(text)
           );
+        };
+        try {
+          let matched = false;
+          let loggedFrames = false;
+          while (Date.now() - watchStarted < WATCH_TIMEOUT_MS) {
+            const frames = result.session.page.frames();
+            if (!loggedFrames) {
+              logger.info('chase.pay.autoClose.watching', {
+                id,
+                frameCount: frames.length,
+              });
+              loggedFrames = true;
+            }
+            for (const frame of frames) {
+              try {
+                if (await frame.evaluate(frameMatchesCloseSignal)) {
+                  matched = true;
+                  break;
+                }
+              } catch {
+                // Frame detached / navigated mid-evaluate — skip it,
+                // the next poll picks up its replacement.
+              }
+            }
+            if (matched) break;
+            await new Promise((r) => setTimeout(r, 1_000));
+          }
+          if (!matched) {
+            logger.info('chase.pay.autoClose.timeout', { id });
+            return;
+          }
           // Brief read window before we whisk the page away.
           await new Promise((r) => setTimeout(r, 3_000));
           logger.info('chase.pay.autoClose', { id });
-          // Notify the renderer so it can refresh this profile's
-          // snapshot — pending charges + balance shift after the
-          // payment posts to Chase's intake queue. Sent BEFORE close
-          // so the event isn't dropped if the close+cleanup races
-          // the renderer's listener registration.
+          // Notify the renderer so it flips the card button back from
+          // "Close browser" → "Pay my Balance" and refreshes the
+          // snapshot. Harmless on the "no amount due" path (balance
+          // unchanged). Sent BEFORE close so the event isn't dropped
+          // if close+cleanup races the renderer's listener.
           mainWindow?.webContents.send(IPC.evtChasePaySuccess, id);
           await result.session.close();
         } catch {
-          // Three legitimate ways to land here:
+          // Legitimate ways to land here:
           //   - user closed the window manually (page already gone)
-          //   - 15-min timeout (user wandered off, payment never
-          //     submitted)
-          //   - waitForFunction errored on a navigation race
-          // In all three the on('close') handler above already (or
-          // will) clear the action-session map. Nothing to do here.
+          //   - a navigation race threw while reading frames
+          // The on('close') handler above already (or will) clear the
+          // action-session map. Nothing to do here.
         }
       })();
 

@@ -863,5 +863,32 @@ export type AutoGSyncBlob = {
   cardAssignments: Record<string, string> | null;
   buyWithFillers: boolean | null;
   fillerAttempts: string[] | null;
+  /** Synced Chase profiles — metadata only. May be absent when talking
+   *  to a BG that predates this field; treat undefined as []. */
+  chaseProfiles?: SyncChaseProfile[];
   updatedAt: string | null;
+};
+
+/**
+ * The syncable subset of a ChaseProfile. Login/session state
+ * (`loggedIn`, `lastLoginAt`, the Chrome user-data dir, auth cookies)
+ * is deliberately excluded — it's machine-bound, so a synced profile
+ * lands on a new device logged-out and the user does OTP once there.
+ * `autoRedeem` carries only the config (enabled + time); the per-run
+ * history fields stay local.
+ */
+export type SyncChaseProfile = {
+  id: string;
+  label: string;
+  cardAccountId: string | null;
+  autoRedeem: { enabled: boolean; time: string } | null;
+  createdAt: string;
+  /**
+   * Chase login credentials, plaintext — synced so a new device needs
+   * only the OTP step. Omitted when the profile has none saved (or the
+   * local copy couldn't be decrypted). Main-process only; the renderer
+   * never receives this shape.
+   */
+  username?: string | null;
+  password?: string | null;
 };
