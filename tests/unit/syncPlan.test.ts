@@ -34,10 +34,21 @@ function blob(over: Partial<AutoGSyncBlob> = {}): AutoGSyncBlob {
     buyWithFillers: false,
     fillerAttempts: ["eero"],
     chaseProfiles: [],
+    addressAssignments: null,
     updatedAt: "2026-05-16T00:00:00.000Z",
     ...over,
   };
 }
+
+const bgAddr = {
+  fullName: "Cuong Ngo",
+  phone: "5035550100",
+  street1: "13132 Main St",
+  street2: null,
+  city: "Portland",
+  state: "OR",
+  zip: "97230",
+};
 
 const emptyBlob: AutoGSyncBlob = {
   exists: false,
@@ -46,6 +57,7 @@ const emptyBlob: AutoGSyncBlob = {
   buyWithFillers: null,
   fillerAttempts: null,
   chaseProfiles: [],
+  addressAssignments: null,
   updatedAt: null,
 };
 
@@ -57,6 +69,7 @@ describe("planSync", () => {
         settingsPatch: {},
         cards: null,
         cardAssignments: null,
+        addressAssignments: null,
         chaseProfiles: null,
         pushLocal: true,
         applied: false,
@@ -139,6 +152,36 @@ describe("planSync", () => {
       const plan = planSync(blob({ cards: [], cardAssignments: { "a@x.com": "c1" } }), 2, 0);
       expect(plan.pushLocal).toBe(true);
       expect(plan.cardAssignments).toBeNull();
+    });
+  });
+
+  describe("address assignments", () => {
+    it("applies a non-empty email→BGAddress map from BG", () => {
+      const addrs = { "a@x.com": bgAddr };
+      const plan = planSync(blob({ addressAssignments: addrs }), 0, 0);
+      expect(plan.addressAssignments).toBe(addrs);
+      expect(plan.applied).toBe(true);
+    });
+
+    it("ignores an empty address map", () => {
+      const plan = planSync(blob({ addressAssignments: {} }), 0, 0);
+      expect(plan.addressAssignments).toBeNull();
+    });
+
+    it("treats an absent addressAssignments field (older BG) as none", () => {
+      const b = blob();
+      delete b.addressAssignments;
+      expect(planSync(b, 0, 0).addressAssignments).toBeNull();
+    });
+
+    it("does NOT apply addresses when pushing local up (empty remote)", () => {
+      const plan = planSync(
+        blob({ cards: [], addressAssignments: { "a@x.com": bgAddr } }),
+        2,
+        0,
+      );
+      expect(plan.pushLocal).toBe(true);
+      expect(plan.addressAssignments).toBeNull();
     });
   });
 

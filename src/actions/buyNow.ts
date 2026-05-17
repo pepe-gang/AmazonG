@@ -550,7 +550,12 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
 
     // 5. Checkout[1]: verify + (if needed) select the delivery address.
     if (opts.allowedAddressPrefixes.length > 0) {
-      const addr = await ensureAddress(page, opts.allowedAddressPrefixes, { step, warn });
+      const addr = await ensureAddress(
+        page,
+        opts.allowedAddressPrefixes,
+        { step, warn },
+        { bgAddress: opts.bgAddress },
+      );
       if (!addr.ok) {
         return fail('checkout_address', addr.reason, addr.detail);
       }
@@ -2383,7 +2388,16 @@ export async function ensureAddress(
   page: Page,
   allowedPrefixes: string[],
   emit: { step: StepEmitter; warn: StepEmitter },
-  opts: { allowAmazon500Recovery?: boolean } = {},
+  opts: {
+    allowAmazon500Recovery?: boolean;
+    /** The profile's BG receiving address. When set and no saved
+     *  address matches an allowed prefix, it's auto-added to the
+     *  account (once) and checkout is re-entered to select it. */
+    bgAddress?: BGAddress | null;
+    /** One-shot guard — false after an auto-add attempt so a
+     *  still-no-match retry can't loop. Callers never pass this. */
+    allowAddressAdd?: boolean;
+  } = {},
 ): Promise<AddrResult> {
   const allowRecovery = opts.allowAmazon500Recovery ?? true;
   const matcher = new RegExp('\\b(' + allowedPrefixes.join('|') + ')\\s+[A-Za-z0-9]');
@@ -2479,6 +2493,49 @@ export async function ensureAddress(
     .catch((err) => ({ ok: false as const, reason: 'picker_eval_error', detail: String(err) }));
 
   if (!picked.ok) {
+    // No saved address matched a BG prefix. Before failing, if the
+    // profile has a BG address, add it to the account and retry once.
+    // addDeliveryAddress saves it as the account default, so re-entering
+    // checkout lands on it.
+    if (
+      picked.reason === 'no_matching_address_in_list' &&
+      opts.bgAddress &&
+      (opts.allowAddressAdd ?? true)
+    ) {
+      emit.warn('step.checkout.address.autoAdd.start', {
+        allowedHouseNumbers: allowedPrefixes,
+      });
+      const added = await addDeliveryAddress(page, opts.bgAddress, emit);
+      if (added) {
+        await reenterCheckout(page, emit);
+        const ready = await waitForCheckout(
+          page,
+          allowedPrefixes,
+          undefined,
+          emit,
+          { bgAddress: opts.bgAddress },
+        );
+        if (!ready.ok) {
+          return {
+            ok: false,
+            reason:
+              'added the BG address but checkout did not become ready ' +
+              'again after re-entry',
+          };
+        }
+        // Retry the address check once — the added address is now the
+        // account default. allowAddressAdd:false so a still-no-match
+        // can't loop.
+        return ensureAddress(page, allowedPrefixes, emit, {
+          allowAmazon500Recovery: allowRecovery,
+          bgAddress: opts.bgAddress,
+          allowAddressAdd: false,
+        });
+      }
+      emit.warn('step.checkout.address.autoAdd.failed', {
+        note: 'addDeliveryAddress returned false — falling through to fail',
+      });
+    }
     const reasonMap: Record<string, string> = {
       picker_list_not_loaded: 'address picker opened but no saved-address radios rendered',
       no_matching_address_in_list: `no saved address starts with [${allowedPrefixes.join(', ')}]`,
@@ -2530,7 +2587,11 @@ export async function ensureAddress(
           detail: `stuck=${stuckUrl}; landed=${page.url()}`,
         };
       }
-      return ensureAddress(page, allowedPrefixes, emit, { allowAmazon500Recovery: false });
+      return ensureAddress(page, allowedPrefixes, emit, {
+        allowAmazon500Recovery: false,
+        bgAddress: opts.bgAddress,
+        allowAddressAdd: opts.allowAddressAdd,
+      });
     }
     return {
       ok: false,

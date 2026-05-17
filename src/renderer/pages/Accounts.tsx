@@ -1653,6 +1653,7 @@ function BGAddressDialog(props: {
   const [state, setState] = useState(props.initial?.state ?? '');
   const [zip, setZip] = useState(props.initial?.zip ?? '');
   const [saving, setSaving] = useState(false);
+  const [fetching, setFetching] = useState(false);
 
   const canSave =
     fullName.trim().length > 0 &&
@@ -1697,6 +1698,33 @@ function BGAddressDialog(props: {
     }
   };
 
+  // Scrape this account's Amazon address book for a saved address whose
+  // street matches a checkout prefix, and populate the form with it.
+  const fetchAddress = async () => {
+    if (fetching || saving) return;
+    setFetching(true);
+    try {
+      const r = await window.autog.profilesFetchAddress(props.email);
+      if (r.ok) {
+        setFullName(r.address.fullName);
+        setPhone(r.address.phone);
+        setStreet1(r.address.street1);
+        setStreet2(r.address.street2 ?? '');
+        setCity(r.address.city);
+        setState(r.address.state);
+        setZip(r.address.zip);
+      } else {
+        props.onError(
+          `Fetch address: ${r.reason}${r.detail ? ` — ${r.detail}` : ''}`,
+        );
+      }
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFetching(false);
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
@@ -1707,7 +1735,16 @@ function BGAddressDialog(props: {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="text-sm font-semibold text-zinc-100 mb-1">BG receiving address</div>
-        <div className="text-xs text-zinc-500 mb-3 break-all">{props.email}</div>
+        <div className="text-xs text-zinc-500 mb-2 break-all">{props.email}</div>
+        <button
+          type="button"
+          className="mb-3 px-2.5 py-1 rounded-full text-[11px] border border-sky-500/30 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled={fetching || saving}
+          onClick={() => void fetchAddress()}
+          title="Open this account's Amazon address book and fill the form from the first saved address that matches a checkout prefix"
+        >
+          {fetching ? 'Fetching from Amazon…' : 'Fetch address from Amazon'}
+        </button>
         <div className="grid grid-cols-2 gap-2">
           <div className="col-span-2">
             <label className="block text-[10px] uppercase tracking-wide text-zinc-500 mb-1">

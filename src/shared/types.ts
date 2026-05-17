@@ -866,6 +866,9 @@ export type AutoGSyncBlob = {
   /** Synced Chase profiles — metadata only. May be absent when talking
    *  to a BG that predates this field; treat undefined as []. */
   chaseProfiles?: SyncChaseProfile[];
+  /** Per-account BG receiving addresses — { lowercased email →
+   *  BGAddress }. May be absent on a BG that predates this field. */
+  addressAssignments?: Record<string, BGAddress> | null;
   updatedAt: string | null;
 };
 

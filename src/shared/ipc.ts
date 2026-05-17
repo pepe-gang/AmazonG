@@ -50,6 +50,10 @@ export const IPC = {
    *  Pass null to clear. Returns the updated profile list so the
    *  renderer can reconcile its local state. */
   profilesSetBgAddress: 'profiles:set-bg-address',
+  /** Open a session for one profile, scrape its Amazon address book,
+   *  and return the first saved address whose street matches an
+   *  allowed checkout prefix. Powers the "Fetch address" button. */
+  profilesFetchAddress: 'profiles:fetch-address',
   /** Assign (or clear, with null) the saved payment card an Amazon
    *  account uses. Returns the updated profile list. */
   profilesSetCard: 'profiles:set-card',
@@ -430,6 +434,14 @@ export type AutoGBridge = {
   profilesAddBgAddress(email: string): Promise<{ ok: boolean; reason?: string; detail?: string }>;
   /** Save or clear the BG receiving address on one AmazonProfile. */
   profilesSetBgAddress(email: string, address: BGAddress | null): Promise<AmazonProfile[]>;
+  /** Scrape the account's Amazon address book and return the first
+   *  saved address matching an allowed checkout prefix. */
+  profilesFetchAddress(
+    email: string,
+  ): Promise<
+    | { ok: true; address: BGAddress }
+    | { ok: false; reason: string; detail?: string }
+  >;
   /** Assign (or clear, with null) the saved card an account uses. */
   profilesSetCard(email: string, cardId: string | null): Promise<AmazonProfile[]>;
   /** List stored payment cards — safe view only (no full number/CVV). */

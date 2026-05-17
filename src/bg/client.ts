@@ -11,6 +11,7 @@ import type {
   ServerRemoteFetchJob,
   SyncCard,
   SyncChaseProfile,
+  BGAddress,
 } from '../shared/types.js';
 
 /**
@@ -282,6 +283,7 @@ export type BGClient = {
     buyWithFillers: boolean;
     fillerAttempts: string[];
     chaseProfiles: SyncChaseProfile[];
+    addressAssignments: Record<string, BGAddress>;
   }): Promise<{ updatedAt: string }>;
 };
 

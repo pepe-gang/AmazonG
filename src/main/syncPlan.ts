@@ -2,6 +2,7 @@ import type {
   AutoGSyncBlob,
   SyncCard,
   SyncChaseProfile,
+  BGAddress,
 } from '../shared/types.js';
 import type { FillerPool } from '../shared/ipc.js';
 
@@ -22,6 +23,9 @@ export type SyncPlan = {
   /** Account→card assignments (email → cardId) to apply to profiles,
    *  or null to leave local assignments alone. */
   cardAssignments: Record<string, string> | null;
+  /** Account→BG-address assignments (email → BGAddress) to apply to
+   *  profiles, or null to leave local addresses alone. */
+  addressAssignments: Record<string, BGAddress> | null;
   /** Chase profiles to replace the local list with, or null to leave
    *  the local list alone. */
   chaseProfiles: SyncChaseProfile[] | null;
@@ -32,6 +36,21 @@ export type SyncPlan = {
   /** Something changed locally — caller emits evt:sync-applied. */
   applied: boolean;
 };
+
+/**
+ * An email-keyed assignment map from BG (cards, addresses) is applied
+ * only when it's non-empty AND we're not pushing local up — an empty
+ * remote must never clear local assignments. Returns null = "leave the
+ * local values alone". Absent on a BG that predates the field.
+ */
+function pickAssignments<T>(
+  remote: Record<string, T> | null | undefined,
+  pushLocal: boolean,
+): Record<string, T> | null {
+  return !pushLocal && remote && Object.keys(remote).length > 0
+    ? remote
+    : null;
+}
 
 /**
  * Decide what a sync pull should apply. Pure: same inputs → same plan.
@@ -47,6 +66,7 @@ export function planSync(
       settingsPatch: {},
       cards: null,
       cardAssignments: null,
+      addressAssignments: null,
       chaseProfiles: null,
       pushLocal: true,
       applied: false,
@@ -81,20 +101,25 @@ export function planSync(
     pushLocal = true;
   }
 
-  // Apply account→card assignments unless we're pushing local up (an
-  // empty remote shouldn't clear local assignments either). An empty
-  // assignment map is treated as "nothing to apply".
-  const cardAssignments =
-    !pushLocal &&
-    blob.cardAssignments &&
-    Object.keys(blob.cardAssignments).length > 0
-      ? blob.cardAssignments
-      : null;
+  const cardAssignments = pickAssignments(blob.cardAssignments, pushLocal);
+  const addressAssignments = pickAssignments(
+    blob.addressAssignments,
+    pushLocal,
+  );
 
   const applied =
     Object.keys(settingsPatch).length > 0 ||
     cards !== null ||
     cardAssignments !== null ||
+    addressAssignments !== null ||
     chaseProfiles !== null;
-  return { settingsPatch, cards, cardAssignments, chaseProfiles, pushLocal, applied };
+  return {
+    settingsPatch,
+    cards,
+    cardAssignments,
+    addressAssignments,
+    chaseProfiles,
+    pushLocal,
+    applied,
+  };
 }

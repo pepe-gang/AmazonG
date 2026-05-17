@@ -1349,10 +1349,15 @@ export async function buyWithFillers(
       .first()
       .waitFor({ state: 'visible', timeout: 2_000 })
       .catch(() => undefined);
-    const addr = await ensureAddress(page, opts.allowedAddressPrefixes, {
-      step: (m, d) => logger.info(m, d, cid),
-      warn: (m, d) => logger.warn(m, d, cid),
-    });
+    const addr = await ensureAddress(
+      page,
+      opts.allowedAddressPrefixes,
+      {
+        step: (m, d) => logger.info(m, d, cid),
+        warn: (m, d) => logger.warn(m, d, cid),
+      },
+      { bgAddress: opts.bgAddress },
+    );
     if (!addr.ok) {
       return {
         ok: false,

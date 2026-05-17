@@ -59,6 +59,10 @@ const bridge: AutoGBridge = {
     ipcRenderer.invoke(IPC.profilesSetBgAddress, email, address) as ReturnType<
       AutoGBridge['profilesSetBgAddress']
     >,
+  profilesFetchAddress: (email) =>
+    ipcRenderer.invoke(IPC.profilesFetchAddress, email) as ReturnType<
+      AutoGBridge['profilesFetchAddress']
+    >,
   profilesSetCard: (email, cardId) =>
     ipcRenderer.invoke(IPC.profilesSetCard, email, cardId) as ReturnType<
       AutoGBridge['profilesSetCard']

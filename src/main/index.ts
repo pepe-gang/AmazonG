@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IPC, type Settings } from '../shared/ipc.js';
 import { createBGClient, type ServerPurchase } from '../bg/client.js';
-import { addAmazonAddress } from '../actions/addAddress.js';
+import { addAmazonAddress, fetchAmazonAddress } from '../actions/addAddress.js';
 import type { BGAddress } from '../shared/types.js';
 import { startWorker, type WorkerHandle } from '../workflows/pollAndScrape.js';
 import { startBgRelay } from './bgRelay.js';
@@ -419,12 +419,15 @@ async function pushSyncToBG(): Promise<void> {
   try {
     const settingsNow = await loadSettings();
     const cards = await exportCardsWithNumbers();
-    // Account→card assignments: { lowercased email → cardId } for
-    // every profile that has a card assigned.
+    // Account assignments, keyed by lowercased email:
+    //   cardAssignments    — { email → cardId }   for cards
+    //   addressAssignments — { email → BGAddress } for receiving addresses
     const profiles = await loadProfiles().catch(() => [] as AmazonProfile[]);
     const cardAssignments: Record<string, string> = {};
+    const addressAssignments: Record<string, BGAddress> = {};
     for (const p of profiles) {
       if (p.cardId) cardAssignments[p.email.toLowerCase()] = p.cardId;
+      if (p.bgAddress) addressAssignments[p.email.toLowerCase()] = p.bgAddress;
     }
     const chaseProfilesMeta = await exportChaseProfilesForSync().catch(
       () => [] as Awaited<ReturnType<typeof exportChaseProfilesForSync>>,
@@ -446,10 +449,12 @@ async function pushSyncToBG(): Promise<void> {
       buyWithFillers: settingsNow.buyWithFillers,
       fillerAttempts: settingsNow.fillerAttempts,
       chaseProfiles,
+      addressAssignments,
     });
     logger.info('sync.push.ok', {
       cards: cards.length,
       assignments: Object.keys(cardAssignments).length,
+      addresses: Object.keys(addressAssignments).length,
       chaseProfiles: chaseProfiles.length,
     });
   } catch (err) {
@@ -498,13 +503,21 @@ async function pullSyncFromBG(): Promise<void> {
       });
     }
   }
-  // Apply account→card assignments — set each profile's cardId.
-  if (plan.cardAssignments) {
+  // Apply account→card and account→BG-address assignments — set each
+  // local profile's cardId / bgAddress from the synced maps.
+  if (plan.cardAssignments || plan.addressAssignments) {
     const localProfiles = await loadProfiles().catch(() => [] as AmazonProfile[]);
     const localEmails = new Set(localProfiles.map((p) => p.email.toLowerCase()));
-    for (const [email, cardId] of Object.entries(plan.cardAssignments)) {
+    for (const [email, cardId] of Object.entries(plan.cardAssignments ?? {})) {
       if (localEmails.has(email)) {
         await updateProfile(email, { cardId }).catch(() => undefined);
+      }
+    }
+    for (const [email, bgAddress] of Object.entries(
+      plan.addressAssignments ?? {},
+    )) {
+      if (localEmails.has(email)) {
+        await updateProfile(email, { bgAddress }).catch(() => undefined);
       }
     }
     await broadcastProfiles();
@@ -539,6 +552,9 @@ async function pullSyncFromBG(): Promise<void> {
       cards: plan.cards?.length ?? 0,
       assignments: plan.cardAssignments
         ? Object.keys(plan.cardAssignments).length
+        : 0,
+      addresses: plan.addressAssignments
+        ? Object.keys(plan.addressAssignments).length
         : 0,
       chaseProfiles: plan.chaseProfiles?.length ?? 0,
     });
@@ -3389,6 +3405,53 @@ function registerIpcHandlers(): void {
           await session.close();
         } catch (err) {
           logger.warn('amazon.addAddress.session.close', { email, error: String(err) });
+        }
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.profilesFetchAddress,
+    async (
+      _e,
+      email: string,
+    ): Promise<
+      | { ok: true; address: BGAddress }
+      | { ok: false; reason: string; detail?: string }
+    > => {
+      const profiles = await loadProfiles();
+      const profile = profiles.find(
+        (p) => p.email.toLowerCase() === email.toLowerCase(),
+      );
+      if (!profile) return { ok: false, reason: 'profile_not_found' };
+      const settings = await loadSettings();
+      const prefixes = settings.allowedAddressPrefixes ?? [];
+      if (prefixes.length === 0) {
+        return { ok: false, reason: 'no_allowed_prefixes' };
+      }
+      logger.info('amazon.fetchAddress.start', { email, prefixes });
+      const session = await openSession(email, {
+        userDataRoot: profileDir(),
+        headless: false,
+      });
+      const page = await session.newPage();
+      try {
+        const result = await fetchAmazonAddress(page, prefixes);
+        logger.info('amazon.fetchAddress.done', { email, ok: result.ok });
+        return result;
+      } finally {
+        try {
+          await page.close();
+        } catch {
+          // ignore
+        }
+        try {
+          await session.close();
+        } catch (err) {
+          logger.warn('amazon.fetchAddress.session.close', {
+            email,
+            error: String(err),
+          });
         }
       }
     },
