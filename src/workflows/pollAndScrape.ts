@@ -3,6 +3,7 @@ import type { BGClient } from '../bg/client.js';
 import type { DriverSession } from '../browser/driver.js';
 import type { FillerPool } from '../shared/ipc.js';
 import { openSession } from '../browser/driver.js';
+import { surfaceUnreconciledBreadcrumbs } from './surfaceUnreconciled.js';
 import { scrapeProduct } from '../actions/scrapeProduct.js';
 import { buyNow, captureDebugSnapshot, probePageDiag } from '../actions/buyNow.js';
 import { clearCartHttpOnly, type ClearCartResult } from '../actions/clearCart.js';
@@ -848,6 +849,12 @@ export type ProfileResult = {
 export function startWorker(deps: Deps): WorkerHandle {
   let running = true;
   const sessions = new Map<string, DriverSession>();
+
+  // Ghost-order safety net (Part 2-safe). Surface any place-order
+  // breadcrumb that never got a terminal event — a possible unrecorded
+  // order from a prior run that crashed / was interrupted. Local-ledger
+  // read only; fire-and-forget so it can't delay worker startup.
+  void surfaceUnreconciledBreadcrumbs(deps.jobAttempts);
 
   let streamingHandle: { stop: () => Promise<void> } | null = null;
   // Per-job preamble for the streaming scheduler: filter eligible,
@@ -2465,6 +2472,14 @@ export async function runForProfile(
   // distinguishable (parent cid is shared by all profiles in a fan-out).
   const cid = `${parentCid}/${profile}`;
   const attemptId = makeAttemptId(job.id, profile);
+
+  // Ghost-order safety net (Part 2-safe) — also run as a new buy job
+  // starts. By now any prior ghost has fully propagated to Amazon's
+  // order history, and this is a known-healthy moment. Local-ledger
+  // read only; fire-and-forget so it can't delay the buy.
+  if (job.phase === 'buy') {
+    void surfaceUnreconciledBreadcrumbs(deps.jobAttempts);
+  }
 
   // Centralized abort checkpoint. Returns a ProfileResult if the
   // sibling-abort signal has fired, null otherwise. Caller pattern:

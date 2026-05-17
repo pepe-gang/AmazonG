@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { randomUUID } from 'node:crypto';
 import { htmlToDocument } from '../shared/jsdom.js';
 import { logger as loggerImport } from '../shared/logger.js';
 // Top-level alias so existing call sites in helper functions that don't
@@ -1731,17 +1732,49 @@ export async function buyWithFillers(
   // recovery sweep routes those rows to manual review instead of
   // retrying automatically.
   await opts.onStage?.('placing');
+  // Durable ghost-order anchor. Append a `place_order_submitted`
+  // breadcrumb to the appendFileSync ledger BEFORE the click — so a
+  // placed order has a recoverable record even if the run dies, the
+  // machine sleeps, or confirmation never resolves. Written before
+  // (not after) the click closes the click-crash window entirely: a
+  // breadcrumb with no real order is harmless (reconciliation scans,
+  // finds nothing), a missing breadcrumb is the ghost. `cartAsins` +
+  // `preBuyOrderIds` let the reconciliation pass run an airtight
+  // diff-mode order-history scan with no buy-flow state. The terminal
+  // events below carry the same `submissionId` so the pass can pair
+  // them. See placedOrderLedger.ts + reconcilePlacedOrders.ts.
+  const submissionId = randomUUID();
+  recordPlacedOrderEvent({
+    event: 'place_order_submitted',
+    submissionId,
+    profile: opts.profile ?? '(unknown)',
+    jobId: opts.jobId ?? null,
+    productUrl: opts.productUrl,
+    cartAsins: targetAsin ? [targetAsin, ...fillerAsins] : fillerAsins,
+    preBuyOrderIds: preBuyOrderIds ?? [],
+  });
+  // Playwright's click() can REJECT while the click still registered —
+  // a navigation detaches the element mid-click, or the post-click
+  // actionability check races. So the order may be placed even though
+  // the click "threw". A throw is therefore NOT a hard failure here:
+  // we fall through to the order-history scan below (the real source of
+  // truth). If the scan finds this buy's orders the click did place and
+  // we recover it; an empty scan returns the retryable place_order
+  // failure exactly as before. (#2)
+  let clickThrew = false;
+  let clickThrewDetail = '';
   try {
     await placeLocator.click({ timeout: 10_000 });
+    logger.info('step.fillerBuy.place.clicked', {}, cid);
   } catch (err) {
-    return {
-      ok: false,
-      stage: 'place_order',
-      reason: 'failed to click Place Order',
-      detail: String(err),
-    };
+    clickThrew = true;
+    clickThrewDetail = String(err);
+    logger.warn(
+      'step.fillerBuy.place.click.threw',
+      { detail: clickThrewDetail, url: page.url() },
+      cid,
+    );
   }
-  logger.info('step.fillerBuy.place.clicked', {}, cid);
 
   // 14. Wait for the confirmation page. Reuses the shared helper that
   //     also handles Amazon's "This is a pending order — place again?"
@@ -1749,21 +1782,30 @@ export async function buyWithFillers(
   //     banner (which wipes our radio pick; the callback re-picks
   //     before the helper re-clicks Place Order, 1 attempt).
   //     60s overall deadline inside the helper.
-  const confirmWait = await waitForConfirmationOrPending(
-    page,
-    (m, d) => logger.info(m, d, cid),
-    {
-      onDeliveryOptionsChanged: async () => {
-        const re = await pickBestCashbackDelivery(page, opts.minCashbackPct);
-        logger.info(
-          'step.fillerBuy.place.delivery_options_changed.repicked',
-          { changes: re.changes },
-          cid,
-        );
-        await page.waitForTimeout(1_000);
-      },
-    },
-  );
+  // When the click threw, the page state is uncertain — a 60s
+  // confirmation wait is pointless. Skip it and go straight to the
+  // order-history scan, treating it as "outcome unknown" (the same
+  // path as a confirmation timeout with no on-page signal).
+  const confirmWait = clickThrew
+    ? null
+    : await waitForConfirmationOrPending(
+        page,
+        (m, d) => logger.info(m, d, cid),
+        {
+          onDeliveryOptionsChanged: async () => {
+            const re = await pickBestCashbackDelivery(
+              page,
+              opts.minCashbackPct,
+            );
+            logger.info(
+              'step.fillerBuy.place.delivery_options_changed.repicked',
+              { changes: re.changes },
+              cid,
+            );
+            await page.waitForTimeout(1_000);
+          },
+        },
+      );
   let recoveredFromConfirmTimeout = false;
   // Set when the confirmation page timed out AND detectOrderLikelyPlaced
   // found no place-order signal on the page. We no longer bail as
@@ -1776,7 +1818,12 @@ export async function buyWithFillers(
   // An empty scan keeps the old behavior: return confirm_parse.
   let confirmTimedOutNoSignal = false;
   let confirmFailReason: string | null = null;
-  if (!confirmWait.ok) {
+  if (clickThrew) {
+    // Click outcome unknown — let the order-history scan decide.
+    recoveredFromConfirmTimeout = true;
+    confirmTimedOutNoSignal = true;
+    confirmFailReason = `place order click threw: ${clickThrewDetail}`;
+  } else if (confirmWait && !confirmWait.ok) {
     confirmFailReason = confirmWait.reason;
     const placed = await detectOrderLikelyPlaced(page);
     recoveredFromConfirmTimeout = true;
@@ -1822,6 +1869,7 @@ export async function buyWithFillers(
   if (!confirmTimedOutNoSignal) {
     recordPlacedOrderEvent({
       event: 'order_confirmed',
+      submissionId,
       profile: opts.profile ?? '(unknown)',
       jobId: opts.jobId ?? null,
       productUrl: opts.productUrl,
@@ -1895,6 +1943,7 @@ export async function buyWithFillers(
   // be diffed against job-attempts.json / BG to localize a ghost.
   recordPlacedOrderEvent({
     event: orderId ? 'orderid_captured' : 'orderid_missing',
+    submissionId,
     profile: opts.profile ?? '(unknown)',
     jobId: opts.jobId ?? null,
     productUrl: opts.productUrl,
@@ -1950,44 +1999,58 @@ export async function buyWithFillers(
     }
   }
 
-  // Confirmation timed out, no place-order signal on the page, AND the
-  // order-history scan matched none of our cart ASINs — the order
-  // genuinely did not place. Return the confirm_parse failure we
-  // deferred above. (When the scan DID find orders we fall through:
-  // the order placed despite the detector, and the filler-cancel sweep
-  // below now has the order IDs it needs to cancel them.)
+  // Outcome was unknown (confirmation timed out with no on-page signal,
+  // OR the click threw) AND the order-history scan matched none of our
+  // cart ASINs — the order genuinely did not place. Return the failure
+  // we deferred above. (When the scan DID find orders we fall through:
+  // the order placed despite the uncertainty, and the filler-cancel
+  // sweep below now has the order IDs it needs.)
+  //   - click threw  → place_order (retryable — a fresh attempt may click cleanly)
+  //   - confirm timeout → confirm_parse (non-retryable — a retry risks a dup)
   if (confirmTimedOutNoSignal && orderMatches.length === 0) {
     logger.warn(
-      'step.fillerBuy.confirm.timeout.not_placed',
+      clickThrew
+        ? 'step.fillerBuy.place.click.threw.not_placed'
+        : 'step.fillerBuy.confirm.timeout.not_placed',
       { reason: confirmFailReason, url: page.url() },
       cid,
     );
     return {
       ok: false,
-      stage: 'confirm_parse',
-      reason: confirmFailReason ?? 'confirmation page never loaded',
+      stage: clickThrew ? 'place_order' : 'confirm_parse',
+      reason:
+        confirmFailReason ??
+        (clickThrew
+          ? 'Place Order click threw and no order was placed'
+          : 'confirmation page never loaded'),
       detail: `url=${page.url()}`,
     };
   }
   if (confirmTimedOutNoSignal) {
-    // Scan found orders despite no on-page signal — the order placed
-    // and the detector missed it. Ledger the placement now (the
-    // synchronous write above was skipped while it was still
-    // unconfirmed).
+    // Scan found orders despite the uncertain outcome — the order
+    // placed and the detector / click-throw masked it. Ledger the
+    // placement now (the synchronous write above was skipped while it
+    // was still unconfirmed).
     logger.warn(
       'step.fillerBuy.confirm.timeout.recovered_by_scan',
-      { url: page.url(), orderIdsFound: orderMatches.map((m) => m.orderId) },
+      {
+        url: page.url(),
+        via: clickThrew ? 'click_threw' : 'confirm_timeout',
+        orderIdsFound: orderMatches.map((m) => m.orderId),
+      },
       cid,
     );
     recordPlacedOrderEvent({
       event: 'order_confirmed',
+      submissionId,
       profile: opts.profile ?? '(unknown)',
       jobId: opts.jobId ?? null,
       productUrl: opts.productUrl,
       url: page.url(),
       amazonPurchaseId,
-      detail:
-        'recovered via order-history scan after confirmation-URL timeout (no on-page signal)',
+      detail: clickThrew
+        ? 'recovered via order-history scan after the Place Order click threw'
+        : 'recovered via order-history scan after confirmation-URL timeout (no on-page signal)',
     });
   }
 

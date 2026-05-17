@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -36,12 +36,36 @@ const nodeRequire = createRequire(import.meta.url);
 
 export type PlacedOrderEvent = {
   /**
+   * place_order_submitted — written SYNCHRONOUSLY immediately before the
+   *                     Place Order click, so a placed order has a
+   *                     durable record even if the run dies / the
+   *                     confirmation never resolves. The reconciliation
+   *                     pass pairs this against a TERMINAL event by
+   *                     `submissionId`; an unpaired one is a ghost
+   *                     candidate. Carries `cartAsins` + `preBuyOrderIds`
+   *                     so reconciliation can run an airtight diff-mode
+   *                     order-history scan with no buy-flow state.
    * order_confirmed   — confirmation page reached; an order IS placed
-   *                     on Amazon. The bulletproof "this exists" line.
+   *                     on Amazon. NOT terminal on its own.
    * orderid_captured  — the post-buy scan resolved the orderId(s).
-   * orderid_missing   — the post-buy scan came up empty.
+   *                     TERMINAL — the buy fully tracked the order.
+   * orderid_missing   — the post-buy scan came up empty. NOT terminal:
+   *                     an order may simply not have propagated to
+   *                     order history yet — reconciliation must retry.
+   * reconcile_recovered — the reconciliation pass found + handled a
+   *                     previously-unrecorded order. TERMINAL.
+   * reconcile_abandoned — reconciliation retried past its time budget
+   *                     and gave up (no order ever appeared). TERMINAL.
    */
-  event: 'order_confirmed' | 'orderid_captured' | 'orderid_missing';
+  event:
+    | 'place_order_submitted'
+    | 'order_confirmed'
+    | 'orderid_captured'
+    | 'orderid_missing'
+    | 'reconcile_recovered'
+    | 'reconcile_abandoned';
+  /** Correlates a place_order_submitted with its terminal event. */
+  submissionId?: string;
   profile: string;
   jobId?: string | null;
   dealId?: string | null;
@@ -49,8 +73,16 @@ export type PlacedOrderEvent = {
   url?: string;
   orderId?: string | null;
   amazonPurchaseId?: string | null;
+  /** Full cart ASIN list (target + fillers) — set on place_order_submitted. */
+  cartAsins?: string[];
+  /** Pre-buy order-history snapshot — set on place_order_submitted so
+   *  reconciliation's scan is a clean diff (can't false-match an old order). */
+  preBuyOrderIds?: string[];
   detail?: string;
 };
+
+/** A ledger event as read back from disk — carries the write timestamp. */
+export type StoredPlacedOrderEvent = PlacedOrderEvent & { ts: string };
 
 function ledgerPath(): string | null {
   try {
@@ -77,4 +109,75 @@ export function recordPlacedOrderEvent(evt: PlacedOrderEvent): void {
   } catch {
     // never break a buy on a ledger write
   }
+}
+
+/**
+ * Read the whole ledger back. Used by the reconciliation pass to find
+ * `place_order_submitted` breadcrumbs that never got a terminal event.
+ * Best-effort — a missing file or a malformed line yields [] / skips
+ * the line rather than throwing.
+ */
+export function readPlacedOrderEvents(): StoredPlacedOrderEvent[] {
+  const path = ledgerPath();
+  if (!path) return [];
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return [];
+  }
+  const out: StoredPlacedOrderEvent[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line) as StoredPlacedOrderEvent);
+    } catch {
+      // skip a torn / malformed line
+    }
+  }
+  return out;
+}
+
+/** Events that terminally resolve a submission — the buy captured the
+ *  orderId, or reconciliation recovered it / gave up. A buy-time
+ *  `orderid_missing` is deliberately NOT here: the order may simply not
+ *  have propagated to order history yet, so reconciliation must retry. */
+const TERMINAL_EVENTS: ReadonlySet<PlacedOrderEvent['event']> = new Set([
+  'orderid_captured',
+  'reconcile_recovered',
+  'reconcile_abandoned',
+]);
+
+/**
+ * Pure pairing logic — given the full event list, return every
+ * `place_order_submitted` breadcrumb with NO terminal event sharing its
+ * `submissionId`. Extracted from `unreconciledSubmissions` so it's
+ * unit-testable without touching the filesystem.
+ */
+export function findUnreconciledSubmissions(
+  events: StoredPlacedOrderEvent[],
+): StoredPlacedOrderEvent[] {
+  const resolved = new Set<string>();
+  for (const e of events) {
+    if (e.submissionId && TERMINAL_EVENTS.has(e.event)) {
+      resolved.add(e.submissionId);
+    }
+  }
+  return events.filter(
+    (e) =>
+      e.event === 'place_order_submitted' &&
+      !!e.submissionId &&
+      !resolved.has(e.submissionId),
+  );
+}
+
+/**
+ * Every `place_order_submitted` breadcrumb that has NO terminal event
+ * sharing its `submissionId` — i.e. an order that may be live on Amazon
+ * but was never fully recorded. Returns the breadcrumb itself (carries
+ * profile / cartAsins / preBuyOrderIds / ts) so the reconciliation pass
+ * can drive recovery with no buy-flow state.
+ */
+export function unreconciledSubmissions(): StoredPlacedOrderEvent[] {
+  return findUnreconciledSubmissions(readPlacedOrderEvents());
 }
