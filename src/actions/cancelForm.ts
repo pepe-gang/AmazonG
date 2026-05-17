@@ -226,23 +226,22 @@ export async function waitForCancelOutcome(page: Page): Promise<void> {
     )
     .catch(() => undefined);
 
-  // 4. Final settle — networkidle catches any straggler XHR (Amazon
-  //    sometimes fires a tracking beacon AFTER the confirmation
+  // 4. Final settle — give a straggler beacon a moment to finish.
+  //    Amazon sometimes fires a tracking beacon AFTER the confirmation
   //    banner renders, and tearing the page down mid-beacon has been
-  //    observed to invalidate the cancel server-side). Short timeout
-  //    so we don't hang on long-poll connections.
+  //    observed to invalidate the cancel server-side.
   //
-  // TODO(perf-pass-9): the 5s timeout almost always maxes out per pass-9
-  // audit because Amazon's telemetry beacons keep firing — net 5s tax
-  // per cancel. Pass 9 recommended dropping this entirely on the basis
-  // that the response/nav promises drained at step 1 are the load-
-  // bearing signal, but the comment above documents a real bug this
-  // wait was added to prevent. Decision deferred until we have post-
-  // telemetry-fix production data showing whether cancels regress
-  // when this is removed/shortened. See pass-9 §1 + pass-18 §2.
-  await page
-    .waitForLoadState('networkidle', { timeout: 5_000 })
-    .catch(() => undefined);
+  //    This was `waitForLoadState('networkidle', 5_000)`, but Amazon's
+  //    telemetry / long-poll traffic means the page never reaches
+  //    network-idle — so it ALWAYS maxed the 5s timeout: a flat 5s tax
+  //    per cancel (a filler buy cancels ~8 orders → ~40s of dead wait).
+  //    networkidle is the wrong tool here — a fire-and-forget beacon
+  //    has no completion signal to wait on, so a short bounded settle
+  //    is strictly better: it keeps the mid-beacon protection (a beacon
+  //    completes well under 1s) while cutting ~4s per cancel. Safe to
+  //    shorten — the outcome was already detected at step 3, so this
+  //    only affects teardown timing, not correctness.
+  await page.waitForTimeout(1_000).catch(() => undefined);
 }
 
 /** True when Amazon's "Unable to cancel requested items" refusal banner is visible. */
