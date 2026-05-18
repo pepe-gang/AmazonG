@@ -118,6 +118,14 @@ export type BGClient = {
   me(): Promise<IdentityInfo>;
   claimJob(): Promise<AutoGJob | null>;
   reportStatus(jobId: string, report: JobStatusReport): Promise<void>;
+  /** Report a successful Chase auto-redeem so BG raises an in-app
+   *  notification (+ web push) showing the redeemed amount. */
+  reportChaseRedeem(payload: {
+    profileLabel: string;
+    amount: string;
+    pointsRedeemed: string;
+    orderNumber: string;
+  }): Promise<void>;
   listPurchases(limit?: number): Promise<ServerPurchase[]>;
   /**
    * Per-job filter — returns just the purchases for one AutoBuyJob.
@@ -377,6 +385,13 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
       await request<{ ok: true }>(`/api/autog/jobs/${encodeURIComponent(jobId)}/status`, {
         method: 'POST',
         body: JSON.stringify(report),
+      });
+    },
+
+    async reportChaseRedeem(payload) {
+      await request<{ ok: true }>('/api/autog/chase-redeem', {
+        method: 'POST',
+        body: JSON.stringify(payload),
       });
     },
 

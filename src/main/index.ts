@@ -207,6 +207,29 @@ async function chaseAutoRedeemTick(): Promise<void> {
         result: kind,
         ...(error ? { error } : {}),
       });
+      // On success, report it to BG so the user gets an in-app
+      // notification (+ web push) with the redeemed amount — the
+      // schedule fires unattended, so this surfaces it without the
+      // user opening the desktop app. Best-effort.
+      if (result.ok && apiKey) {
+        try {
+          const settingsNow = await loadSettings();
+          await createBGClient(
+            settingsNow.bgBaseUrl,
+            apiKey,
+          ).reportChaseRedeem({
+            profileLabel: fresh.label,
+            amount: result.amount,
+            pointsRedeemed: result.pointsRedeemed,
+            orderNumber: result.orderNumber,
+          });
+        } catch (err) {
+          logger.info('chase.autoRedeem.notify.skip', {
+            id: p.id,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     } catch (err) {
       logger.warn('chase.autoRedeem.tick.error', {
         id: p.id,
