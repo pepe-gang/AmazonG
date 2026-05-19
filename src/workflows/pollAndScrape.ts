@@ -4,6 +4,7 @@ import type { DriverSession } from '../browser/driver.js';
 import type { FillerPool } from '../shared/ipc.js';
 import { openSession } from '../browser/driver.js';
 import { surfaceUnreconciledBreadcrumbs } from './surfaceUnreconciled.js';
+import { reconcileLedgerToBG } from './reconcileLedger.js';
 import { scrapeProduct } from '../actions/scrapeProduct.js';
 import { buyNow, captureDebugSnapshot, probePageDiag } from '../actions/buyNow.js';
 import { clearCartHttpOnly, type ClearCartResult } from '../actions/clearCart.js';
@@ -855,6 +856,10 @@ export function startWorker(deps: Deps): WorkerHandle {
   // order from a prior run that crashed / was interrupted. Local-ledger
   // read only; fire-and-forget so it can't delay worker startup.
   void surfaceUnreconciledBreadcrumbs(deps.jobAttempts);
+  // Ghost-order safety net: push every ledger-captured order id that the
+  // normal report path may have failed to land to BG's recover-order
+  // endpoint. Idempotent server-side; fire-and-forget.
+  void reconcileLedgerToBG(deps.bg);
 
   let streamingHandle: { stop: () => Promise<void> } | null = null;
   // Per-job preamble for the streaming scheduler: filter eligible,
@@ -2479,6 +2484,7 @@ export async function runForProfile(
   // read only; fire-and-forget so it can't delay the buy.
   if (job.phase === 'buy') {
     void surfaceUnreconciledBreadcrumbs(deps.jobAttempts);
+    void reconcileLedgerToBG(deps.bg);
   }
 
   // Centralized abort checkpoint. Returns a ProfileResult if the

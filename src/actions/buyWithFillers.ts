@@ -11,6 +11,7 @@ import { cancelFillerOrder } from './cancelFillerOrder.js';
 import { clearCart, removeCartItemsByAsin, type ClearCartResult } from './clearCart.js';
 import { appendResearchEvent } from '../shared/researchLog.js';
 import { recordPlacedOrderEvent } from '../main/placedOrderLedger.js';
+import { captureGhostForensic } from '../main/ghostForensics.js';
 import { scrapeProduct } from './scrapeProduct.js';
 import {
   captureDebugSnapshot,
@@ -1748,6 +1749,9 @@ export async function buyWithFillers(
   // diff-mode order-history scan with no buy-flow state. The terminal
   // events below carry the same `submissionId` so the pass can pair
   // them. See placedOrderLedger.ts + reconcilePlacedOrders.ts.
+  // Full cart ASIN list (target + fillers) — shared by the breadcrumb,
+  // the forensic capture, and the post-buy order-history scan below.
+  const cartAsins = targetAsin ? [targetAsin, ...fillerAsins] : fillerAsins;
   const submissionId = randomUUID();
   recordPlacedOrderEvent({
     event: 'place_order_submitted',
@@ -1755,9 +1759,12 @@ export async function buyWithFillers(
     profile: opts.profile ?? '(unknown)',
     jobId: opts.jobId ?? null,
     productUrl: opts.productUrl,
-    cartAsins: targetAsin ? [targetAsin, ...fillerAsins] : fillerAsins,
+    cartAsins,
     preBuyOrderIds: preBuyOrderIds ?? [],
   });
+  // Stamp submissionId into the job-log too, so the .jsonl log and the
+  // durable ledger share one correlation key when tracing a ghost.
+  logger.info('step.fillerBuy.submission', { submissionId, jobId: opts.jobId ?? null }, cid);
   // Playwright's click() can REJECT while the click still registered —
   // a navigation detaches the element mid-click, or the post-click
   // actionability check races. So the order may be placed even though
@@ -1780,6 +1787,17 @@ export async function buyWithFillers(
       cid,
     );
   }
+
+  // Dev-only forensic snapshot the instant after the Place Order click,
+  // BEFORE waitForConfirmationOrPending — which can hang silently and
+  // leave a lone breadcrumb (the cpnduy ghost, 2026-05-18). This is the
+  // post-click page state an investigator needs when a ghost dies before
+  // ever reaching confirmation.
+  await captureGhostForensic(page, submissionId, 'post_click', {
+    profile: opts.profile ?? '(unknown)',
+    jobId: opts.jobId ?? null,
+    cartAsins,
+  });
 
   // 14. Wait for the confirmation page. Reuses the shared helper that
   //     also handles Amazon's "This is a pending order — place again?"
@@ -1886,6 +1904,21 @@ export async function buyWithFillers(
     });
   }
 
+  // Dev-only forensic snapshot of the confirmation / post-place page,
+  // keyed by submissionId — the artifact an investigator needs when a
+  // ghost is traced back from an order id.
+  await captureGhostForensic(
+    page,
+    submissionId,
+    confirmTimedOutNoSignal ? 'confirm_timeout' : 'confirmation',
+    {
+      profile: opts.profile ?? '(unknown)',
+      jobId: opts.jobId ?? null,
+      cartAsins,
+      amazonPurchaseId,
+    },
+  );
+
   // Parse the confirmation page for `finalPrice` + `finalPriceText`.
   // NOTE: we intentionally ignore the orderId parsed here — Amazon's
   // confirmation body can contain stale ids in "Recommended for you"
@@ -1907,7 +1940,6 @@ export async function buyWithFillers(
   //     our ASINs ended up in that specific order — Phase 2's
   //     cancelFillerItems walks this list to surgically cancel fillers
   //     while leaving the target intact.
-  const cartAsins = targetAsin ? [targetAsin, ...fillerAsins] : fillerAsins;
   let orderMatches: OrderMatch[] =
     cartAsins.length > 0
       ? await fetchOrderIdsForAsins(page, cartAsins, targetAsin, preBuyOrderIds)
@@ -2020,6 +2052,21 @@ export async function buyWithFillers(
       { reason: confirmFailReason, url: page.url() },
       cid,
     );
+    // Reconcile the place_order_submitted breadcrumb as abandoned. The
+    // outcome was unknown AND the order-history scan (with retry) matched
+    // none of our cart ASINs — the order positively did not place. Write
+    // a terminal reconcile_abandoned so the breadcrumb pairs off; without
+    // it the breadcrumb stays unreconciled forever and the reconciliation
+    // pass keeps flagging it as a ghost candidate — a false ghost.
+    recordPlacedOrderEvent({
+      event: 'reconcile_abandoned',
+      submissionId,
+      profile: opts.profile ?? '(unknown)',
+      jobId: opts.jobId ?? null,
+      detail: clickThrew
+        ? 'click threw + order-history scan empty — order did not place'
+        : 'confirmation timeout + order-history scan empty — order did not place',
+    });
     return {
       ok: false,
       stage: clickThrew ? 'place_order' : 'confirm_parse',

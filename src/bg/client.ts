@@ -126,6 +126,17 @@ export type BGClient = {
     pointsRedeemed: string;
     orderNumber: string;
   }): Promise<void>;
+  /** Heal a ghost — push a ledger-captured Amazon order id to BG when the
+   *  normal report path failed to land it. Idempotent + conflict-safe
+   *  server-side; returns the server's verdict (null on transport error). */
+  recoverOrder(
+    jobId: string,
+    payload: {
+      amazonEmail: string;
+      orderId: string;
+      amazonPurchaseId?: string | null;
+    },
+  ): Promise<{ recovered: boolean; reason?: string } | null>;
   listPurchases(limit?: number): Promise<ServerPurchase[]>;
   /**
    * Per-job filter — returns just the purchases for one AutoBuyJob.
@@ -393,6 +404,13 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         method: 'POST',
         body: JSON.stringify(payload),
       });
+    },
+
+    async recoverOrder(jobId, payload) {
+      return request<{ recovered: boolean; reason?: string }>(
+        `/api/autog/jobs/${encodeURIComponent(jobId)}/recover-order`,
+        { method: 'POST', body: JSON.stringify(payload) },
+      );
     },
 
     async listPurchases(limit = 500) {

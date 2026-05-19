@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import { htmlToDocument } from '../shared/jsdom.js';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import {
   DELIVERY_OPTIONS_CHANGED_SELECTOR,
@@ -18,6 +19,7 @@ import { HTTP_BROWSERY_HEADERS, SPC_ENTRY_URL, SPC_URL_MATCH } from './amazonHtt
 import { resolvePlacedQuantity } from '../shared/quantityResolver.js';
 import { splitExpiry } from '../shared/cardFields.js';
 import { recordPlacedOrderEvent } from '../main/placedOrderLedger.js';
+import { captureGhostForensic } from '../main/ghostForensics.js';
 
 type BuyOptions = {
   dryRun: boolean;
@@ -673,6 +675,27 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       .waitFor({ state: 'visible', timeout: 1_000 })
       .catch(() => undefined);
     step('step.buy.place.settle', { mode: 'visible_wait', cap: 1_000 });
+    // DURABLE LEDGER — single-mode parity with filler mode. Write a
+    // place_order_submitted breadcrumb SYNCHRONOUSLY before the click so a
+    // placed order has a durable record even if the run dies before
+    // confirmation. `submissionId` pairs this against the terminal
+    // orderid_captured event below; an unpaired breadcrumb is a ghost
+    // candidate the reconciliation pass surfaces. Before this, single-mode
+    // buys had no pre-click anchor at all. See placedOrderLedger.ts.
+    // Single-mode cart is just the target — shared by the breadcrumb and
+    // the forensic captures so the expression isn't re-derived.
+    const cartAsins = dealAsin ? [dealAsin] : [];
+    const submissionId = randomUUID();
+    recordPlacedOrderEvent({
+      event: 'place_order_submitted',
+      submissionId,
+      profile: opts.profile ?? '(unknown)',
+      jobId: opts.jobId ?? null,
+      cartAsins,
+    });
+    // Stamp submissionId into the job-log too, so the .jsonl log and the
+    // durable ledger share one correlation key when tracing a ghost.
+    step('step.buy.submission', { submissionId });
     await opts.onStage?.('placing');
     try {
       await placeLocator.click({ timeout: 10_000 });
@@ -680,6 +703,13 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       return fail('place_order', 'failed to click Place Order', String(err));
     }
     step('step.buy.place', { clicked: true });
+    // Dev-only forensic snapshot the instant after the click, before
+    // waitForConfirmationOrPending — which can hang silently.
+    await captureGhostForensic(page, submissionId, 'post_click', {
+      profile: opts.profile ?? '(unknown)',
+      jobId: opts.jobId ?? null,
+      cartAsins,
+    });
 
     // 11. Wait for confirmation. Amazon may show a "This is a pending
     //     order — you placed an order for these items recently. Do you want
@@ -729,6 +759,11 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         if (snap) {
           step('step.buy.confirm.snapshot', { png: snap.pngPath, html: snap.htmlPath });
         }
+        await captureGhostForensic(page, submissionId, 'confirm_timeout', {
+          profile: opts.profile ?? '(unknown)',
+          jobId: opts.jobId ?? null,
+          cartAsins,
+        });
         return fail('confirm_parse', confirmWait.reason);
       }
       // Order was almost certainly placed despite the timeout — the
@@ -762,6 +797,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     // placedOrderLedger.ts.
     recordPlacedOrderEvent({
       event: 'order_confirmed',
+      submissionId,
       profile: opts.profile ?? '(unknown)',
       jobId: opts.jobId ?? null,
       url: page.url(),
@@ -769,6 +805,15 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       ...(recoveredFromConfirmTimeout
         ? { detail: 'recovered after confirmation-URL timeout' }
         : {}),
+    });
+    // Dev-only forensic snapshot of the confirmation page, keyed by
+    // submissionId — the artifact an investigator needs when a ghost is
+    // traced back from an order id.
+    await captureGhostForensic(page, submissionId, 'confirmation', {
+      profile: opts.profile ?? '(unknown)',
+      jobId: opts.jobId ?? null,
+      cartAsins: dealAsin ? [dealAsin] : [],
+      amazonPurchaseId,
     });
     // Optional: parse the confirmation page for the final price (the
     // orderId pulled from it is unreliable — recommendation sections and
@@ -832,6 +877,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     // can be diffed against job-attempts.json / BG to localize a ghost.
     recordPlacedOrderEvent({
       event: orderId ? 'orderid_captured' : 'orderid_missing',
+      submissionId,
       profile: opts.profile ?? '(unknown)',
       jobId: opts.jobId ?? null,
       url: page.url(),
@@ -2946,7 +2992,7 @@ export async function toggleBGNameAndRetry(
  *
  * Returns ok when we land on a confirmation URL, fail otherwise.
  */
-export async function waitForConfirmationOrPending(
+async function waitForConfirmationOrPendingInner(
   page: Page,
   step: StepEmitter,
   opts: {
@@ -3278,6 +3324,37 @@ export async function waitForConfirmationOrPending(
     ...(snap ? { htmlPath: snap.htmlPath, pngPath: snap.pngPath } : {}),
   });
   return { ok: false, reason: 'confirmation URL never loaded' };
+}
+
+/**
+ * Hard wall-clock guard around the confirmation wait. The inner function's
+ * 60s deadline is a soft `while (Date.now() < deadline)` check — only
+ * re-evaluated between loop iterations. If an inner `await page.evaluate`
+ * hangs (a wedged tab / CDP stall after Place Order), the loop never
+ * re-checks the deadline and the whole run becomes a silent zombie: a
+ * placed order with no record at all (the cpnduy ghost, 2026-05-18). This
+ * race caps the wait at a true wall-clock limit, so a hung await converts
+ * into a normal confirm-timeout failure that gets logged, ledgered, and
+ * reported instead of vanishing. 120s leaves generous headroom over the
+ * inner 60s deadline + delivery-options recovery.
+ */
+export function waitForConfirmationOrPending(
+  ...args: Parameters<typeof waitForConfirmationOrPendingInner>
+): ReturnType<typeof waitForConfirmationOrPendingInner> {
+  const HARD_TIMEOUT_MS = 120_000;
+  return Promise.race([
+    waitForConfirmationOrPendingInner(...args),
+    new Promise<{ ok: false; reason: string }>((resolve) =>
+      setTimeout(
+        () =>
+          resolve({
+            ok: false,
+            reason: 'confirmation wait hard-timeout — inner await hung',
+          }),
+        HARD_TIMEOUT_MS,
+      ),
+    ),
+  ]);
 }
 
 /**

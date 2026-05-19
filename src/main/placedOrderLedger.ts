@@ -52,6 +52,10 @@ export type PlacedOrderEvent = {
    * orderid_missing   — the post-buy scan came up empty. NOT terminal:
    *                     an order may simply not have propagated to
    *                     order history yet — reconciliation must retry.
+   * reported_to_bg    — the buy bundle's status report was POSTed to BG.
+   *                     `detail` carries the outcome (ok / the error).
+   *                     NOT terminal — records delivery, not resolution.
+   *                     Closes the "captured but never reached BG" gap.
    * reconcile_recovered — the reconciliation pass found + handled a
    *                     previously-unrecorded order. TERMINAL.
    * reconcile_abandoned — reconciliation retried past its time budget
@@ -62,6 +66,7 @@ export type PlacedOrderEvent = {
     | 'order_confirmed'
     | 'orderid_captured'
     | 'orderid_missing'
+    | 'reported_to_bg'
     | 'reconcile_recovered'
     | 'reconcile_abandoned';
   /** Correlates a place_order_submitted with its terminal event. */

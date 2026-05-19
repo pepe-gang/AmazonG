@@ -46,6 +46,7 @@ import type {
   ProfileResult,
 } from './pollAndScrape.js';
 import { buildBuyJobReport, syntheticFailedResult } from './jobReport.js';
+import { recordPlacedOrderEvent } from '../main/placedOrderLedger.js';
 
 type Phase = 'buy' | 'verify' | 'fetch_tracking' | 'cancel_fillers';
 
@@ -769,6 +770,7 @@ export class StreamingScheduler {
     bundle: JobBundle,
     job: AutoGJob,
   ): Promise<void> {
+    let reportErr = '';
     try {
       // Single source of truth for the report shape — same helper the
       // legacy pMap path uses post-fan-out. Handles status rollup,
@@ -779,14 +781,28 @@ export class StreamingScheduler {
       });
       await this.sd.deps.bg.reportStatus(job.id, report);
     } catch (err) {
+      reportErr = err instanceof Error ? err.message : String(err);
       logger.error(
         'scheduler.report.error',
-        {
-          jobId: job.id,
-          error: err instanceof Error ? err.message : String(err),
-        },
+        { jobId: job.id, error: reportErr },
         this.sd.parentCid,
       );
+    }
+    // Durable ledger: record per profile whether the buy report reached
+    // BG. Closes the "order captured but never reached BG" blind spot
+    // (worker crash before this fires, or a swallowed reportStatus
+    // throw). Correlate to a place_order_submitted breadcrumb by
+    // jobId + profile.
+    for (const r of bundle.results) {
+      recordPlacedOrderEvent({
+        event: 'reported_to_bg',
+        profile: r.email,
+        jobId: job.id,
+        orderId: r.orderId ?? null,
+        detail: reportErr
+          ? `report failed: ${reportErr}`.slice(0, 300)
+          : 'ok',
+      });
     }
   }
 
