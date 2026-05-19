@@ -193,6 +193,32 @@ export type ServerFillerCancelTask = {
   lastSignal: string | null;
 };
 
+/**
+ * Filler buy-context returned alongside a cancel_fillers work list so
+ * the worker can re-scan Amazon order history every tick for filler
+ * orders that the buy-time + verify-time scans missed (the
+ * never-give-up reconcile loop). Null when BG has no filler context
+ * for the job (single-mode buy, or a pre-v0.13.71 buy with no
+ * persisted snapshot).
+ */
+export type FillerReconcileContext = {
+  /** True only for buys that ran the Buy-with-Fillers flow. */
+  viaFiller: boolean;
+  /** Full padded-cart ASIN list — the rescan's match list. */
+  cartAsins: string[];
+  /** Pre-buy order-history snapshot — the rescan diff baseline. */
+  preBuyOrderIds: string[];
+  /** How many filler items the buy added. >0 means filler orders
+   *  should exist; a captured-count below this is a gap. */
+  fillersAddedCount: number;
+  /** The buy's target order id (purchase row's orderId). Excluded
+   *  from the rescan so the deal order is never queued for cancel. */
+  targetOrderId: string | null;
+  /** Every filler order id that already has a FillerCancelTask
+   *  (terminal ones included) — the worker skips re-reporting these. */
+  knownFillerOrderIds: string[];
+};
+
 /** Payload shape accepted by POST /api/autog/jobs/[id]/status */
 export type JobStatusReport = {
   status: 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'action_required';

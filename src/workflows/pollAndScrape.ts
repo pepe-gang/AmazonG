@@ -2233,10 +2233,20 @@ async function handleCancelFillersJob(
     );
     return;
   }
-  if (list.tasks.length === 0) {
-    // Genuinely empty — rescheduling raced, or every task already
-    // terminated. Safe to report completed (no updates) so the
-    // AutoBuyJob row flips out of in_progress.
+  // Never-give-up reconcile context. When present, every cancel_fillers
+  // tick re-scans Amazon order history with the buy-time cart snapshot
+  // so a filler order the buy-time + verify-time scans missed still
+  // gets a durable task. We rescan even when the task list is empty —
+  // that's the only place a straggler with no task yet can be caught.
+  const reconcileCtx = list.reconcile;
+  const canReconcile =
+    !!reconcileCtx &&
+    reconcileCtx.viaFiller &&
+    reconcileCtx.cartAsins.length > 0;
+  if (list.tasks.length === 0 && !canReconcile) {
+    // Genuinely empty and nothing to reconcile — rescheduling raced,
+    // or every task already terminated. Safe to report completed (no
+    // updates) so the AutoBuyJob row flips out of in_progress.
     logger.info('job.cancelFillers.empty', logCtx, cid);
     await reportSafe(deps, job.id, { status: 'completed' }, cid);
     return;
@@ -2269,19 +2279,75 @@ async function handleCancelFillersJob(
       await workPage.waitForTimeout(800);
     }
 
+    // Never-give-up reconcile rescan. Re-scan Amazon order history
+    // with the buy-time cart snapshot so any filler order the
+    // buy-time + verify-time scans missed gets a durable task this
+    // cycle. New ids go back via `fillerOrderIds` — BG's status route
+    // creates FillerCancelTasks for them, which keeps this
+    // cancel_fillers job alive for another tick. The loop terminates
+    // naturally: `knownFillerOrderIds` includes terminal tasks, so
+    // once every real filler has a task the rescan reports nothing
+    // new and the job completes.
+    let reconcileNewFillerIds: string[] = [];
+    if (canReconcile && reconcileCtx) {
+      const found = await rescanFillerOrderIds(
+        workPage,
+        reconcileCtx.cartAsins,
+        reconcileCtx.targetOrderId ?? '',
+        cid,
+        reconcileCtx.preBuyOrderIds.length > 0
+          ? reconcileCtx.preBuyOrderIds
+          : null,
+      ).catch(() => [] as string[]);
+      const known = new Set(reconcileCtx.knownFillerOrderIds);
+      reconcileNewFillerIds = found.filter(
+        (id) => !known.has(id) && id !== reconcileCtx.targetOrderId,
+      );
+      if (reconcileNewFillerIds.length > 0) {
+        logger.warn(
+          'job.cancelFillers.reconcile.newlyFound',
+          {
+            ...logCtx,
+            newlyFoundOrderIds: reconcileNewFillerIds,
+            knownTaskCount: reconcileCtx.knownFillerOrderIds.length,
+            fillersAddedCount: reconcileCtx.fillersAddedCount,
+          },
+          cid,
+        );
+      } else {
+        logger.info(
+          'job.cancelFillers.reconcile.clean',
+          {
+            ...logCtx,
+            knownTaskCount: reconcileCtx.knownFillerOrderIds.length,
+          },
+          cid,
+        );
+      }
+    }
     logger.info(
       'job.cancelFillers.done',
       {
         ...logCtx,
         taskCount: list.tasks.length,
         signals: updates.map((u) => u.signal),
+        reconcileNewCount: reconcileNewFillerIds.length,
       },
       cid,
     );
     await reportSafe(
       deps,
       job.id,
-      { status: 'completed', fillerCancelTaskUpdates: updates },
+      {
+        status: 'completed',
+        fillerCancelTaskUpdates: updates,
+        ...(reconcileNewFillerIds.length > 0
+          ? {
+              fillerOrderIds: reconcileNewFillerIds,
+              targetAsin: parseAsinFromUrl(job.productUrl),
+            }
+          : {}),
+      },
       cid,
     );
   } catch (err) {

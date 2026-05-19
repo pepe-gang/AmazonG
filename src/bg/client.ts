@@ -3,6 +3,7 @@ import type {
   AutoGJob,
   AutoGSyncBlob,
   FetchStatsSummary,
+  FillerReconcileContext,
   IdentityInfo,
   JobAttemptStatus,
   JobStatusReport,
@@ -263,6 +264,9 @@ export type BGClient = {
   listFillerCancelTasks(jobId: string): Promise<{
     job: { id: string; buyJobId: string | null; placedEmail: string };
     tasks: ServerFillerCancelTask[];
+    /** Filler buy-context for the never-give-up reconcile rescan.
+     *  Null when BG has no persisted context for the job. */
+    reconcile: FillerReconcileContext | null;
   } | null>;
   /**
    * BG.com fetch relay — long-polls for the next pending RemoteFetchJob.
@@ -579,8 +583,12 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
       const r = await request<{
         job: { id: string; buyJobId: string | null; placedEmail: string };
         tasks: ServerFillerCancelTask[];
+        reconcile: FillerReconcileContext | null;
       }>(url, { method: 'GET' });
-      return r ?? null;
+      if (!r) return null;
+      // Older BG deployments don't send `reconcile` — default to null
+      // so the worker just skips the rescan rather than crashing.
+      return { ...r, reconcile: r.reconcile ?? null };
     },
 
     async claimRemoteFetchJob(signal?: AbortSignal): Promise<ServerRemoteFetchJob | null> {
