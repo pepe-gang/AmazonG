@@ -135,6 +135,9 @@ export type BGClient = {
       amazonEmail: string;
       orderId: string;
       amazonPurchaseId?: string | null;
+      /** True when the recovered buy ran in filler mode — so BG spawns the
+       *  verify job with viaFiller set and its filler-cancel sweep runs. */
+      viaFiller?: boolean;
     },
   ): Promise<{ recovered: boolean; reason?: string } | null>;
   listPurchases(limit?: number): Promise<ServerPurchase[]>;

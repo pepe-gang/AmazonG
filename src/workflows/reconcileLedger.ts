@@ -37,11 +37,30 @@ export async function reconcileLedgerToBG(bg: BGClient): Promise<void> {
       }
     }
 
+    // Per-submission filler flag — a place_order_submitted breadcrumb from
+    // filler mode carries the full cart (target + filler ASINs); single
+    // mode carries just the one target ASIN. >1 ASIN ⇒ a filler buy.
+    const viaFillerBySubmission = new Map<string, boolean>();
+    for (const e of events) {
+      if (e.event === 'place_order_submitted' && e.submissionId) {
+        viaFillerBySubmission.set(
+          e.submissionId,
+          (e.cartAsins?.length ?? 0) > 1,
+        );
+      }
+    }
+
     const cutoff = Date.now() - RECONCILE_WINDOW_MS;
     // One captured order per submissionId — recent, not yet reconciled.
     const todo = new Map<
       string,
-      { jobId: string; profile: string; orderId: string; amazonPurchaseId: string | null }
+      {
+        jobId: string;
+        profile: string;
+        orderId: string;
+        amazonPurchaseId: string | null;
+        viaFiller: boolean;
+      }
     >();
     for (const e of events) {
       if (
@@ -57,6 +76,7 @@ export async function reconcileLedgerToBG(bg: BGClient): Promise<void> {
           profile: e.profile,
           orderId: e.orderId,
           amazonPurchaseId: e.amazonPurchaseId ?? null,
+          viaFiller: viaFillerBySubmission.get(e.submissionId) ?? false,
         });
       }
     }
@@ -70,6 +90,7 @@ export async function reconcileLedgerToBG(bg: BGClient): Promise<void> {
           amazonEmail: c.profile,
           orderId: c.orderId,
           amazonPurchaseId: c.amazonPurchaseId,
+          viaFiller: c.viaFiller,
         });
         // BG returned a verdict (recovered / already-recorded / conflict /
         // job-not-found) — all definitive. Mark it so it's not re-pushed.
