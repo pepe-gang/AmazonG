@@ -203,6 +203,14 @@ export type JobStatusReport = {
   placedPrice?: string | null;
   placedEmail?: string | null;
   placedOrderId?: string | null;
+  /** Verify-phase: filler order ids the verify-time rescan found (the
+   *  merged buy-time + rescan set). BG creates FillerCancelTasks from
+   *  these so a filler order discovered only at verify still gets the
+   *  durable never-give-up cancel retry. */
+  fillerOrderIds?: string[];
+  /** Verify-phase: the buy's target ASIN — forwarded so BG's
+   *  createFillerCancelTasks has the catastrophic-cancel-guard ASIN. */
+  targetAsin?: string | null;
   /** Carrier tracking codes collected by a fetch_tracking job. One order
    *  can split into multiple shipments (qty=3 MacBooks → 3 codes). */
   trackingIds?: string[] | null;
