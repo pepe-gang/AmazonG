@@ -113,6 +113,18 @@ export function buildBuyJobReport(
       : {}),
     ...(r.amazonPurchaseId ? { amazonPurchaseId: r.amazonPurchaseId } : {}),
     ...(r.targetAsin ? { targetAsin: r.targetAsin } : {}),
+    // Filler buy-context — only on filler buys that committed a cart.
+    // BG persists these so a cross-machine verify / cancel_fillers
+    // pass can re-scan order history for missed filler orders.
+    ...(r.cartAsins && r.cartAsins.length > 0
+      ? { cartAsins: r.cartAsins }
+      : {}),
+    ...(r.preBuyOrderIds && r.preBuyOrderIds.length > 0
+      ? { preBuyOrderIds: r.preBuyOrderIds }
+      : {}),
+    ...(typeof r.fillersAddedCount === 'number' && r.fillersAddedCount > 0
+      ? { fillersAddedCount: r.fillersAddedCount }
+      : {}),
   }));
 
   return {
@@ -156,5 +168,8 @@ export function syntheticFailedResult(
     fillerOrderIds: [],
     amazonPurchaseId: null,
     targetAsin: null,
+    cartAsins: [],
+    preBuyOrderIds: [],
+    fillersAddedCount: 0,
   };
 }

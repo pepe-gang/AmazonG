@@ -316,6 +316,27 @@ export type JobStatusReport = {
      * order. Optional; omitted on non-filler buys.
      */
     targetAsin?: string | null;
+    /**
+     * Full padded-cart ASIN list at buy time (target + every committed
+     * filler). BG persists it on the purchase row so a verify /
+     * cancel_fillers pass running on a DIFFERENT machine than the buy
+     * can still re-scan Amazon order history for missed filler orders.
+     * Omitted on single-mode buys.
+     */
+    cartAsins?: string[] | null;
+    /**
+     * Order-history snapshot taken just before the Place Order click —
+     * the rescan diff baseline. Persisted alongside `cartAsins` for
+     * cross-machine reconcile. Omitted when not captured.
+     */
+    preBuyOrderIds?: string[] | null;
+    /**
+     * How many filler items the buy added to the cart. BG's
+     * never-give-up reconcile loop compares this against the number of
+     * captured filler orders to detect a gap (a filler buy that
+     * produced zero FillerCancelTasks). Omitted / 0 on single-mode buys.
+     */
+    fillersAddedCount?: number | null;
   }[];
   /**
    * Per-task signal updates from a `cancel_fillers` worker batch. Only

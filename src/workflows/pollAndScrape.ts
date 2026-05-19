@@ -845,6 +845,18 @@ export type ProfileResult = {
    *  before clicking Cancel. Null only when the productUrl lacks a
    *  parseable ASIN (rare; treated as "no defensive ASIN check"). */
   targetAsin: string | null;
+  /** Full padded-cart ASIN list at buy time (target + every committed
+   *  filler). Forwarded to BG so a cross-machine verify / cancel pass
+   *  can re-scan order history. Empty on single-mode / dry-run / failure. */
+  cartAsins?: string[];
+  /** Order-history snapshot taken just before the Place Order click —
+   *  the rescan diff baseline. Forwarded to BG for cross-machine
+   *  reconcile. Empty when not captured. */
+  preBuyOrderIds?: string[];
+  /** How many filler items the buy added to the cart. Lets BG's
+   *  never-give-up reconcile loop detect a gap (a filler buy that
+   *  produced zero captured filler orders). 0 on single-mode buys. */
+  fillersAddedCount?: number;
 };
 
 export function startWorker(deps: Deps): WorkerHandle {
@@ -2942,6 +2954,13 @@ export async function runForProfile(
       fillerOrderIds,
       amazonPurchaseId: buy.amazonPurchaseId,
       targetAsin: parseAsinFromUrl(job.productUrl),
+      // Filler buy-context — forwarded to BG so a cross-machine verify
+      // / cancel_fillers pass can re-scan order history. cartAsins is
+      // target + every committed filler; fillersAdded excludes the
+      // target. Empty / 0 on single-mode buys.
+      cartAsins,
+      preBuyOrderIds,
+      fillersAddedCount: useFillers ? Math.max(0, cartAsins.length - 1) : 0,
     };
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
