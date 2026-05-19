@@ -1325,11 +1325,6 @@ async function handleVerifyJob(
           status: 'completed',
           placedOrderId: targetOrderId,
           placedEmail: profile.email,
-          // Forward the merged filler order ids + target ASIN so BG
-          // creates durable FillerCancelTasks — a filler order found
-          // only by the verify-time rescan still gets the cancel retry.
-          fillerOrderIds,
-          targetAsin,
           // Forward the qty Amazon's order-details page reports. Used
           // by BG to correct any buy-time qty mis-report (e.g. /spc-DOM
           // returning 1 when Amazon actually placed 2). Only included
@@ -1518,10 +1513,6 @@ async function handleVerifyJob(
               : 'order was cancelled by Amazon',
           placedOrderId: targetOrderId,
           placedEmail: profile.email,
-          // Forward filler ids + target ASIN — BG creates durable cancel
-          // tasks for any filler the verify rescan turned up.
-          fillerOrderIds: mergedFillerOrderIds,
-          targetAsin,
           // Target order cancelled by Amazon → the bundled filler is
           // definitionally gone with it (Amazon doesn't ship the
           // filler when the whole order is dead). Mark cleaned=true
