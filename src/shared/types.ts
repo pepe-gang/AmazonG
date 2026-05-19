@@ -193,6 +193,32 @@ export type ServerFillerCancelTask = {
   lastSignal: string | null;
 };
 
+/**
+ * Filler buy-context returned alongside a cancel_fillers work list so
+ * the worker can re-scan Amazon order history every tick for filler
+ * orders that the buy-time + verify-time scans missed (the
+ * never-give-up reconcile loop). Null when BG has no filler context
+ * for the job (single-mode buy, or a pre-v0.13.71 buy with no
+ * persisted snapshot).
+ */
+export type FillerReconcileContext = {
+  /** True only for buys that ran the Buy-with-Fillers flow. */
+  viaFiller: boolean;
+  /** Full padded-cart ASIN list — the rescan's match list. */
+  cartAsins: string[];
+  /** Pre-buy order-history snapshot — the rescan diff baseline. */
+  preBuyOrderIds: string[];
+  /** How many filler items the buy added. >0 means filler orders
+   *  should exist; a captured-count below this is a gap. */
+  fillersAddedCount: number;
+  /** The buy's target order id (purchase row's orderId). Excluded
+   *  from the rescan so the deal order is never queued for cancel. */
+  targetOrderId: string | null;
+  /** Every filler order id that already has a FillerCancelTask
+   *  (terminal ones included) — the worker skips re-reporting these. */
+  knownFillerOrderIds: string[];
+};
+
 /** Payload shape accepted by POST /api/autog/jobs/[id]/status */
 export type JobStatusReport = {
   status: 'in_progress' | 'awaiting_verification' | 'pending_tracking' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'action_required';
@@ -203,6 +229,14 @@ export type JobStatusReport = {
   placedPrice?: string | null;
   placedEmail?: string | null;
   placedOrderId?: string | null;
+  /** Verify-phase: filler order ids the verify-time rescan found (the
+   *  merged buy-time + rescan set). BG creates FillerCancelTasks from
+   *  these so a filler order discovered only at verify still gets the
+   *  durable never-give-up cancel retry. */
+  fillerOrderIds?: string[];
+  /** Verify-phase: the buy's target ASIN — forwarded so BG's
+   *  createFillerCancelTasks has the catastrophic-cancel-guard ASIN. */
+  targetAsin?: string | null;
   /** Carrier tracking codes collected by a fetch_tracking job. One order
    *  can split into multiple shipments (qty=3 MacBooks → 3 codes). */
   trackingIds?: string[] | null;
@@ -308,6 +342,27 @@ export type JobStatusReport = {
      * order. Optional; omitted on non-filler buys.
      */
     targetAsin?: string | null;
+    /**
+     * Full padded-cart ASIN list at buy time (target + every committed
+     * filler). BG persists it on the purchase row so a verify /
+     * cancel_fillers pass running on a DIFFERENT machine than the buy
+     * can still re-scan Amazon order history for missed filler orders.
+     * Omitted on single-mode buys.
+     */
+    cartAsins?: string[] | null;
+    /**
+     * Order-history snapshot taken just before the Place Order click —
+     * the rescan diff baseline. Persisted alongside `cartAsins` for
+     * cross-machine reconcile. Omitted when not captured.
+     */
+    preBuyOrderIds?: string[] | null;
+    /**
+     * How many filler items the buy added to the cart. BG's
+     * never-give-up reconcile loop compares this against the number of
+     * captured filler orders to detect a gap (a filler buy that
+     * produced zero FillerCancelTasks). Omitted / 0 on single-mode buys.
+     */
+    fillersAddedCount?: number | null;
   }[];
   /**
    * Per-task signal updates from a `cancel_fillers` worker batch. Only
