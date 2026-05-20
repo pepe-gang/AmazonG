@@ -883,6 +883,10 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       url: page.url(),
       orderId,
       amazonPurchaseId,
+      // CB + price so a ghost-recovery pass populates the BG row's
+      // CB / Profit columns instead of leaving them "—".
+      placedCashbackPct: cashbackPct,
+      placedPrice: confirmation.finalPriceText ?? null,
     });
 
     step('step.buy.placed', {

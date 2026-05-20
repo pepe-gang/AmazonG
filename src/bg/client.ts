@@ -139,6 +139,15 @@ export type BGClient = {
       /** True when the recovered buy ran in filler mode — so BG spawns the
        *  verify job with viaFiller set and its filler-cancel sweep runs. */
       viaFiller?: boolean;
+      /** CB locked in by the buy on /spc. BG persists it on the recovered
+       *  purchase row so the dashboard's CB / Profit columns populate
+       *  instead of showing "—". Optional — only present when the
+       *  ledger event carried it (v0.13.74+). */
+      placedCashbackPct?: number | null;
+      /** Final/retail price as a "$N.NN" string. Same purpose as
+       *  placedCashbackPct — without it the dashboard falls back to
+       *  deal.maxPrice for retail and can't compute profit accurately. */
+      placedPrice?: string | null;
     },
   ): Promise<{ recovered: boolean; reason?: string } | null>;
   listPurchases(limit?: number): Promise<ServerPurchase[]>;
