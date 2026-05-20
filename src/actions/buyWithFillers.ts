@@ -1016,8 +1016,13 @@ export async function buyWithFillers(
   // ERR_ABORTED even though the page actually lands on a valid /spc.
   // Same pattern as the CART_URL goto in the fallback path below and
   // in clearCart.ts:78.
+  //
+  // 5s timeout (was 30s): the shortcut either commits in <2s or it
+  // never will — Amazon doesn't sit on the response. Bail fast and let
+  // the URL check route us to the click-based fallback instead of
+  // burning 25 extra seconds on a shortcut that's already failed.
   await page
-    .goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 })
+    .goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 5_000 })
     .catch(() => undefined);
   if (SPC_URL_MATCH.test(page.url())) {
     usedShortcut = true;
