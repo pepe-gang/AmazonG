@@ -83,6 +83,17 @@ export type PlacedOrderEvent = {
   /** Pre-buy order-history snapshot — set on place_order_submitted so
    *  reconciliation's scan is a clean diff (can't false-match an old order). */
   preBuyOrderIds?: string[];
+  /** Cashback % the buy locked in on /spc. Set on `orderid_captured`
+   *  (and the equivalent `order_confirmed` recovery path) so a
+   *  ghost-recovery pass can populate the BG purchase row's CB column.
+   *  Without it, reconciler-healed orders show "—" in the dashboard
+   *  and Profit can't compute. */
+  placedCashbackPct?: number | null;
+  /** Final/retail price as a "$N.NN" string (the confirmation page's
+   *  reading, falling back to the PDP price). Forwarded by
+   *  ghost-recovery so the BG purchase row gets the real placed price
+   *  instead of the dashboard fallback to deal.maxPrice. */
+  placedPrice?: string | null;
   detail?: string;
 };
 

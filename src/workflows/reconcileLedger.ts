@@ -60,6 +60,8 @@ export async function reconcileLedgerToBG(bg: BGClient): Promise<void> {
         orderId: string;
         amazonPurchaseId: string | null;
         viaFiller: boolean;
+        placedCashbackPct: number | null;
+        placedPrice: string | null;
       }
     >();
     for (const e of events) {
@@ -77,6 +79,16 @@ export async function reconcileLedgerToBG(bg: BGClient): Promise<void> {
           orderId: e.orderId,
           amazonPurchaseId: e.amazonPurchaseId ?? null,
           viaFiller: viaFillerBySubmission.get(e.submissionId) ?? false,
+          // Forward CB + price so BG's /recover-order can populate the
+          // CB / Profit dashboard columns. Null on pre-v0.13.74 events
+          // (older ledger lines didn't carry these); BG persists them
+          // only when present.
+          placedCashbackPct:
+            typeof e.placedCashbackPct === 'number'
+              ? e.placedCashbackPct
+              : null,
+          placedPrice:
+            typeof e.placedPrice === 'string' ? e.placedPrice : null,
         });
       }
     }
@@ -91,6 +103,10 @@ export async function reconcileLedgerToBG(bg: BGClient): Promise<void> {
           orderId: c.orderId,
           amazonPurchaseId: c.amazonPurchaseId,
           viaFiller: c.viaFiller,
+          ...(c.placedCashbackPct !== null
+            ? { placedCashbackPct: c.placedCashbackPct }
+            : {}),
+          ...(c.placedPrice !== null ? { placedPrice: c.placedPrice } : {}),
         });
         // BG returned a verdict (recovered / already-recorded / conflict /
         // job-not-found) — all definitive. Mark it so it's not re-pushed.

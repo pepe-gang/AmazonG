@@ -2008,6 +2008,11 @@ export async function buyWithFillers(
     productUrl: opts.productUrl,
     orderId,
     amazonPurchaseId,
+    // CB + price so a ghost-recovery pass (reconcileLedger →
+    // /recover-order) can populate the BG purchase row instead of
+    // leaving CB/Profit "—".
+    placedCashbackPct: targetCashbackPct,
+    placedPrice: parsed.finalPriceText ?? null,
     ...(orderMatches.length > 0
       ? { detail: `orderIds=${orderMatches.map((m) => m.orderId).join(',')}` }
       : {}),
@@ -2122,6 +2127,8 @@ export async function buyWithFillers(
       productUrl: opts.productUrl,
       url: page.url(),
       amazonPurchaseId,
+      placedCashbackPct: targetCashbackPct,
+      placedPrice: parsed.finalPriceText ?? null,
       detail: clickThrew
         ? 'recovered via order-history scan after the Place Order click threw'
         : 'recovered via order-history scan after confirmation-URL timeout (no on-page signal)',
