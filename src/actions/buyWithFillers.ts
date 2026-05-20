@@ -673,6 +673,23 @@ export async function buyWithFillers(
     cid,
   );
 
+  // Launch the pre-buy order-history snapshot concurrently with the
+  // filler search + ATC work below. The snapshot navigates a tab to
+  // /order-history; the filler work is HTTP-only via context.request
+  // (no tab nav, no shared resource), so the two overlap cleanly.
+  // Awaited just before SPC entry — by then the filler batch is done
+  // and the snapshot is usually already resolved. `.catch` collapses
+  // any rejection to null, matching the function's internal failure
+  // path; downstream fetchOrderIdsForAsins handles null via the
+  // legacy ASIN-walker.
+  const preBuyOrderIdsPromise: Promise<string[] | null> =
+    snapshotOrderHistoryIds(
+      page,
+      cid,
+      logger,
+      opts.recentOrderIds ?? [],
+    ).catch(() => null);
+
   // 3. Add target to cart. Two-tier path:
   //
   //    1. HTTP-add fast path — same /cart/add-to-cart/ref=... endpoint
@@ -972,12 +989,12 @@ export async function buyWithFillers(
   //
   //      Returns null on snapshot failure — `fetchOrderIdsForAsins`
   //      falls back to the legacy ASIN-walk scanner when null.
-  const preBuyOrderIds = await snapshotOrderHistoryIds(
-    page,
-    cid,
-    logger,
-    opts.recentOrderIds ?? [],
-  );
+  //
+  //   The snapshot was launched in parallel right after cart.ready (see
+  //   the launch site for parallelism rationale). By now the HTTP-only
+  //   filler batch is done; the snapshot is usually already resolved
+  //   so this await is near-zero on the happy path.
+  const preBuyOrderIds = await preBuyOrderIdsPromise;
 
   // 6. Enter checkout directly. /checkout/entry/cart?proceedToCheckout=1
   //    is the URL Amazon's BYG ("Need anything else?") "Continue to
@@ -1016,8 +1033,13 @@ export async function buyWithFillers(
   // ERR_ABORTED even though the page actually lands on a valid /spc.
   // Same pattern as the CART_URL goto in the fallback path below and
   // in clearCart.ts:78.
+  //
+  // 5s timeout (was 30s): the shortcut either commits in <2s or it
+  // never will — Amazon doesn't sit on the response. Bail fast and let
+  // the URL check route us to the click-based fallback instead of
+  // burning 25 extra seconds on a shortcut that's already failed.
   await page
-    .goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 30_000 })
+    .goto(SPC_ENTRY_URL, { waitUntil: 'commit', timeout: 5_000 })
     .catch(() => undefined);
   if (SPC_URL_MATCH.test(page.url())) {
     usedShortcut = true;
