@@ -115,6 +115,15 @@ type BuyWithFillersOptions = {
    */
   bypassPrimeCheck?: boolean;
   /**
+   * Whether the cashback recovery is allowed to invoke
+   * `toggleBGNameAndRetry` on a missed gate. When false the buy fails
+   * with the original `cashback_gate` reason instead of spending
+   * 8-15s rewriting the saved-address name and re-rendering /spc.
+   * Mirrors the global Settings → Accounts checkbox. Default true
+   * (legacy behavior).
+   */
+  bgNameToggleEnabled?: boolean;
+  /**
    * Resolver for Amazon's PMTS "Verify your card" challenge — given a
    * card's last 4 digits, returns the full number from the encrypted
    * local vault (or null). Threaded into waitForCheckout so the
@@ -1513,6 +1522,25 @@ export async function buyWithFillers(
       );
 
       if (opts.allowedAddressPrefixes.length === 0) {
+        return {
+          ok: false,
+          stage: 'cashback_gate',
+          reason: cb.reason,
+          ...(cb.detail ? { detail: cb.detail } : {}),
+        };
+      }
+
+      // Operator opt-out of the BG1/BG2 toggle recovery (Settings →
+      // Accounts). When disabled, fail fast at cashback_gate with the
+      // original reason instead of spending 8-15s rewriting the
+      // saved-address name and re-rendering /spc. `undefined` keeps
+      // the legacy behavior (toggle runs).
+      if (opts.bgNameToggleEnabled === false) {
+        logger.info(
+          'step.fillerBuy.spc.cashback.toggle.disabled',
+          { targetAsin, observedPct: initialPct, reason: 'setting_off' },
+          cid,
+        );
         return {
           ok: false,
           stage: 'cashback_gate',

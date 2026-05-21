@@ -1130,6 +1130,11 @@ async function startWorkerNow(): Promise<void> {
     buyWithFillers: settings.buyWithFillers,
     minCashbackPct: settings.minCashbackPct,
     allowedAddressPrefixes: settings.allowedAddressPrefixes,
+    // Default true (legacy behavior); the user can dial off via
+    // Settings → Accounts. Read at worker-start time — to retune you
+    // need to bounce the worker (matches how minCashbackPct and the
+    // address prefixes work today).
+    bgNameToggleEnabled: settings.bgNameToggleEnabled !== false,
     // Hot-reload parallelism settings per claim — Settings page
     // changes (Parallel buys + Filler add-to-cart speed) take effect
     // on the next deal without requiring a worker restart.

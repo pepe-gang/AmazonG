@@ -96,6 +96,14 @@ export type Deps = {
   minCashbackPct: number;
   allowedAddressPrefixes: string[];
   /**
+   * Whether the cashback-recovery path is allowed to mutate the
+   * saved-address name with a (BG1)/(BG2) suffix. False = skip the
+   * inline toggle and fail with the original cashback_gate reason.
+   * Defaults to true on every plumb-through to preserve legacy
+   * behavior for callers (tests, scripts) that don't set it.
+   */
+  bgNameToggleEnabled: boolean;
+  /**
    * Re-read each per-claim from disk so the user can tune Parallel
    * buys in Settings without stopping the worker. Returns the
    * parallel-buy knobs as a struct; we don't pass the whole Settings
@@ -724,6 +732,7 @@ async function runFillerBuyWithRetries(
       requireMinCashback,
       bypassPriceCheck: job.bypassPriceCheck === true,
       bypassPrimeCheck: job.bypassPrimeCheck === true,
+      bgNameToggleEnabled: deps.bgNameToggleEnabled,
       resolveCardNumber: deps.resolveCardNumber,
       dryRun: deps.buyDryRun,
       fillerPool: effectivePool,
@@ -2840,6 +2849,7 @@ export async function runForProfile(
         // bypassPrimeCheck has no effect in single-mode — buyNow doesn't
         // run verifyProductDetailed; the outer pollAndScrape PDP verify
         // (above this dispatch) is the only Prime gate that fires.
+        bgNameToggleEnabled: deps.bgNameToggleEnabled,
         resolveCardNumber: deps.resolveCardNumber,
         maxPrice: job.maxPrice,
         allowedAddressPrefixes: deps.allowedAddressPrefixes,

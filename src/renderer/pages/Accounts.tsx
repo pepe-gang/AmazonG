@@ -65,6 +65,7 @@ export function AccountsView({
         <EnabledTogglePanel profiles={profiles} />
         <AutoBuyTogglePanel profiles={profiles} />
         <BuyWithFillersPanel profiles={profiles} />
+        <BgNameTogglePanel />
         <HeadlessTogglePanel profiles={profiles} />
       </div>
       {/* Cards panel sits OUTSIDE the worker-locked block — the
@@ -781,6 +782,49 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
         )}
       </div>
       )}
+    </div>
+  );
+}
+
+function BgNameTogglePanel() {
+  const { settings, update, busy } = useSettings();
+  if (!settings) return null;
+  // Treat any non-false (incl. undefined on a fresh-from-disk read) as
+  // on, matching the worker-side default.
+  const on = settings.bgNameToggleEnabled !== false;
+  const toggle = async () => {
+    await update({ bgNameToggleEnabled: !on });
+  };
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">BG1/BG2 address toggle</div>
+          <div className="prefix-sub">
+            When the /spc cashback gate misses the floor, the worker can
+            recover by editing the saved-address name suffix between
+            &quot;(BG1)&quot; and &quot;(BG2)&quot; (or appending
+            &quot;(BG1)&quot; the first time) and re-rendering checkout.
+            Turn this off if the recovery is wasted time on your
+            accounts (the buys still fail at cashback_gate) or you
+            manage the suffix manually on Amazon. Takes effect on the
+            next worker Start.
+          </div>
+        </div>
+        <label
+          className="flex items-center gap-2 cursor-pointer"
+          title={on ? 'BG1/BG2 toggle recovery enabled' : 'Toggle recovery disabled — cashback misses fail fast'}
+        >
+          <Switch
+            checked={on}
+            onCheckedChange={() => void toggle()}
+            disabled={busy}
+          />
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {on ? 'On' : 'Off'}
+          </span>
+        </label>
+      </div>
     </div>
   );
 }
