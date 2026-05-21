@@ -723,6 +723,7 @@ async function runFillerBuyWithRetries(
       minCashbackPct,
       requireMinCashback,
       bypassPriceCheck: job.bypassPriceCheck === true,
+      bypassPrimeCheck: job.bypassPrimeCheck === true,
       resolveCardNumber: deps.resolveCardNumber,
       dryRun: deps.buyDryRun,
       fillerPool: effectivePool,
@@ -2696,7 +2697,18 @@ export async function runForProfile(
         cid,
       );
     }
-    const constraints = { ...DEFAULT_CONSTRAINTS, maxPrice: effectiveMaxPrice };
+    if (job.bypassPrimeCheck === true) {
+      logger.info(
+        'step.verify.prime.bypass',
+        { jobId: job.id, profile, reason: 'user_opt_in' },
+        cid,
+      );
+    }
+    const constraints = {
+      ...DEFAULT_CONSTRAINTS,
+      maxPrice: effectiveMaxPrice,
+      ...(job.bypassPrimeCheck === true ? { requirePrime: false } : {}),
+    };
     const enabledChecks = [
       ...(constraints.requireInStock ? ['inStock'] : []),
       ...(constraints.maxPrice !== null ? ['price'] : []),
@@ -2825,6 +2837,9 @@ export async function runForProfile(
         minCashbackPct: effectiveMinCashbackPct,
         requireMinCashback,
         bypassPriceCheck: job.bypassPriceCheck === true,
+        // bypassPrimeCheck has no effect in single-mode — buyNow doesn't
+        // run verifyProductDetailed; the outer pollAndScrape PDP verify
+        // (above this dispatch) is the only Prime gate that fires.
         resolveCardNumber: deps.resolveCardNumber,
         maxPrice: job.maxPrice,
         allowedAddressPrefixes: deps.allowedAddressPrefixes,

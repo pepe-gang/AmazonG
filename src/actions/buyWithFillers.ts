@@ -107,6 +107,14 @@ type BuyWithFillersOptions = {
    */
   bypassPriceCheck?: boolean;
   /**
+   * Per-job override for the PDP Prime-badge gate. When true,
+   * `verifyProductDetailed` is called with `requirePrime: false` —
+   * useful when a deal IS Prime-eligible on Amazon but the static
+   * parser misreads the badge. Surfaced on the BG Trigger panel as
+   * "Bypass Prime check". Default false (the badge is enforced).
+   */
+  bypassPrimeCheck?: boolean;
+  /**
    * Resolver for Amazon's PMTS "Verify your card" challenge — given a
    * card's last 4 digits, returns the full number from the encrypted
    * local vault (or null). Threaded into waitForCheckout so the
@@ -583,9 +591,21 @@ export async function buyWithFillers(
       cid,
     );
   }
+  // Bypass: PDP Prime-badge gate. When the user opted in via the BG
+  // Trigger panel's "Bypass Prime check", flip requirePrime off so
+  // verifyProductDetailed treats `info.isPrime !== true` as a pass.
+  // Independent of the price bypass.
+  if (opts.bypassPrimeCheck === true) {
+    logger.info(
+      'step.fillerBuy.verify.prime.bypass',
+      { reason: 'user_opt_in' },
+      cid,
+    );
+  }
   const constraints = {
     ...DEFAULT_CONSTRAINTS,
     maxPrice: fillerEffectiveMaxPrice,
+    ...(opts.bypassPrimeCheck === true ? { requirePrime: false } : {}),
   };
   const report = verifyProductDetailed(info, constraints);
   if (!report.ok) {

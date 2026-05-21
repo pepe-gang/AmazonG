@@ -35,6 +35,13 @@ export type AutoGJob = {
    *  price check" checkbox. Independent of requireMinCashback. Default
    *  false (safe — enforce the cap). */
   bypassPriceCheck: boolean;
+  /** Per-job override for the PDP Prime-badge gate. When true, the
+   *  worker passes `requirePrime: false` into `verifyProductDetailed`,
+   *  so a missing/misread ✓prime badge no longer fails the buy at
+   *  `not_prime`. Set on the BG manual Trigger panel via the "Bypass
+   *  Prime check" checkbox. Independent of the other gates. Default
+   *  false (safe — enforce the badge). */
+  bypassPrimeCheck: boolean;
 };
 
 export type ProductCondition = 'new' | 'used' | 'renewed';
