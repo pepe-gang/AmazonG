@@ -6,7 +6,12 @@ import { openSession } from '../browser/driver.js';
 import { surfaceUnreconciledBreadcrumbs } from './surfaceUnreconciled.js';
 import { reconcileLedgerToBG } from './reconcileLedger.js';
 import { scrapeProduct } from '../actions/scrapeProduct.js';
-import { buyNow, captureDebugSnapshot, probePageDiag } from '../actions/buyNow.js';
+import {
+  buyNow,
+  captureDebugSnapshot,
+  isUnpackagedRun,
+  probePageDiag,
+} from '../actions/buyNow.js';
 import { clearCartHttpOnly, type ClearCartResult } from '../actions/clearCart.js';
 import {
   buyWithFillers,
@@ -2768,7 +2773,10 @@ export async function runForProfile(
       // as the user-visible reason. To fix the classifier we need to
       // see which availability variants Amazon shows in the wild —
       // this probe + dev-only HTML capture gives us that signal.
-      if (report.reason === 'oos') {
+      //
+      // Dev-only gate (npm run dev) — production installs emit no
+      // probe events and capture no HTML/PNG for this failure.
+      if (report.reason === 'oos' && (await isUnpackagedRun())) {
         const oosProbe = await probePageDiag(page, {
           availability_block: '#availability',
           availability_color_state: '#availability .a-color-state, #availability .a-color-success, #availability .a-color-price',

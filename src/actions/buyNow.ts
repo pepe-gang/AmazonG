@@ -122,7 +122,7 @@ async function captureDebugShot(
  * captured the HTML" surprise). Lazy electron import so importing
  * this module stays safe in non-Electron contexts (vitest).
  */
-async function isUnpackagedRun(): Promise<boolean> {
+export async function isUnpackagedRun(): Promise<boolean> {
   try {
     const electron = await import('electron');
     const app = (electron as { app?: { isPackaged?: boolean } }).app;

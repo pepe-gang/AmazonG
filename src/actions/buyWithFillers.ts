@@ -18,6 +18,7 @@ import {
   detectOrderLikelyPlaced,
   ensureAddress,
   findPlaceOrderLocator,
+  isUnpackagedRun,
   pickBestCashbackDelivery,
   probePageDiag,
   setMaxQuantity,
@@ -783,7 +784,10 @@ export async function buyWithFillers(
       //   - selector drift (button still there but different id/name)
       //   - signin or captcha interstitial we didn't detect
       //   - regional/prime restriction page
-      // Probe is always-on (cheap). captureDebugSnapshot is dev-only.
+      //
+      // Dev-only gate (npm run dev) — production installs emit no
+      // probe events and capture no HTML/PNG for this failure.
+      if (await isUnpackagedRun()) {
       const probe = await probePageDiag(page, {
         buy_now_canonical: '#buy-now-button',
         buy_now_alt_submit: 'input[name="submit.buy-now"]',
@@ -831,6 +835,7 @@ export async function buyWithFillers(
           cid,
         );
       }
+      } // end isUnpackagedRun gate
       return {
         ok: false,
         stage: 'buy_now_click',
@@ -877,7 +882,7 @@ export async function buyWithFillers(
     }
     const inCart = await hasTargetInCart(page, targetAsin);
     if (!inCart) {
-      // Always-on probe + dev-only HTML snapshot. We landed on
+      // Dev-only diagnostic capture (npm run dev). We landed on
       // amazon.com but `hasTargetInCart` couldn't find the target —
       // could be Amazon dropped the item silently (oos, region-block,
       // qty cap), redirected us to a checkout/spc step, or showed a
@@ -887,6 +892,7 @@ export async function buyWithFillers(
       // includes the first matched element's tag + href + first 80
       // chars of text, so error-banner selectors below double as
       // "what did Amazon actually say" capture.
+      if (await isUnpackagedRun()) {
       const probe = await probePageDiag(page, {
         // Cart structure / sentinels — answer "did the cart even
         // render", "is anything in it", "did we end up on /spc"
@@ -946,6 +952,7 @@ export async function buyWithFillers(
           cid,
         );
       }
+      } // end isUnpackagedRun gate
       return {
         ok: false,
         stage: 'cart_verify',
