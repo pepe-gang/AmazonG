@@ -882,19 +882,56 @@ export async function buyWithFillers(
       // could be Amazon dropped the item silently (oos, region-block,
       // qty cap), redirected us to a checkout/spc step, or showed a
       // captcha/signin wall. The probe counts cover all of these.
+      //
+      // probePageDiag returns `{count, sample}` per selector — `sample`
+      // includes the first matched element's tag + href + first 80
+      // chars of text, so error-banner selectors below double as
+      // "what did Amazon actually say" capture.
       const probe = await probePageDiag(page, {
+        // Cart structure / sentinels — answer "did the cart even
+        // render", "is anything in it", "did we end up on /spc"
         active_cart: '[data-name="Active Cart"]',
         target_href: `a[href*="/dp/${targetAsin ?? '__none__'}"]`,
         cart_count: '#nav-cart-count, .nav-cart-count',
         empty_cart_heading: '#sc-active-cart h2, .sc-cart-page-message',
-        signin_form: 'form#ap_signin_form, input#ap_email',
-        captcha: 'form[action*="validateCaptcha"], #captchacharacters',
         spc_marker: 'input[name="placeYourOrder1"]',
         page_headings: 'h1, h2',
+        // What DID land in the cart — first item's title + price.
+        // When `target_href` count is 0 but `cart_first_item_title`
+        // has a sample, Amazon swapped our target for something else
+        // (rare). When both are 0 the cart is genuinely empty.
+        cart_first_item_title: '.sc-list-item .sc-product-title, [data-name="Active Cart"] .a-truncate, .sc-product-title',
+        cart_first_item_price: '.sc-list-item .sc-product-price, .a-price .a-offscreen',
+        // Error banners — text content captured in `sample`. Catches
+        // "We weren't able to add this item to your cart", quantity
+        // caps, region restrictions, OOS-since-PDP, etc.
+        cart_error_banner: '#cart-error-popover, #cart-warnings, .a-alert-error',
+        cart_error_content: '.a-alert-content, .a-alert-heading',
+        sc_warning: '.sc-alert, .sc-error-message, .sc-alert-content',
+        qty_limit_msg: '.sc-quantity-warning, [data-cy="cart-error-message"]',
+        regional_block: '#a-popover-Locked, .a-popover-modal-content',
+        // Auth / bot challenge — different failure mode that landed
+        // us on a non-cart page
+        signin_form: 'form#ap_signin_form, input#ap_email',
+        captcha: 'form[action*="validateCaptcha"], #captchacharacters',
+        bot_check: 'form[action*="errors/validateCaptcha"], #captcha-error',
       }).catch(() => null);
       logger.warn(
         'step.fillerBuy.cart.targetMissing.probe',
-        { targetAsin, url: page.url(), probe },
+        {
+          targetAsin,
+          // The URL we ACTUALLY landed on after goto(CART_URL) — a
+          // redirect to /errors/* or /ap/signin shows up here.
+          landedUrl: page.url(),
+          // httpTarget result so we know which fallback path got us
+          // here (committed/not-committed/error reason).
+          httpFallbackReason: httpTarget.kind === 'committed' ? null : httpTarget.reason,
+          httpFallbackStatus:
+            httpTarget.kind !== 'committed' && httpTarget.status != null
+              ? httpTarget.status
+              : null,
+          probe,
+        },
         cid,
       );
       const snap = await captureDebugSnapshot(
