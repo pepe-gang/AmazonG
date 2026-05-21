@@ -773,6 +773,64 @@ export async function buyWithFillers(
         .first()
         .click({ timeout: 10_000 });
     } catch (err) {
+      // Dev-mode diagnostic capture — we hit BOTH fallback paths
+      // (HTTP-add returned not-committed AND #buy-now-button click
+      // threw). That's a meaningful PDP-state failure: we have a page
+      // we couldn't ATC and couldn't Buy Now. Without HTML + selector
+      // visibility we can't tell apart:
+      //   - missing Buy Now button (Amazon hid it; OOS / unavailable
+      //     for this account; variation locked; cart-only product)
+      //   - selector drift (button still there but different id/name)
+      //   - signin or captcha interstitial we didn't detect
+      //   - regional/prime restriction page
+      // Probe is always-on (cheap). captureDebugSnapshot is dev-only.
+      const probe = await probePageDiag(page, {
+        buy_now_canonical: '#buy-now-button',
+        buy_now_alt_submit: 'input[name="submit.buy-now"]',
+        buy_now_modal: '#bbop-modal-buy-now',
+        buy_now_one_click: '#oneClickBuyButton',
+        add_to_cart_canonical: '#add-to-cart-button',
+        add_to_cart_alt: 'input[name="submit.add-to-cart"]',
+        product_title: '#productTitle',
+        availability: '#availability',
+        out_of_stock_msg: '#outOfStock, #availability .a-color-price, #availability .a-color-state',
+        prime_badge: '#priceBadging_feature_div, .a-icon-prime',
+        price_visible: '#corePriceDisplay_desktop_feature_div, #priceblock_ourprice, #priceblock_dealprice',
+        variation_unavailable: '#variation_color_name .a-color-state, #variation_size_name .a-color-state',
+        signin_form: 'form#ap_signin_form, input#ap_email',
+        captcha: 'form[action*="validateCaptcha"], #captchacharacters',
+        item_unavailable_alert: '#outOfStock, .a-alert-content, #unqualifiedBuyBox',
+        used_only_box: '#usedAccordionRow, #newAccordionRow',
+        cart_redirect_marker: '#nav-cart-count',
+      }).catch(() => null);
+      logger.error(
+        'step.fillerBuy.buyNow.click.failed',
+        {
+          targetAsin,
+          url: page.url(),
+          httpFallbackReason: httpTarget.reason,
+          ...(httpTarget.status != null ? { httpStatus: httpTarget.status } : {}),
+          clickError: String(err),
+          probe,
+        },
+        cid,
+      );
+      // Dev-only HTML + PNG + (probe-already-logged-above) capture so
+      // a future investigator can open the exact PDP we couldn't buy
+      // from. captureDebugSnapshot gates on NODE_ENV — production
+      // installs write nothing.
+      const snap = await captureDebugSnapshot(
+        page,
+        opts.debugDir,
+        'buy_now_click_fail',
+      );
+      if (snap) {
+        logger.info(
+          'step.fillerBuy.buyNow.click.failed.snapshot',
+          { png: snap.pngPath, html: snap.htmlPath },
+          cid,
+        );
+      }
       return {
         ok: false,
         stage: 'buy_now_click',
