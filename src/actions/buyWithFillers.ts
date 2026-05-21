@@ -693,23 +693,6 @@ export async function buyWithFillers(
     cid,
   );
 
-  // Launch the pre-buy order-history snapshot concurrently with the
-  // filler search + ATC work below. The snapshot navigates a tab to
-  // /order-history; the filler work is HTTP-only via context.request
-  // (no tab nav, no shared resource), so the two overlap cleanly.
-  // Awaited just before SPC entry — by then the filler batch is done
-  // and the snapshot is usually already resolved. `.catch` collapses
-  // any rejection to null, matching the function's internal failure
-  // path; downstream fetchOrderIdsForAsins handles null via the
-  // legacy ASIN-walker.
-  const preBuyOrderIdsPromise: Promise<string[] | null> =
-    snapshotOrderHistoryIds(
-      page,
-      cid,
-      logger,
-      opts.recentOrderIds ?? [],
-    ).catch(() => null);
-
   // 3. Add target to cart. Two-tier path:
   //
   //    1. HTTP-add fast path — same /cart/add-to-cart/ref=... endpoint
@@ -1009,12 +992,12 @@ export async function buyWithFillers(
   //
   //      Returns null on snapshot failure — `fetchOrderIdsForAsins`
   //      falls back to the legacy ASIN-walk scanner when null.
-  //
-  //   The snapshot was launched in parallel right after cart.ready (see
-  //   the launch site for parallelism rationale). By now the HTTP-only
-  //   filler batch is done; the snapshot is usually already resolved
-  //   so this await is near-zero on the happy path.
-  const preBuyOrderIds = await preBuyOrderIdsPromise;
+  const preBuyOrderIds = await snapshotOrderHistoryIds(
+    page,
+    cid,
+    logger,
+    opts.recentOrderIds ?? [],
+  );
 
   // 6. Enter checkout directly. /checkout/entry/cart?proceedToCheckout=1
   //    is the URL Amazon's BYG ("Need anything else?") "Continue to
