@@ -359,6 +359,10 @@ function normalizeJob(raw: unknown): AutoGJob | null {
     // Default false on missing/non-bool — pre-feature BG deployments don't
     // send this field, and the safe default is to enforce the cap.
     bypassPriceCheck: typeof j.bypassPriceCheck === 'boolean' ? j.bypassPriceCheck : false,
+    // Default false on missing/non-bool — pre-v0.13.75 BG deployments
+    // don't send this field, and the safe default is to enforce the
+    // Prime-badge check.
+    bypassPrimeCheck: typeof j.bypassPrimeCheck === 'boolean' ? j.bypassPrimeCheck : false,
   };
 }
 

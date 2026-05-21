@@ -147,4 +147,61 @@ describe('verifyProductDetailed', () => {
     expect(primeStep?.pass).toBe(false);
     expect(primeStep?.reason).toBe('not_prime');
   });
+
+  // Bypass Prime check: when the BG Trigger panel sets bypassPrimeCheck
+  // on the job, the worker passes `requirePrime: false` and the
+  // not_prime failure is suppressed. The prime step doesn't run at all.
+  describe('bypassPrimeCheck (requirePrime=false) behavior', () => {
+    it('passes when isPrime=false and requirePrime=false', () => {
+      const report = verifyProductDetailed(info({ isPrime: false }), {
+        ...defaults,
+        requirePrime: false,
+      });
+      expect(report.ok).toBe(true);
+      // Prime step is emitted as skipped (pass:true, skipped:true) —
+      // mirrors how other disabled checks render in the report.
+      const primeStep = report.steps.find((s) => s.name === 'prime');
+      expect(primeStep?.pass).toBe(true);
+      expect(primeStep?.skipped).toBe(true);
+    });
+
+    it('passes when isPrime=null and requirePrime=false', () => {
+      // Static parser couldn't determine Prime status (the false-negative
+      // case bypassPrimeCheck exists for). With the bypass on, this is
+      // treated as a pass instead of failing.
+      const report = verifyProductDetailed(info({ isPrime: null }), {
+        ...defaults,
+        requirePrime: false,
+      });
+      expect(report.ok).toBe(true);
+      const primeStep = report.steps.find((s) => s.name === 'prime');
+      expect(primeStep?.pass).toBe(true);
+      expect(primeStep?.skipped).toBe(true);
+    });
+
+    it('still fails on other constraints (oos) even when Prime bypass is on', () => {
+      // The bypass is narrow — it only skips the Prime step. Other gates
+      // (in-stock, condition, etc.) still fire normally.
+      const report = verifyProductDetailed(
+        info({ isPrime: false, inStock: false }),
+        { ...defaults, requirePrime: false },
+      );
+      expect(report.ok).toBe(false);
+      expect(report.reason).toBe('oos');
+    });
+
+    it('contrast: same product fails with requirePrime=true', () => {
+      const failing = verifyProductDetailed(info({ isPrime: false }), {
+        ...defaults,
+        requirePrime: true,
+      });
+      const passing = verifyProductDetailed(info({ isPrime: false }), {
+        ...defaults,
+        requirePrime: false,
+      });
+      expect(failing.ok).toBe(false);
+      expect(failing.reason).toBe('not_prime');
+      expect(passing.ok).toBe(true);
+    });
+  });
 });
