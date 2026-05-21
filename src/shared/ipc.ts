@@ -369,6 +369,21 @@ export type Settings = {
      */
     surgicalCashbackRecovery?: boolean;
   };
+  /**
+   * Whether the cashback-gate recovery is allowed to toggle the
+   * account's saved-address name suffix between "(BG1)" and "(BG2)"
+   * (or to append "(BG1)" the first time). When false, a buy that
+   * misses the floor fails immediately at `cashback_gate` instead of
+   * spending 8-15s rewriting the address and re-rendering /spc.
+   * Useful when:
+   *   - the account-deal pair is structurally ineligible (so the
+   *     toggle can't recover) and the time is wasted, OR
+   *   - the user manages the (BG1)/(BG2) suffix manually on Amazon
+   *     and doesn't want AmazonG mutating it.
+   * Defaults to true — preserve the existing recovery behavior so
+   * upgrades don't silently disable it.
+   */
+  bgNameToggleEnabled: boolean;
 };
 
 /**

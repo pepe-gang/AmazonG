@@ -32,6 +32,11 @@ type BuyOptions = {
    *  Set on the BG manual Trigger panel as "Bypass price check". Default
    *  false (enforce the cap). Independent of requireMinCashback. */
   bypassPriceCheck?: boolean;
+  /** Whether the cashback recovery is allowed to invoke
+   *  `toggleBGNameAndRetry` on a missed gate. False = skip the inline
+   *  toggle and fail with the original `cashback_gate` reason. Mirrors
+   *  the global Settings → Accounts checkbox. Default true. */
+  bgNameToggleEnabled?: boolean;
   maxPrice: number | null;
   allowedAddressPrefixes: string[];
   /** The account's BG receiving address. When checkout lands on the
@@ -606,6 +611,14 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       pass: gate.kind === 'pass',
     });
     if (gate.kind === 'fail') {
+      // Operator opt-out of the BG1/BG2 toggle recovery (Settings →
+      // Accounts). When disabled, fail fast at cashback_gate with the
+      // gate's original reason instead of mutating the saved-address
+      // name. `undefined` keeps the legacy behavior.
+      if (opts.bgNameToggleEnabled === false) {
+        step('step.buy.cashback.toggle.disabled', { reason: 'setting_off' });
+        return fail('cashback_gate', gate.reason);
+      }
       // Dry-run still runs the BG1/BG2 toggle (it's part of the workflow we
       // need to verify). The ONLY thing dry-run skips is the final Place
       // Order click. Saved-address mutations are intentional.

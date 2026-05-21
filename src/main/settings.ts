@@ -50,6 +50,12 @@ const DEFAULTS: Settings = {
   // on per-profile time so first-load behavior is unchanged for
   // anyone who never customised the time.
   chaseAutoRedeemTime: '15:00',
+  // BG1/BG2 address-name toggle for cashback recovery — on by default
+  // so existing installs behave the same as before this setting
+  // existed. Operators on dial it off via Settings → Accounts when the
+  // toggle is wasted time (structurally-ineligible account/deal pairs)
+  // or when they want to manage the suffix manually on Amazon.
+  bgNameToggleEnabled: true,
 };
 
 function filePath(): string {
