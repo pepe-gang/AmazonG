@@ -2758,6 +2758,69 @@ export async function runForProfile(
       // without it. Fall back to reason, then to a generic message.
       const error = (report.detail ?? report.reason ?? 'verification failed').replace(/\.\s*$/, '');
       logger.error('step.verify.fail', { jobId: job.id, profile, reason: report.reason }, cid);
+      // Diagnostic capture for `oos` failures (the path Amazon's
+      // non-standard availability text like "Available to ship in
+      // 1-2 days" lands on — see classifyInStock in amazonProduct.ts).
+      // The classifier only recognizes "in stock" / "out of stock" /
+      // "currently unavailable" / "temporarily out of stock"; anything
+      // else falls back to ATC/Buy-Now presence, and if neither button
+      // is visible at scrape time we report oos with Amazon's raw text
+      // as the user-visible reason. To fix the classifier we need to
+      // see which availability variants Amazon shows in the wild —
+      // this probe + dev-only HTML capture gives us that signal.
+      if (report.reason === 'oos') {
+        const oosProbe = await probePageDiag(page, {
+          availability_block: '#availability',
+          availability_color_state: '#availability .a-color-state, #availability .a-color-success, #availability .a-color-price',
+          availability_inside_buybox: '#availabilityInsideBuyBox_feature_div, #buybox-availability',
+          add_to_cart_visible: '#add-to-cart-button',
+          buy_now_visible: '#buy-now-button',
+          buy_now_alt_submit: 'input[name="submit.buy-now"]',
+          atc_alt_submit: 'input[name="submit.add-to-cart"]',
+          out_of_stock_indicator: '#outOfStock',
+          unqualified_buybox: '#unqualifiedBuyBox',
+          delivery_promise: '#deliveryBlockMessage, #mir-layout-DELIVERY_BLOCK, [data-csa-c-delivery-time]',
+          backorder_msg: '.a-color-state, .a-color-attainable',
+          product_title: '#productTitle',
+          variation_locked: '#variation_size_name .a-color-state, #variation_color_name .a-color-state',
+          signin_form: 'form#ap_signin_form, input#ap_email',
+          captcha: 'form[action*="validateCaptcha"], #captchacharacters',
+        }).catch(() => null);
+        logger.warn(
+          'step.verify.oos.probe',
+          {
+            jobId: job.id,
+            profile,
+            availabilityText: info.availabilityText,
+            inStockFlag: info.inStock,
+            isPrimeFlag: info.isPrime,
+            priceText: info.priceText,
+            url: page.url(),
+            probe: oosProbe,
+          },
+          cid,
+        );
+        // Dev-only HTML+PNG capture so an investigator can open the
+        // exact PDP that triggered the oos. captureDebugSnapshot gates
+        // on NODE_ENV — production installs write nothing.
+        const oosSnap = await captureDebugSnapshot(
+          page,
+          deps.debugDir,
+          'verify_oos',
+        );
+        if (oosSnap) {
+          logger.info(
+            'step.verify.oos.snapshot',
+            {
+              jobId: job.id,
+              profile,
+              png: oosSnap.pngPath,
+              html: oosSnap.htmlPath,
+            },
+            cid,
+          );
+        }
+      }
       await maybeSnapshot(error, page, attemptId, session, deps, cid, { jobId: job.id, profile });
       // signed_out is the canonical action_required trigger from the
       // verify pipeline — anything else is a product-side issue and stays
