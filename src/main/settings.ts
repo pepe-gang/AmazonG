@@ -56,11 +56,14 @@ const DEFAULTS: Settings = {
   // toggle is wasted time (structurally-ineligible account/deal pairs)
   // or when they want to manage the suffix manually on Amazon.
   bgNameToggleEnabled: true,
-  // Redis pub/sub push (Path C migration, Phase 0). Off by default
-  // so ship-as-v0.13.78 is dark — no behavior change vs v0.13.77
-  // unless the operator opts in via Settings → Accounts. See
-  // docs/migration/redis-pub-sub-push.md in the BetterBG repo.
-  useRedisPush: false,
+  // Redis pub/sub push (Path C migration, Phase 3). On by default
+  // as of v0.13.79 after Phase 2 soak validated sub-100ms wakes and
+  // the safety-net 10s Postgres poll remains active as defense in
+  // depth. Users on saved settings keep their existing value; only
+  // fresh installs pick up this default. Operators can flip off via
+  // Settings → Accounts → "Use Redis push" if Upstash has issues.
+  // See docs/migration/redis-pub-sub-push.md in the BetterBG repo.
+  useRedisPush: true,
 };
 
 function filePath(): string {

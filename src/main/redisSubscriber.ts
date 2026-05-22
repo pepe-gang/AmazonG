@@ -120,9 +120,19 @@ export async function start(deps: RedisSubscriberDeps): Promise<void> {
     lazyConnect: false,
     keepAlive: KEEP_ALIVE_MS,
     maxRetriesPerRequest: null,
-    enableOfflineQueue: false,
     connectTimeout: 5_000,
     autoResubscribe: true,
+    // enableOfflineQueue MUST stay at default (true). The SUBSCRIBE
+    // command lands before the TLS handshake completes; offline-queue
+    // buffers it until the socket is writable. With it off we get
+    // "Stream isn't writeable" errors on every fresh start.
+    //
+    // The per-user ACL grants only SUBSCRIBE/PSUBSCRIBE/PING/QUIT,
+    // not INFO — so ioredis's default ready-check (which sends INFO
+    // to detect server role + state) fails with NOPERM. Disabling it
+    // is safe for a sub-only client: the SUBSCRIBE call still
+    // confirms the channel binding succeeded.
+    enableReadyCheck: false,
     retryStrategy: (times) => Math.min(times * 200, 30_000),
   });
 
