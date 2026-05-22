@@ -203,7 +203,18 @@ export class StreamingScheduler {
     // strikes a balance: fast enough to keep idle workers fed
     // when a single new job appears mid-flight, while keeping
     // BG load modest (~30 req/min vs ~12 req/min at 5s).
-    const NO_JOB_SLEEP_MS = 2_000;
+    // Idle-poll interval — only fires when a full burst-claim cycle
+    // came back EMPTY (queue is drained). Bumped from 2s to 10s on
+    // 2026-05-21 to cut Vercel Function Invocations + Observability
+    // Events ~5×; for 2 PCs running 24/7 this is the dominant cost
+    // line. Queue-drain throughput is unaffected — bursts of up to
+    // `cap * 3` parallel claims still fire instantly the moment the
+    // buffer has room AND BG has jobs, so a queue of 30 still drains
+    // in one burst-loop, not 30 × 10s. Only effect: when you trigger
+    // a brand-new job while the worker is sleeping, worst-case
+    // pickup latency goes from 2s to 10s. Avg 5s. Invisible against
+    // the 60-90s per-buy wall-clock.
+    const NO_JOB_SLEEP_MS = 10_000;
     // Eligibility / error backoff stays at 5s — these are "wait for a
     // user action / wait for BG to recover" cases, not "wait for the
     // next job to be ready". No reason to hammer BG when no profile
