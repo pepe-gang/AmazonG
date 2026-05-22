@@ -118,6 +118,15 @@ export type BGClient = {
   readonly baseUrl: string;
   me(): Promise<IdentityInfo>;
   claimJob(): Promise<AutoGJob | null>;
+  /** Fetch the Redis pub/sub credentials for this user. Returns null
+   *  when BG's Redis-push feature is disabled (REDIS_NOTIFY_ENABLED=
+   *  false) or provisioning failed. AmazonG falls back to polling
+   *  cleanly on null. See docs/migration/redis-pub-sub-push.md. */
+  getRedisToken(): Promise<{
+    url: string;
+    channel: string;
+    staleInstanceWarning: boolean;
+  } | null>;
   reportStatus(jobId: string, report: JobStatusReport): Promise<void>;
   /** Report a successful Chase auto-redeem so BG raises an in-app
    *  notification (+ web push) showing the redeemed amount. */
@@ -404,12 +413,74 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
     },
 
     async claimJob() {
-      const wrapped = await request<{ job: unknown }>(
+      // instanceId for the duplicate-instance detect+warn flow on BG.
+      // Older BG ignores the body field. Lazy-import to avoid pulling
+      // Electron into non-Electron contexts.
+      let instanceId: string | undefined;
+      try {
+        const m = await import('../main/instanceId.js');
+        instanceId = m.getInstanceId();
+      } catch {
+        // Non-Electron context (tests) — skip the instanceId.
+      }
+      const body = instanceId ? { instanceId } : {};
+      const wrapped = await request<{
+        job: unknown;
+        staleInstanceWarning?: boolean;
+      }>(
         '/api/autog/jobs/claim',
-        { method: 'POST', body: JSON.stringify({}) },
+        { method: 'POST', body: JSON.stringify(body) },
         true,
       );
+      // staleInstanceWarning is observed in main process; emit log
+      // here so it shows up in worker logs even without renderer.
+      if (wrapped?.staleInstanceWarning) {
+        console.warn(
+          '[bg.claimJob] staleInstanceWarning — another AmazonG instance appears active for this user',
+        );
+      }
       return normalizeJob(wrapped?.job);
+    },
+
+    async getRedisToken() {
+      let instanceId: string | undefined;
+      try {
+        const m = await import('../main/instanceId.js');
+        instanceId = m.getInstanceId();
+      } catch {
+        // ignore
+      }
+      try {
+        const res = await request<{
+          url: string;
+          channel: string;
+          staleInstanceWarning?: boolean;
+        }>(
+          '/api/autog/redis-token',
+          {
+            method: 'POST',
+            body: JSON.stringify(instanceId ? { instanceId } : {}),
+          },
+          true,
+        );
+        if (!res) return null;
+        return {
+          url: res.url,
+          channel: res.channel,
+          staleInstanceWarning: res.staleInstanceWarning === true,
+        };
+      } catch (err) {
+        // BG with REDIS_NOTIFY_ENABLED=false returns 404 — that's not
+        // an error from the client's perspective; just means push is
+        // off. Return null so the caller falls back to polling.
+        if (
+          err instanceof BGApiError &&
+          (err.status === 404 || err.status === 503)
+        ) {
+          return null;
+        }
+        throw err;
+      }
     },
 
     async reportStatus(jobId, report) {
