@@ -66,6 +66,7 @@ export function AccountsView({
         <AutoBuyTogglePanel profiles={profiles} />
         <BuyWithFillersPanel profiles={profiles} />
         <BgNameTogglePanel />
+        <RedisPushPanel />
         <HeadlessTogglePanel profiles={profiles} />
       </div>
       {/* Cards panel sits OUTSIDE the worker-locked block — the
@@ -814,6 +815,49 @@ function BgNameTogglePanel() {
         <label
           className="flex items-center gap-2 cursor-pointer"
           title={on ? 'BG1/BG2 toggle recovery enabled' : 'Toggle recovery disabled — cashback misses fail fast'}
+        >
+          <Switch
+            checked={on}
+            onCheckedChange={() => void toggle()}
+            disabled={busy}
+          />
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {on ? 'On' : 'Off'}
+          </span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function RedisPushPanel() {
+  const { settings, update, busy } = useSettings();
+  if (!settings) return null;
+  // Default off — the migration ships dark (Phase 0). Operator opts
+  // in explicitly per the rollout plan.
+  const on = settings.useRedisPush === true;
+  const toggle = async () => {
+    await update({ useRedisPush: !on });
+  };
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Use Redis push (experimental)</div>
+          <div className="prefix-sub">
+            When on, the worker subscribes to BetterBG&apos;s Redis
+            &quot;job-ready&quot; channel and wakes the instant a new
+            job is created instead of polling every 10s. Drops pickup
+            latency to under 100ms and cuts Vercel invocations
+            dramatically. Requires Better-BuyingGroup to have
+            REDIS_NOTIFY_ENABLED on; otherwise the worker silently
+            falls back to polling. Takes effect on the next worker
+            Start.
+          </div>
+        </div>
+        <label
+          className="flex items-center gap-2 cursor-pointer"
+          title={on ? 'Redis push enabled' : 'Polling at 10s'}
         >
           <Switch
             checked={on}

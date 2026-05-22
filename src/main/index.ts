@@ -6,6 +6,8 @@ import { createBGClient, type ServerPurchase } from '../bg/client.js';
 import { addAmazonAddress, fetchAmazonAddress } from '../actions/addAddress.js';
 import type { BGAddress } from '../shared/types.js';
 import { startWorker, type WorkerHandle } from '../workflows/pollAndScrape.js';
+import * as redisSubscriber from './redisSubscriber.js';
+import { signalWake } from './redisWakeSignal.js';
 import { startBgRelay } from './bgRelay.js';
 import { addLogSink, logger } from '../shared/logger.js';
 import {
@@ -1242,6 +1244,30 @@ async function startWorkerNow(): Promise<void> {
   });
   lastError = null;
   broadcastStatus();
+
+  // Path C: start the Redis pub/sub subscriber if the user has
+  // opted in. Failure is non-fatal — the scheduler's idle wait
+  // race still works; the wake side just never fires.
+  if (settings.useRedisPush === true) {
+    await redisSubscriber
+      .start({
+        fetchTokenAndChannel: () => bg.getRedisToken(),
+        onWake: () => signalWake(),
+        onDuplicateInstanceWarning: () => {
+          logger.warn('worker.duplicate_instance.detected', {
+            note: 'Another AmazonG instance appears active for this user. The atomic claim prevents duplicate orders, but two instances polling the same queue waste resources. Stop one to clean up.',
+          });
+        },
+        onStatus: (s, detail) =>
+          logger.info('worker.redisSubscriber.status', { status: s, detail }),
+      })
+      .catch((err) => {
+        logger.warn('worker.redisSubscriber.start_failed', {
+          error: err instanceof Error ? err.message : String(err),
+          note: 'Falling back to polling. Safety-net poll still active.',
+        });
+      });
+  }
 }
 
 app.whenReady().then(async () => {
@@ -1399,6 +1425,7 @@ async function closeAllChromiumSessions(): Promise<void> {
     } catch (err) {
       logger.warn('worker.stop.error', { error: String(err) });
     }
+    await redisSubscriber.stop().catch(() => undefined);
     worker = null;
   }
   if (hadWorker) {
@@ -1513,6 +1540,7 @@ function registerIpcHandlers(): void {
     if (worker) {
       await worker.stop();
       worker = null;
+      await redisSubscriber.stop().catch(() => undefined);
       await abortPendingAttempts('stopped by user (disconnect)');
     }
     // Stop the relay loop so we don't keep polling /claim with a
@@ -1544,6 +1572,7 @@ function registerIpcHandlers(): void {
     if (!worker) return;
     await worker.stop();
     worker = null;
+    await redisSubscriber.stop().catch(() => undefined);
     await abortPendingAttempts('stopped by user');
     broadcastStatus();
   });

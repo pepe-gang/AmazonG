@@ -47,6 +47,7 @@ import type {
 } from './pollAndScrape.js';
 import { buildBuyJobReport, syntheticFailedResult } from './jobReport.js';
 import { recordPlacedOrderEvent } from '../main/placedOrderLedger.js';
+import { waitForWake } from '../main/redisWakeSignal.js';
 
 type Phase = 'buy' | 'verify' | 'fetch_tracking' | 'cancel_fillers';
 
@@ -289,7 +290,24 @@ export class StreamingScheduler {
       );
       const claimed = claimedRaw.filter((j): j is AutoGJob => j !== null);
       if (claimed.length === 0) {
-        await sleep(NO_JOB_SLEEP_MS, () => this.running);
+        // Idle wait — race the legacy fixed sleep against the Redis
+        // pub/sub wake signal. When useRedisPush is OFF the wake
+        // signal never fires (main never starts the subscriber) and
+        // we behave exactly as before: a flat 10s poll.
+        //
+        // When useRedisPush is ON the wake signal fires the instant
+        // BG publishes a job-ready message — pickup latency drops
+        // to <100ms. The flat sleep here becomes the safety-net
+        // (catches anything the pub/sub missed). We keep it at
+        // NO_JOB_SLEEP_MS rather than bumping to 60s because the
+        // race-wins case (wake fires) is what we expect to dominate;
+        // the sleep is just insurance for a brief subscriber
+        // hiccup. If we ever want a longer safety net (push-only
+        // accounts), this becomes a tunable.
+        await Promise.race([
+          waitForWake(),
+          sleep(NO_JOB_SLEEP_MS, () => this.running),
+        ]);
         continue;
       }
       await Promise.all(claimed.map((job) => this.processClaimedJob(job)));

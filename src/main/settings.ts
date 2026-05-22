@@ -56,6 +56,11 @@ const DEFAULTS: Settings = {
   // toggle is wasted time (structurally-ineligible account/deal pairs)
   // or when they want to manage the suffix manually on Amazon.
   bgNameToggleEnabled: true,
+  // Redis pub/sub push (Path C migration, Phase 0). Off by default
+  // so ship-as-v0.13.78 is dark — no behavior change vs v0.13.77
+  // unless the operator opts in via Settings → Accounts. See
+  // docs/migration/redis-pub-sub-push.md in the BetterBG repo.
+  useRedisPush: false,
 };
 
 function filePath(): string {
