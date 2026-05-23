@@ -155,16 +155,28 @@ export function buildBuyJobReport(
 }
 
 /**
- * Return the retry class name when every failed profile matches the
- * same retryable class — null otherwise.
+ * Return the retry class name when the failure pattern warrants
+ * an auto-retry — null otherwise.
  *
- *   - "confirm_timeout": every failure's error mentions
- *     "confirmation URL never loaded" (after AmazonG's history-scan
- *     budget was exhausted). MAY have placed; BG-side retry leans on
- *     Amazon's QLA to prevent dups.
- *   - "filler_search": every failure mentions `no_filler_candidates
- *     — search rate-limited across all pools`. Order definitely
- *     didn't place (buy never reached checkout); zero dup risk.
+ *   - "confirm_timeout": EVERY failure mentions "confirmation URL
+ *     never loaded" (after AmazonG's history-scan budget was
+ *     exhausted). Order MAY have placed; the strict `every` gate
+ *     prevents retry on mixed-mode failures where retrying could
+ *     race against an actual placed order on a different account.
+ *     BG-side retry then leans on Amazon's QLA to prevent dups.
+ *
+ *   - "filler_search": ANY failure mentions `no_filler_candidates
+ *     — search rate-limited across all pools`. The filler-search
+ *     path is zero-dup-risk (buy never reaches checkout), AND the
+ *     rate-limit is transient — so it's worth retrying even when
+ *     other profiles failed for unrelated reasons like QLA or OOS
+ *     (those will just re-fail the same way on retry, while the
+ *     filler-search profiles get a second shot).
+ *
+ *   - `overallStatus === "partial"` does NOT count for retries:
+ *     partial means at least one profile succeeded; the deal has
+ *     real orders. Retrying could needlessly hit Amazon QLA on
+ *     the succeeded accounts.
  */
 function pickRetryReason(
   failures: BuildBuyJobReportInput['results'],
@@ -176,10 +188,11 @@ function pickRetryReason(
     (r.error ?? '').toLowerCase().includes('confirmation url never loaded'),
   );
   if (allConfirm) return 'confirm_timeout';
-  const allFiller = failures.every((r) =>
+  // Permissive `some` for filler_search — see comment block above.
+  const anyFiller = failures.some((r) =>
     (r.error ?? '').toLowerCase().includes('no_filler_candidates'),
   );
-  if (allFiller) return 'filler_search';
+  if (anyFiller) return 'filler_search';
   return null;
 }
 

@@ -59,6 +59,13 @@ import {
   looksLikeCartResponse,
   type SearchResultCandidate,
 } from './amazonHttp.js';
+import {
+  evictAsin as fillerCacheEvict,
+  getOrPopulate as fillerCacheGetOrPopulate,
+  populateFromSearch as fillerCachePopulate,
+  type CachedFillerItem,
+  type PoolKey as FillerCachePoolKey,
+} from './fillerCache.js';
 
 type BuyWithFillersOptions = {
   productUrl: string;
@@ -1005,11 +1012,19 @@ export async function buyWithFillers(
     },
     cid,
   );
+  // Thread the target's PDP csrf through so addFillerItems can use the
+  // shared cache fast path (skip Amazon's search endpoint entirely when
+  // a recent cache for this pool exists). Falls back to the search loop
+  // cleanly when the target-add went through the click flow rather than
+  // HTTP — `precomputedCsrf` is just `undefined` in that case.
+  const targetCsrf =
+    httpTarget.kind === 'committed' ? httpTarget.csrf : undefined;
   let fillersResult = await addFillerItems(page, targetAsin, cid, {
     terms: fillerTerms,
     targetCount: fillerTargetCount,
     attemptedAsins: opts.attemptedAsins,
     pool: opts.fillerPool,
+    precomputedCsrf: targetCsrf,
   }, logCtx);
   // In-attempt pool fallback for narrow pools when Amazon rate-limited
   // every search term. Triggers ONLY when:
@@ -1053,6 +1068,7 @@ export async function buyWithFillers(
         targetCount: fillerTargetCount,
         attemptedAsins: opts.attemptedAsins,
         pool: fallbackPool,
+        precomputedCsrf: targetCsrf,
       }, logCtx);
     }
   }
@@ -2120,19 +2136,41 @@ export async function buyWithFillers(
   // propagation lagged past fetchOrderIdsForAsins' internal 15s poll
   // budget (not that the order doesn't exist). Shipping orderId=null
   // here is the root of the "ghost order" bug — the placed order
-  // becomes untraceable. Give it ONE more full pass after an 8s
-  // settle before we accept "unknown".
-  if (orderMatches.length === 0 && cartAsins.length > 0) {
+  // becomes untraceable.
+  //
+  // Retry budget (extended 2026-05-23 — see incident notes):
+  //   pass 1: initial 15s internal poll
+  //   pass 2: 20s settle + 15s internal poll  (total ~50s)
+  //   pass 3: 15s settle + 15s internal poll  (total ~80s)
+  //
+  // History: v0.13.x had a single 8s/15s retry (~38s total). After the
+  // filler-cache shipped (v0.13.86) median target→place latency dropped
+  // ~4s, exposing a propagation race where Amazon's order history
+  // hadn't reflected the new order yet at the 38s mark. 4 of 22 buys
+  // on the first cache run hit `orderid.notfound` despite the order
+  // genuinely being placed (purchaseId captured + no confirm timeout).
+  // The 80s budget covers Amazon's observed worst-case propagation
+  // (~60-70s under load) with headroom.
+  //
+  // Cost: zero on successful captures (retry path only fires when the
+  // first scan was empty). Worst case adds ~50s to a failing buy that
+  // was already heading toward action_required.
+  const RETRY_SETTLES_MS = [20_000, 15_000];
+  for (let pass = 0; pass < RETRY_SETTLES_MS.length; pass++) {
+    if (orderMatches.length > 0 || cartAsins.length === 0) break;
+    const settle = RETRY_SETTLES_MS[pass]!;
     logger.warn(
       'step.fillerBuy.placed.orderid.retry',
       {
         targetAsin,
         cartAsinsCount: cartAsins.length,
-        note: 'first post-buy scan empty — re-scanning order history after an 8s settle',
+        pass: pass + 1,
+        settleMs: settle,
+        note: `post-buy scan empty — re-scanning order history (pass ${pass + 1}/${RETRY_SETTLES_MS.length}) after ${settle}ms settle`,
       },
       cid,
     );
-    await page.waitForTimeout(8_000);
+    await page.waitForTimeout(settle);
     orderMatches = await fetchOrderIdsForAsins(
       page,
       cartAsins,
@@ -4677,7 +4715,16 @@ async function searchFillerCandidatesViaHttp(
 }
 
 export type PostAddResult =
-  | { kind: 'committed'; status: number; tookMs: number }
+  | {
+      kind: 'committed';
+      status: number;
+      tookMs: number;
+      /** The `anti-csrftoken-a2z` value extracted from the PDP we just
+       *  posted against. Stable for the rest of the BrowserContext
+       *  session; reusable by `addFillerItems` to commit fillers in a
+       *  batch POST without doing a separate search-for-csrf. */
+      csrf: string;
+    }
   | { kind: 'failed'; reason: string; status?: number };
 
 export type AddViaHttpOptions = {
@@ -4865,7 +4912,7 @@ export async function addFillerViaHttp(
       status: postRes.status(),
     };
   }
-  return { kind: 'committed', status: postRes.status(), tookMs };
+  return { kind: 'committed', status: postRes.status(), tookMs, csrf };
 }
 
 
@@ -4882,7 +4929,19 @@ type FillerOpts = {
    *  (`isBlockedByPool`) — e.g. eero pool excludes Echo / Fire TV.
    *  Undefined / 'general' = no blocklist. */
   pool?: FillerPool;
+  /** Optional CSRF token harvested by the caller's prior PDP fetch
+   *  (typically the target-add via `addFillerViaHttp`). When present,
+   *  `addFillerItems` may serve filler ASINs from the shared cache
+   *  without doing ANY search — using this csrf for the batch POST.
+   *  When absent, the function falls into the existing search loop
+   *  to harvest a fresh csrf along with candidates. */
+  precomputedCsrf?: string;
 };
+
+/** Map FillerOpts.pool (FillerPool | undefined) → cache key. */
+function cacheKeyForPool(pool: FillerPool | undefined): FillerCachePoolKey {
+  return pool ?? 'default';
+}
 
 /**
  * Search a few filler terms for cart-add candidates and commit them all
@@ -4933,6 +4992,85 @@ async function addFillerItems(
   const terms = shuffle(fillerOpts.terms ?? FILLER_SEARCH_TERMS);
   const seen = fillerOpts.attemptedAsins ?? new Set<string>();
   if (targetAsin) seen.add(targetAsin);
+  const poolKey = cacheKeyForPool(fillerOpts.pool);
+
+  // 0. SHARED CACHE FAST PATH.
+  //    When the caller provides `precomputedCsrf` (target item's PDP
+  //    csrf, harvested by addFillerViaHttp at line ~750), we can serve
+  //    fillers from the cache without ever hitting Amazon's search
+  //    endpoint. The cache is process-shared across all Amazon profiles
+  //    on this worker — populated by the first miss in the hour, reused
+  //    by every subsequent buy across every account.
+  //
+  //    Without precomputedCsrf we MUST run a live search anyway (the
+  //    batch POST needs a csrf), so the fast path is gated. Other
+  //    invariants we preserve:
+  //      - excludeAsins = seen (target + retry-attempted) ensures we
+  //        never pick the target or a known-failed ASIN.
+  //      - cache write-time blocklist (per pool) means cached items
+  //        already pass `isBlockedByPool`. We trust that and don't
+  //        re-filter on read.
+  //      - On batch-POST failure we evict the non-committed ASINs
+  //        from cache so future buys don't pick them.
+  if (fillerOpts.precomputedCsrf && terms.length > 0) {
+    const cacheResult = await fillerCacheGetOrPopulate(
+      poolKey,
+      targetCount,
+      seen,
+      async () => {
+        const fresh = await runFillerSearchLoop(
+          mainPage,
+          terms,
+          fillerOpts.pool,
+          targetCount,
+          seen,
+          cid,
+          logger,
+        );
+        // Populate cache with EVERY fresh candidate (not just the
+        // targetCount we'd need now) — future buys benefit from the
+        // wider population.
+        return fresh.candidates.map((c) => ({
+          asin: c.asin,
+          offerListingId: c.offerListingId,
+          title: c.title,
+          price: c.price,
+        }));
+      },
+    );
+    if (cacheResult.kind === 'hit' || cacheResult.kind === 'miss') {
+      if (cacheResult.items.length > 0) {
+        for (const it of cacheResult.items) seen.add(it.asin);
+        const result = await postBatchAndEvictOnFailure(
+          mainPage,
+          cacheResult.items,
+          fillerOpts.precomputedCsrf,
+          poolKey,
+          cid,
+          logger,
+        );
+        logger.info(
+          'step.fillerBuy.fillers.cacheServe',
+          {
+            pool: poolKey,
+            via: cacheResult.kind,
+            requested: cacheResult.items.length,
+            committed: result.asins.length,
+          },
+          cid,
+        );
+        return {
+          added: result.asins.length,
+          asins: result.asins,
+          metaRefreshHits: 0,
+          termsTried: 0,
+        };
+      }
+    }
+    // cache reported unavailable (or empty miss) — fall through to the
+    // existing search loop, which has its own browser-fallback path
+    // and detailed diagnostics.
+  }
 
   // 1. Walk through search terms until we have enough fresh candidates.
   //    Most of the time one term is enough (~50 results per page; even
@@ -5068,12 +5206,122 @@ async function addFillerItems(
     return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };
   }
 
+  // Populate the shared cache with the candidates we just searched. Even
+  // though THIS buy already has its picks, future buys (this account or
+  // any other account on this worker) skip the search entirely as long
+  // as the cache stays fresh and non-empty.
+  fillerCachePopulate(
+    poolKey,
+    candidates.map((c) => ({
+      asin: c.asin,
+      offerListingId: c.offerListingId,
+      title: c.title,
+      price: c.price,
+    })),
+  );
+
   // 2. Single batch POST. Phantom-commit guard runs against the
   //    response body — we count every ASIN that appears as
   //    `data-asin="..."` in the cart-page HTML Amazon returns.
   const items = candidates.map((c) => ({ asin: c.asin, offerListingId: c.offerListingId }));
-  const body = buildBatchCartAddBody(csrf, items, { clientName: SEARCH_CART_ADD_CLIENT_NAME });
+  const batchResult = await postBatchAndEvictOnFailure(
+    mainPage,
+    items,
+    csrf,
+    poolKey,
+    cid,
+    logger,
+  );
+  return {
+    added: batchResult.asins.length,
+    asins: batchResult.asins,
+    metaRefreshHits,
+    termsTried: terms.length,
+  };
+}
 
+/**
+ * Run the existing per-term search loop and return ALL candidates that
+ * passed the dedup+blocklist filters. Used by both:
+ *   - the cache fast-path's searchFn (when cache misses)
+ *   - the slow-path's inline search (when no precomputedCsrf available)
+ *
+ * Deliberately does NOT terminate early on hitting `targetCount` — the
+ * cache benefits from harvesting every available candidate, not just the
+ * subset this one buy needs.
+ */
+async function runFillerSearchLoop(
+  mainPage: Page,
+  terms: readonly string[],
+  pool: FillerPool | undefined,
+  targetCount: number,
+  seen: Set<string>,
+  cid: string | undefined,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  logger: any,
+): Promise<{ candidates: SearchResultCandidate[]; metaRefreshHits: number }> {
+  // Match the existing throttle pacing so cache-leader searches don't
+  // accidentally trip Amazon's edge rate-limiter on their own.
+  const INTER_TERM_DELAY_MS = 400;
+  const candidates: SearchResultCandidate[] = [];
+  let metaRefreshHits = 0;
+  // The cache wants a wide population — keep going past targetCount up
+  // to a generous cap that fits in one search page (~50). PICK_BUFFER
+  // (in fillerCache) requires more than targetCount net of excludes to
+  // count as a hit, so populating exactly targetCount would near-
+  // guarantee a re-search on the very next buy.
+  const HARVEST_CAP = Math.min(50, targetCount * 4);
+  for (let termIdx = 0; termIdx < terms.length; termIdx++) {
+    const term = terms[termIdx]!;
+    if (candidates.length >= HARVEST_CAP) break;
+    if (termIdx > 0) {
+      await new Promise((r) => setTimeout(r, INTER_TERM_DELAY_MS));
+    }
+    const { candidates: found, diag } = await searchFillerCandidatesViaHttp(
+      mainPage,
+      term,
+      pool,
+    );
+    if (diag.metaRefresh) metaRefreshHits++;
+    if (found.length === 0) continue;
+    for (const c of found) {
+      if (candidates.length >= HARVEST_CAP) break;
+      if (seen.has(c.asin)) continue;
+      if (isBlockedByPool(pool, c.title)) continue;
+      candidates.push(c);
+    }
+  }
+  logger.info(
+    'step.fillerBuy.fillers.cacheLeaderSearch',
+    {
+      pool: pool ?? 'general',
+      termsScanned: terms.length,
+      harvested: candidates.length,
+      metaRefreshHits,
+    },
+    cid,
+  );
+  return { candidates, metaRefreshHits };
+}
+
+/**
+ * Issue the batch cart-add POST and reconcile the phantom-commit
+ * guard. Any ASIN we requested but didn't see in the response is
+ * evicted from the shared cache so future buys don't re-pick it.
+ *
+ * Returns the same shape as the inline batch-POST it replaces.
+ */
+async function postBatchAndEvictOnFailure(
+  mainPage: Page,
+  items: ReadonlyArray<{ asin: string; offerListingId: string } | CachedFillerItem>,
+  csrf: string,
+  poolKey: FillerCachePoolKey,
+  cid: string | undefined,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  logger: any,
+): Promise<{ asins: string[] }> {
+  const slim = items.map((c) => ({ asin: c.asin, offerListingId: c.offerListingId }));
+  const body = buildBatchCartAddBody(csrf, slim, { clientName: SEARCH_CART_ADD_CLIENT_NAME });
   const t0 = Date.now();
   let res;
   try {
@@ -5090,44 +5338,61 @@ async function addFillerItems(
   } catch (err) {
     logger.warn(
       'step.fillerBuy.fillers.batch.threw',
-      { error: String(err).slice(0, 120), candidates: items.length },
+      { error: String(err).slice(0, 120), candidates: slim.length },
       cid,
     );
-    return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };
+    // Whole-batch failure — evict every requested ASIN so a likely
+    // expired/throttled cache doesn't keep handing them out.
+    for (const it of slim) fillerCacheEvict(poolKey, it.asin);
+    return { asins: [] };
   }
   const tookMs = Date.now() - t0;
   if (!res.ok()) {
     logger.warn(
       'step.fillerBuy.fillers.batch.httpError',
-      { status: res.status(), candidates: items.length, tookMs },
+      { status: res.status(), candidates: slim.length, tookMs },
       cid,
     );
-    return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };
+    for (const it of slim) fillerCacheEvict(poolKey, it.asin);
+    return { asins: [] };
   }
   const respText = await res.text().catch(() => '');
   if (!looksLikeCartResponse(respText)) {
     logger.warn(
       'step.fillerBuy.fillers.batch.shapeMismatch',
-      { status: res.status(), candidates: items.length, tookMs },
+      { status: res.status(), candidates: slim.length, tookMs },
       cid,
     );
-    return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };
+    for (const it of slim) fillerCacheEvict(poolKey, it.asin);
+    return { asins: [] };
   }
   const committed = asinsCommittedInResponse(
     respText,
-    items.map((i) => i.asin),
+    slim.map((i) => i.asin),
   );
+  // Per-ASIN eviction: anything we asked for but didn't get back is
+  // either OOS, region-restricted for this account, or otherwise
+  // unbuyable. Evict so the cache's hit rate stays meaningful.
+  const committedSet = new Set(committed);
+  let evicted = 0;
+  for (const it of slim) {
+    if (!committedSet.has(it.asin)) {
+      fillerCacheEvict(poolKey, it.asin);
+      evicted++;
+    }
+  }
   logger.info(
     'step.fillerBuy.fillers.batch.ok',
     {
-      requested: items.length,
+      requested: slim.length,
       committed: committed.length,
+      ...(evicted > 0 ? { evictedFromCache: evicted } : {}),
       tookMs,
       status: res.status(),
     },
     cid,
   );
-  return { added: committed.length, asins: committed, metaRefreshHits, termsTried: terms.length };
+  return { asins: committed };
 }
 
 /**
