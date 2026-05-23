@@ -262,6 +262,14 @@ export type JobStatusReport = {
    *  bucket — Amazon won't ship → no tracking will arrive → don't show
    *  it as Success on the back of a passing verify alone. */
   paymentRevisionRequired?: boolean;
+  /** Retry-chain signal. True when this failure is one the operator
+   *  opted to auto-retry once. BG side enforces the cap (retryDepth < 1)
+   *  and only fires when the job rollup reaches terminal "failed", so
+   *  per-attempt reports during a multi-attempt filler run can safely
+   *  set this without racing in-flight attempts. */
+  requeueEligible?: boolean;
+  /** Companion to `requeueEligible` — names which class triggered it. */
+  retryReason?: 'confirm_timeout' | 'filler_search';
   /** Outcome of the verify-phase `cancelNonTargetItems` call against the
    *  target order. Reported when `runVerifyFillerCleanup` actually ran
    *  (i.e. target survived verify as 'active' and filler-mode buy). BG
