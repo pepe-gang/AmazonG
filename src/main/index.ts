@@ -8,6 +8,7 @@ import type { BGAddress } from '../shared/types.js';
 import { startWorker, type WorkerHandle } from '../workflows/pollAndScrape.js';
 import * as redisSubscriber from './redisSubscriber.js';
 import { signalWake } from './redisWakeSignal.js';
+import { runAccountConfigTickOnce } from '../workflows/accountConfigOrchestrator.js';
 import { startBgRelay } from './bgRelay.js';
 import { addLogSink, logger } from '../shared/logger.js';
 import {
@@ -132,6 +133,11 @@ if (existsSync(bundledBrowsers)) {
 
 let mainWindow: BrowserWindow | null = null;
 let worker: WorkerHandle | null = null;
+// Module-level interval for the account-config orchestrator's safety-
+// net poll. Started in startWorkerNow, cleared on every worker.stop
+// site (mirrors the redisSubscriber.stop pattern). Null when no
+// worker is running.
+let accountConfigPollInterval: NodeJS.Timeout | null = null;
 let identity: IdentityInfo | null = null;
 let apiKey: string | null = null;
 let lastError: string | null = null;
@@ -1253,11 +1259,51 @@ async function startWorkerNow(): Promise<void> {
   // Path C: start the Redis pub/sub subscriber if the user has
   // opted in. Failure is non-fatal — the scheduler's idle wait
   // race still works; the wake side just never fires.
+  // Account-config orchestrator deps — uses the SAME openSession
+  // primitive the rest of the worker does. closeSession is best-
+  // effort; we don't track sessions here because the orchestrator
+  // opens its own one-shot session per profile and closes the page
+  // when it's done (matches scrapeProduct / quick-actions pattern).
+  const accountConfigDeps = {
+    bg,
+    openSession: async (email: string, headless: boolean) => {
+      const session = await openSession(email, {
+        userDataRoot: profileDir(),
+        headless,
+      });
+      return { context: session.context };
+    },
+    closeSession: async (_email: string) => {
+      /* no-op — page closes after each per-profile run */
+    },
+  };
+  // Safety-net polling: 30s tick. The wake handler below catches the
+  // common case (user clicks Apply → Redis push fires within ~100ms),
+  // and this 30s sweep catches push-off / missed-wake cases.
+  if (accountConfigPollInterval) clearInterval(accountConfigPollInterval);
+  accountConfigPollInterval = setInterval(() => {
+    void runAccountConfigTickOnce(accountConfigDeps).catch((err) => {
+      logger.warn('accountConfig.tick.error', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 30_000);
+
   if (settings.useRedisPush === true) {
     await redisSubscriber
       .start({
         fetchTokenAndChannel: () => bg.getRedisToken(),
-        onWake: () => signalWake(),
+        onWake: () => {
+          signalWake();
+          // Also kick the account-config orchestrator. The internal
+          // `inFlight` lock skips a redundant tick if we're already
+          // mid-dispatch from the 30s sweep.
+          void runAccountConfigTickOnce(accountConfigDeps).catch((err) => {
+            logger.warn('accountConfig.wake.error', {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        },
         onDuplicateInstanceWarning: () => {
           logger.warn('worker.duplicate_instance.detected', {
             note: 'Another AmazonG instance appears active for this user. The atomic claim prevents duplicate orders, but two instances polling the same queue waste resources. Stop one to clean up.',
@@ -1431,6 +1477,10 @@ async function closeAllChromiumSessions(): Promise<void> {
       logger.warn('worker.stop.error', { error: String(err) });
     }
     await redisSubscriber.stop().catch(() => undefined);
+    if (accountConfigPollInterval) {
+      clearInterval(accountConfigPollInterval);
+      accountConfigPollInterval = null;
+    }
     worker = null;
   }
   if (hadWorker) {
@@ -1546,6 +1596,10 @@ function registerIpcHandlers(): void {
       await worker.stop();
       worker = null;
       await redisSubscriber.stop().catch(() => undefined);
+    if (accountConfigPollInterval) {
+      clearInterval(accountConfigPollInterval);
+      accountConfigPollInterval = null;
+    }
       await abortPendingAttempts('stopped by user (disconnect)');
     }
     // Stop the relay loop so we don't keep polling /claim with a
@@ -1578,6 +1632,10 @@ function registerIpcHandlers(): void {
     await worker.stop();
     worker = null;
     await redisSubscriber.stop().catch(() => undefined);
+    if (accountConfigPollInterval) {
+      clearInterval(accountConfigPollInterval);
+      accountConfigPollInterval = null;
+    }
     await abortPendingAttempts('stopped by user');
     broadcastStatus();
   });

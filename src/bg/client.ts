@@ -128,6 +128,36 @@ export type BGClient = {
     staleInstanceWarning: boolean;
   } | null>;
   reportStatus(jobId: string, report: JobStatusReport): Promise<void>;
+  /** Account-config bulk dispatch (e.g., Set Amazon Day). Claims one
+   *  queued AccountConfigJob for this user, atomically. Returns null
+   *  when nothing is queued — the worker just goes back to its main
+   *  scheduler loop. */
+  claimAccountConfigJob(): Promise<{
+    id: string;
+    kind: "set_amazon_day" | string;
+    payload: unknown;
+  } | null>;
+  /** Report a per-Amazon-account result on an in-flight account-config
+   *  job. Call once per profile. BG merges into AccountConfigJob.perAccount. */
+  reportAccountConfigPerAccount(
+    jobId: string,
+    payload: {
+      email: string;
+      result: {
+        status: "ok" | "failed" | "skipped" | "noop_already_set";
+        before?: string | null;
+        after?: string | null;
+        reason?: string;
+        detail?: string;
+      };
+    },
+  ): Promise<void>;
+  /** Mark an account-config job terminal (rollup is computed server-side
+   *  from perAccount). `error` is for the bail-before-any-account case. */
+  reportAccountConfigFinal(
+    jobId: string,
+    payload?: { error?: string | null },
+  ): Promise<void>;
   /** Report a successful Chase auto-redeem so BG raises an in-app
    *  notification (+ web push) showing the redeemed amount. */
   reportChaseRedeem(payload: {
@@ -488,6 +518,30 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
         method: 'POST',
         body: JSON.stringify(report),
       });
+    },
+
+    async claimAccountConfigJob() {
+      const res = await request<{
+        job: { id: string; kind: string; payload: unknown } | null;
+      }>('/api/autog/account-config/claim', { method: 'POST' });
+      return res?.job ?? null;
+    },
+
+    async reportAccountConfigPerAccount(jobId, payload) {
+      await request<{ ok: true }>(
+        `/api/autog/account-config/${encodeURIComponent(jobId)}/status`,
+        { method: 'POST', body: JSON.stringify(payload) },
+      );
+    },
+
+    async reportAccountConfigFinal(jobId, payload) {
+      await request<{ ok: true }>(
+        `/api/autog/account-config/${encodeURIComponent(jobId)}/status`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ final: true, error: payload?.error ?? null }),
+        },
+      );
     },
 
     async reportChaseRedeem(payload) {
