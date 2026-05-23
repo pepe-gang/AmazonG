@@ -42,9 +42,14 @@ export type AccountConfigDeps = {
    *  worker is shutting down or a profile errored. Matches
    *  closeAndForgetSession in pollAndScrape. */
   closeSession: (email: string) => Promise<void>;
+  /** Where dev-only HTML/PNG snapshots land when a per-account
+   *  attempt hits an unexpected page state (e.g., "no manage button"
+   *  could mean not-Prime OR an Amazon layout change — the snapshot
+   *  lets us tell which after the fact). Same dir the buy flow uses. */
+  debugDir?: string;
 };
 
-const MAX_PARALLEL = 5;
+const MAX_PARALLEL = 4;
 
 /** Module-level lock so a wake + a 30s tick don't both run the same
  *  job simultaneously. The BG-side claim is also atomic (FOR UPDATE
@@ -164,13 +169,22 @@ async function runForOneProfile(
 ): Promise<void> {
   const cid = `accountConfig/${jobId}/${profile.email}`;
   let result: SetAmazonDayResult;
-  let page = null as Awaited<ReturnType<BrowserContext["newPage"]>> | null;
+  let context: BrowserContext | null = null;
   try {
-    const { context } = await deps.openSession(profile.email, profile.headless);
-    page = await context.newPage();
+    const opened = await deps.openSession(profile.email, profile.headless);
+    context = opened.context;
+    // Reuse the persistent context's initial about:blank page instead
+    // of opening a new tab on top of it. Avoids the "two tabs, one
+    // permanently blank" UX. Fall back to newPage() in the (rare)
+    // case the initial page is missing — e.g., another caller already
+    // closed it.
+    const existingPages = context.pages();
+    const page =
+      existingPages.length > 0 ? existingPages[0] : await context.newPage();
     result = await setAmazonDayForProfile(page, day, {
       profile: profile.email,
       correlationId: cid,
+      debugDir: deps.debugDir,
     });
   } catch (err) {
     result = {
@@ -179,7 +193,10 @@ async function runForOneProfile(
       detail: err instanceof Error ? err.message.slice(0, 200) : String(err),
     };
   } finally {
-    await page?.close().catch(() => undefined);
+    // Close the entire context so the Chromium window goes away.
+    // Without this every per-account run leaves a blank-tab window
+    // sitting on the desktop until the next worker restart.
+    await context?.close().catch(() => undefined);
   }
 
   logger.info(
@@ -242,9 +259,15 @@ export function mapResult(result: SetAmazonDayResult): {
       ? { status: "noop_already_set", before: result.before, after: result.after }
       : { status: "ok", before: result.before, after: result.after };
   }
-  // "skipped" classes for the dashboard — not_prime and sign_in_required
-  // aren't user-correctable from this dispatch, they're per-account state.
-  if (result.reason === "not_prime" || result.reason === "sign_in_required") {
+  // "skipped" classes for the dashboard — not_prime, sign_in_required,
+  // bot_challenge aren't user-correctable from this dispatch, they're
+  // per-account state the operator needs to address separately
+  // (re-sign-in, wait for WAF cookie to be set on the next attempt).
+  if (
+    result.reason === "not_prime" ||
+    result.reason === "sign_in_required" ||
+    result.reason === "bot_challenge"
+  ) {
     return { status: "skipped", reason: result.reason, before: result.before ?? null };
   }
   return {

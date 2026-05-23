@@ -1266,23 +1266,22 @@ async function startWorkerNow(): Promise<void> {
   // when it's done (matches scrapeProduct / quick-actions pattern).
   const accountConfigDeps = {
     bg,
-    // FORCE headless for account-config one-shots. The per-account
-    // p.headless flag is intended for buy-flow debugging (operator
-    // wants to watch a single account complete a checkout). Account-
-    // config dispatches like Set Amazon Day are background API calls
-    // with no debugging value — showing N Chromium windows when the
-    // user clicks "Apply to all" is bad UX. Override regardless of
-    // the per-account toggle.
-    openSession: async (email: string, _ignoredHeadless: boolean) => {
+    // Honor per-account `p.headless`: matches every other worker flow.
+    // If an operator has an account set to "visible" for debugging,
+    // the Amazon Day dispatcher should show the window too. The
+    // visible-window-pile-up is a per-account setting issue, not an
+    // orchestrator concern.
+    openSession: async (email: string, headless: boolean) => {
       const session = await openSession(email, {
         userDataRoot: profileDir(),
-        headless: true,
+        headless,
       });
       return { context: session.context };
     },
     closeSession: async (_email: string) => {
       /* no-op — page closes after each per-profile run */
     },
+    debugDir: join(app.getPath('userData'), 'debug-screenshots'),
   };
   // Safety-net polling: 30s tick. The wake handler below catches the
   // common case (user clicks Apply → Redis push fires within ~100ms),

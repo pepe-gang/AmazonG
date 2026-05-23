@@ -65,6 +65,18 @@ describe("extractAmazonDayPayload", () => {
       marketplaceId: "ATVPDKIKX0DER",
     });
   });
+
+  it("captures the real 13-digit addressId (regression: prior \\d{1,4} truncated and fell back to '0', breaking every account whose real addressId wasn't literally 0)", () => {
+    const html = `
+      "customerId":"AJ23BUEAP3W5C"
+      "regionId":"97230"
+      "addressId":"1731738134303"
+      "marketplaceId":"ATVPDKIKX0DER"
+    `;
+    const result = extractAmazonDayPayload(html);
+    expect(result.addressId).toBe("1731738134303");
+    expect(result.customerId).toBe("AJ23BUEAP3W5C");
+  });
 });
 
 describe("readCurrentDayFromHtml (saved fixture)", () => {
@@ -122,6 +134,12 @@ describe("mapResult (orchestrator → BG)", () => {
     expect(
       mapResult({ ok: false, reason: "sign_in_required" }),
     ).toMatchObject({ status: "skipped", reason: "sign_in_required" });
+  });
+
+  it("maps bot_challenge → 'skipped' (WAF didn't auto-solve; cookie now warms next try)", () => {
+    expect(
+      mapResult({ ok: false, reason: "bot_challenge" }),
+    ).toMatchObject({ status: "skipped", reason: "bot_challenge" });
   });
 
   it("maps HTTP / DOM failures → 'failed' with reason + detail", () => {
