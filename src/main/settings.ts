@@ -22,6 +22,7 @@ const DEFAULTS: Settings = {
   snapshotOnFailure: false,
   snapshotGroups: [],
   buyWithFillers: false,
+  fillerCount: 8,
   // One eero attempt by default — no retries. Users add attempts (and
   // pick each one's pool) via the Filler Attempts UI.
   fillerAttempts: ['eero'],

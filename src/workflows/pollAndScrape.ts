@@ -98,6 +98,13 @@ export type Deps = {
    * time) so we don't hammer Amazon with parallel filler sessions.
    */
   buyWithFillers: boolean;
+  /**
+   * Target filler count for non-eero pools. User-configurable in
+   * Settings → Accounts → Buy-with-Fillers (default 8). Eero stays
+   * hardcoded at 5 — its smaller candidate pool can't reliably
+   * produce more.
+   */
+  fillerCount: number;
   minCashbackPct: number;
   allowedAddressPrefixes: string[];
   /**
@@ -748,6 +755,7 @@ async function runFillerBuyWithRetries(
       resolveCardNumber: deps.resolveCardNumber,
       dryRun: deps.buyDryRun,
       fillerPool: effectivePool,
+      fillerCount: deps.fillerCount,
       attemptedAsins,
       recentOrderIds,
       // Only the first attempt can reuse the verify-phase scrape — by

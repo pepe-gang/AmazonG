@@ -1138,6 +1138,10 @@ async function startWorkerNow(): Promise<void> {
     // address prefixes work today).
     bgNameToggleEnabled: settings.bgNameToggleEnabled !== false,
     bypassPrimeCheck: settings.bypassPrimeCheck === true,
+    fillerCount:
+      typeof settings.fillerCount === "number" && settings.fillerCount > 0
+        ? settings.fillerCount
+        : 8,
     // Hot-reload parallelism settings per claim — Settings page
     // changes (Parallel buys + Filler add-to-cart speed) take effect
     // on the next deal without requiring a worker restart.

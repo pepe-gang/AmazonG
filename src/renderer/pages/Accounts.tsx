@@ -62,13 +62,10 @@ export function AccountsView({
           handleLockedClick();
         }}
       >
-        <EnabledTogglePanel profiles={profiles} />
-        <AutoBuyTogglePanel profiles={profiles} />
         <BuyWithFillersPanel profiles={profiles} />
         <BgNameTogglePanel />
         <RedisPushPanel />
         <PrimeCheckTogglePanel />
-        <HeadlessTogglePanel profiles={profiles} />
       </div>
       {/* Cards panel sits OUTSIDE the worker-locked block — the
           "Verify your card" challenge fires mid-buy, so a card must
@@ -480,171 +477,136 @@ function CardDialog(props: {
   );
 }
 
-function HeadlessTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
-  const { settings, busy, update } = useSettings();
-  const [applying, setApplying] = useState(false);
-  if (!settings) return null;
-  const on =
-    profiles.length > 0
-      ? profiles.every((p) => p.headless !== false)
-      : settings.headless;
-  const toggle = async () => {
-    const next = !on;
-    setApplying(true);
+/**
+ * Compact "master toggle" bar at the top of the Amazon Accounts list.
+ * Replaces the three full-width panels (Enabled / AutoBuy / Headless)
+ * that previously sat in the global settings block — same cascade
+ * semantics, just placed where the operator looks when bulk-flipping
+ * every account.
+ *
+ * Returns null when there are no profiles (nothing to cascade to).
+ */
+function BulkActionsRow({ profiles }: { profiles: AmazonProfile[] }) {
+  const { busy, settings, update } = useSettings();
+  const [applying, setApplying] = useState<null | "enabled" | "autoBuy" | "headless">(null);
+  if (profiles.length === 0) return null;
+
+  const enabledOn = profiles.every((p) => p.enabled);
+  const enabledOffCount = profiles.filter((p) => !p.enabled).length;
+  const autoBuyOn = profiles.every((p) => p.autoBuy);
+  const autoBuyOffCount = profiles.filter((p) => !p.autoBuy).length;
+  const headlessOn = profiles.every((p) => p.headless !== false);
+  const headlessOffCount = profiles.filter((p) => p.headless === false).length;
+
+  const cascade = async (
+    kind: "enabled" | "autoBuy" | "headless",
+    next: boolean,
+  ) => {
+    setApplying(kind);
     try {
       for (const p of profiles) {
-        await window.autog.profilesSetHeadless(p.email, next);
+        if (kind === "enabled") {
+          await window.autog.profilesSetEnabled(p.email, next);
+        } else if (kind === "autoBuy") {
+          await window.autog.profilesSetAutoBuy(p.email, next);
+        } else {
+          await window.autog.profilesSetHeadless(p.email, next);
+        }
       }
-      await update({ headless: next });
+      // Mirror to the global setting where one exists, so brand-new
+      // profiles inherit the same default. Only `headless` has a
+      // companion global setting today.
+      if (kind === "headless" && settings) {
+        await update({ headless: next });
+      }
     } finally {
-      setApplying(false);
+      setApplying(null);
     }
   };
-  const anyOff = profiles.some((p) => p.headless === false);
+
   return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Headless mode</div>
-          <div className="prefix-sub">
-            When enabled, every account runs Amazon checkouts in hidden Chromium windows. Flip
-            any individual account below to Visible and this master switch turns off
-            automatically. Takes effect on the next worker Start.
-            {anyOff && profiles.length > 0 && (
-              <>
-                {' '}
-                <span className="muted">
-                  ({profiles.filter((p) => p.headless === false).length} of {profiles.length}{' '}
-                  currently visible)
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Headless: all accounts run hidden' : 'At least one account is set to Visible'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={() => void toggle()}
-            disabled={busy || applying}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
-            {on ? 'Headless' : 'Visible'}
-          </span>
-        </label>
-      </div>
+    <div className="bulk-actions-row flex items-center gap-3 flex-wrap rounded-md border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-xs">
+      <span className="text-foreground/60 font-medium">All accounts:</span>
+      <BulkSwitch
+        label="Participation"
+        on={enabledOn}
+        offCount={enabledOffCount}
+        total={profiles.length}
+        applying={applying === "enabled"}
+        disabled={busy}
+        onClick={() => void cascade("enabled", !enabledOn)}
+        title={
+          enabledOn
+            ? "All accounts enabled — worker uses all on Start"
+            : `${enabledOffCount} of ${profiles.length} disabled — click to enable all`
+        }
+      />
+      <BulkSwitch
+        label="Auto Buy"
+        on={autoBuyOn}
+        offCount={autoBuyOffCount}
+        total={profiles.length}
+        applying={applying === "autoBuy"}
+        disabled={busy}
+        onClick={() => void cascade("autoBuy", !autoBuyOn)}
+        title={
+          autoBuyOn
+            ? "All accounts claim new buys"
+            : `${autoBuyOffCount} of ${profiles.length} skip new buys — click to enable all`
+        }
+      />
+      <BulkSwitch
+        label="Headless"
+        on={headlessOn}
+        offCount={headlessOffCount}
+        total={profiles.length}
+        applying={applying === "headless"}
+        disabled={busy}
+        onClick={() => void cascade("headless", !headlessOn)}
+        title={
+          headlessOn
+            ? "All accounts run hidden Chromium"
+            : `${headlessOffCount} of ${profiles.length} run visible — click to make all hidden`
+        }
+      />
     </div>
   );
 }
 
-function EnabledTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
-  const { busy } = useSettings();
-  const [applying, setApplying] = useState(false);
-  if (profiles.length === 0) return null;
-  const on = profiles.every((p) => p.enabled);
-  const offCount = profiles.filter((p) => !p.enabled).length;
-  const toggle = async () => {
-    const next = !on;
-    setApplying(true);
-    try {
-      for (const p of profiles) {
-        await window.autog.profilesSetEnabled(p.email, next);
-      }
-    } finally {
-      setApplying(false);
-    }
-  };
+function BulkSwitch({
+  label,
+  on,
+  offCount,
+  total,
+  applying,
+  disabled,
+  onClick,
+  title,
+}: {
+  label: string;
+  on: boolean;
+  offCount: number;
+  total: number;
+  applying: boolean;
+  disabled: boolean;
+  onClick: () => void;
+  title: string;
+}) {
   return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Account participation</div>
-          <div className="prefix-sub">
-            Master switch — toggle to enable or disable every account at once. Disabled accounts
-            stay signed in but the worker skips them on Start. Flipping an individual account
-            below updates this switch automatically.
-            {offCount > 0 && (
-              <>
-                {' '}
-                <span className="muted">
-                  ({offCount} of {profiles.length} currently disabled)
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'All accounts enabled' : 'At least one account is disabled'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={() => void toggle()}
-            disabled={busy || applying}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
-            {on ? 'All on' : `${profiles.length - offCount}/${profiles.length}`}
-          </span>
-        </label>
-      </div>
-    </div>
-  );
-}
-
-function AutoBuyTogglePanel({ profiles }: { profiles: AmazonProfile[] }) {
-  const { busy } = useSettings();
-  const [applying, setApplying] = useState(false);
-  if (profiles.length === 0) return null;
-  const on = profiles.every((p) => p.autoBuy);
-  const offCount = profiles.filter((p) => !p.autoBuy).length;
-  const toggle = async () => {
-    const next = !on;
-    setApplying(true);
-    try {
-      for (const p of profiles) {
-        await window.autog.profilesSetAutoBuy(p.email, next);
-      }
-    } finally {
-      setApplying(false);
-    }
-  };
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Auto Buy</div>
-          <div className="prefix-sub">
-            Master switch — toggle Auto Buy on or off for every account at once. Accounts
-            with Auto Buy on claim new buy jobs; accounts with it off skip new buys but
-            still verify and track existing orders. Ignored while an account is Disabled.
-            Flipping an individual account below updates this switch automatically.
-            {offCount > 0 && (
-              <>
-                {' '}
-                <span className="muted">
-                  ({offCount} of {profiles.length} currently off)
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Auto Buy on — all accounts' : 'At least one account has Auto Buy off'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={() => void toggle()}
-            disabled={busy || applying}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[56px]">
-            {on ? 'All on' : `${profiles.length - offCount}/${profiles.length}`}
-          </span>
-        </label>
-      </div>
-    </div>
+    <label
+      className="flex items-center gap-2 cursor-pointer"
+      title={title}
+    >
+      <Switch
+        checked={on}
+        disabled={disabled || applying}
+        onCheckedChange={() => onClick()}
+      />
+      <span className="font-medium text-foreground/80">{label}</span>
+      <span className="text-foreground/40">
+        {on ? "All on" : `${total - offCount}/${total}`}
+      </span>
+    </label>
   );
 }
 
@@ -726,12 +688,40 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
         </label>
       </div>
 
-      {/* Filler-attempt plan. Each row sets one attempt's pool; the
-          number of rows is the retry count. Hidden entirely when the
-          master Filler toggle is off — it has no effect there. */}
+      {/* Filler count + attempt plan. Both hidden when the master Filler
+          toggle is off — they have no effect there. */}
       {on && (
       <div className="mt-3 pt-3 border-t border-white/[0.04]">
         <div className="text-xs font-medium text-foreground/80">
+          Filler Count
+        </div>
+        <div className="text-[11px] text-muted-foreground leading-snug mt-0.5 max-w-md">
+          Number of random filler items added alongside the target.
+          Higher = better disguise but slower checkout + higher risk
+          of <code>no_filler_candidates</code> when Amazon rate-limits
+          search. Default 8. (The Eero pool keeps a hardcoded 5
+          regardless — its candidate pool is smaller.)
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            type="number"
+            min={1}
+            max={20}
+            step={1}
+            value={settings.fillerCount ?? 8}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              if (!Number.isFinite(n)) return;
+              void update({ fillerCount: Math.max(1, Math.min(20, n)) });
+            }}
+            disabled={busy}
+            className="bg-transparent border border-white/10 rounded px-2 py-1 text-xs text-foreground/90 w-20"
+          />
+          <span className="text-[11px] text-muted-foreground">
+            fillers per buy (1–20)
+          </span>
+        </div>
+        <div className="text-xs font-medium text-foreground/80 mt-4">
           Filler Attempts
         </div>
         <div className="text-[11px] text-muted-foreground leading-snug mt-0.5 max-w-md">
@@ -1297,6 +1287,8 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
         </div>
       )}
 
+      <BulkActionsRow profiles={profiles} />
+
       {profiles.length === 0 && !adding ? (
         <div className="accounts-empty-page">
           <div className="empty-icon">
@@ -1534,22 +1526,6 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                         }
                       />
                       <span className="text-xs font-medium text-foreground/80">Headless</span>
-                    </label>
-                    <label
-                      className="flex items-center gap-2 cursor-pointer"
-                      title={
-                        p.buyWithFillers
-                          ? 'Buy-with-Fillers ON for this account — places target alongside ~10 filler items, cancels fillers after verify'
-                          : 'Buy-with-Fillers OFF — this account follows the global setting (or plain Buy Now if global is off too)'
-                      }
-                    >
-                      <Switch
-                        checked={p.buyWithFillers}
-                        onCheckedChange={(v) =>
-                          void window.autog.profilesSetBuyWithFillers(p.email, v)
-                        }
-                      />
-                      <span className="text-xs font-medium text-foreground/80">Fillers</span>
                     </label>
                     {(() => {
                       // Cashback gate — server-side setting on BG, reflected

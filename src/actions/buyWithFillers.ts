@@ -147,6 +147,14 @@ type BuyWithFillersOptions = {
    */
   fillerPool?: FillerPool;
   /**
+   * Override for the target filler count (non-eero pools). When set,
+   * replaces the legacy FILLER_COUNT=8 default. Eero pool is unaffected
+   * — it stays at EERO_FILLER_COUNT=5 because its smaller candidate
+   * pool can't reliably produce more. User-configurable in
+   * Settings → Accounts → Buy-with-Fillers.
+   */
+  fillerCount?: number;
+  /**
    * Set of ASINs the picker must NOT add to cart. Pre-seeded into the
    * dedup state, then mutated by the picker as it goes — callers
    * running a retry loop should pass the SAME Set across attempts so
@@ -980,7 +988,14 @@ export async function buyWithFillers(
   const poolOverride = termsForPool(opts.fillerPool);
   const fillerTerms = poolOverride ?? FILLER_SEARCH_TERMS;
   const useEeroPool = opts.fillerPool === 'eero';
-  const fillerTargetCount = useEeroPool ? EERO_FILLER_COUNT : FILLER_COUNT;
+  // Eero pool stays hardcoded at 5 — its smaller candidate pool
+  // can't reliably produce more. Other pools honor the user's
+  // fillerCount setting (default 8). Clamp to a safe range so a
+  // typo'd 0 / 9999 doesn't produce a no-fillers buy or hammer the
+  // search endpoint.
+  const fillerTargetCount = useEeroPool
+    ? EERO_FILLER_COUNT
+    : Math.max(1, Math.min(20, opts.fillerCount ?? FILLER_COUNT));
   logger.info(
     'step.fillerBuy.fillers.config',
     {

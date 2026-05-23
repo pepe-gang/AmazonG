@@ -253,6 +253,16 @@ export type Settings = {
    */
   buyWithFillers: boolean;
   /**
+   * Number of filler items added to the cart in filler-mode buys
+   * (the non-eero pool path). Default 8 — matches the prior
+   * hardcoded FILLER_COUNT. Higher values disguise the target
+   * better but increase the risk of search rate-limit
+   * (no_filler_candidates) and slow checkout. Eero pool keeps its
+   * hardcoded 5 — its smaller candidate pool can't reliably
+   * produce 8 distinct items.
+   */
+  fillerCount: number;
+  /**
    * Per-attempt filler-pool plan (filler-mode only). The array length
    * is the number of attempts a filler buy makes; each entry is the
    * search-term pool that attempt uses:
