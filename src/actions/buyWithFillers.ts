@@ -2138,24 +2138,25 @@ export async function buyWithFillers(
   // here is the root of the "ghost order" bug — the placed order
   // becomes untraceable.
   //
-  // Retry budget (extended 2026-05-23 — see incident notes):
+  // Retry budget (tuned 2026-05-23 v0.13.87 from real-data signal):
   //   pass 1: initial 15s internal poll
-  //   pass 2: 20s settle + 15s internal poll  (total ~50s)
-  //   pass 3: 15s settle + 15s internal poll  (total ~80s)
+  //   pass 2: 10s settle + 15s internal poll  (total ~40s)
+  //   pass 3: 10s settle + 15s internal poll  (total ~65s)
   //
-  // History: v0.13.x had a single 8s/15s retry (~38s total). After the
-  // filler-cache shipped (v0.13.86) median target→place latency dropped
-  // ~4s, exposing a propagation race where Amazon's order history
-  // hadn't reflected the new order yet at the 38s mark. 4 of 22 buys
-  // on the first cache run hit `orderid.notfound` despite the order
-  // genuinely being placed (purchaseId captured + no confirm timeout).
-  // The 80s budget covers Amazon's observed worst-case propagation
-  // (~60-70s under load) with headroom.
+  // History: v0.13.x had a single 8s/15s retry (~38s total). v0.13.86
+  // extended it to 20s+15s (~80s) after the filler-cache shipped — buys
+  // got ~4s faster which exposed an Amazon order-history propagation
+  // race. Then we examined 100 real buys: 90 succeeded on the first
+  // scan, 0 recovered via the 8s settle retry, 10 still-failed. That
+  // bimodal distribution (fast <20s OR slow >38s) means the SETTLE
+  // length is what matters — Amazon eventually propagates, we just
+  // need to wait long enough total. v0.13.87 tightens the settles to
+  // 10s each: keeps ~65s total wall-clock (well within Amazon's
+  // observed propagation envelope) but shaves 15s off the failure path.
   //
   // Cost: zero on successful captures (retry path only fires when the
-  // first scan was empty). Worst case adds ~50s to a failing buy that
-  // was already heading toward action_required.
-  const RETRY_SETTLES_MS = [20_000, 15_000];
+  // first scan was empty). Worst case adds ~50s to a failing buy.
+  const RETRY_SETTLES_MS = [10_000, 10_000];
   for (let pass = 0; pass < RETRY_SETTLES_MS.length; pass++) {
     if (orderMatches.length > 0 || cartAsins.length === 0) break;
     const settle = RETRY_SETTLES_MS[pass]!;
