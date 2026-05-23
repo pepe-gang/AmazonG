@@ -1266,10 +1266,17 @@ async function startWorkerNow(): Promise<void> {
   // when it's done (matches scrapeProduct / quick-actions pattern).
   const accountConfigDeps = {
     bg,
-    openSession: async (email: string, headless: boolean) => {
+    // FORCE headless for account-config one-shots. The per-account
+    // p.headless flag is intended for buy-flow debugging (operator
+    // wants to watch a single account complete a checkout). Account-
+    // config dispatches like Set Amazon Day are background API calls
+    // with no debugging value — showing N Chromium windows when the
+    // user clicks "Apply to all" is bad UX. Override regardless of
+    // the per-account toggle.
+    openSession: async (email: string, _ignoredHeadless: boolean) => {
       const session = await openSession(email, {
         userDataRoot: profileDir(),
-        headless,
+        headless: true,
       });
       return { context: session.context };
     },
