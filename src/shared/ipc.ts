@@ -385,6 +385,17 @@ export type Settings = {
    */
   bgNameToggleEnabled: boolean;
   /**
+   * Global override for the Prime-badge gate. When true, the worker
+   * skips the visible ✓prime check in `verifyProductDetailed` for
+   * EVERY job, on every account. Composes OR-wise with BG's per-job
+   * `bypassPrimeCheck` flag (either side saying "bypass" = skip).
+   *
+   * Defaults to false (= enforce). Flip on via Settings → Accounts
+   * when the static parser is misreading the Prime badge across the
+   * board and you'd rather buy than fail with `not_prime`.
+   */
+  bypassPrimeCheck: boolean;
+  /**
    * Phase 0 dark gate for the Redis pub/sub push migration (Path C).
    * Default false. When true, the worker uses ioredis to subscribe
    * to BG's "job-ready" channel and the scheduler's idle wait

@@ -109,6 +109,13 @@ export type Deps = {
    */
   bgNameToggleEnabled: boolean;
   /**
+   * Global Prime-badge gate override. When true, every verify call
+   * skips the visible ✓prime check (`requirePrime` is forced to
+   * false in the constraints). Composes OR-wise with BG's per-job
+   * `bypassPrimeCheck`. Defaults to false.
+   */
+  bypassPrimeCheck: boolean;
+  /**
    * Re-read each per-claim from disk so the user can tune Parallel
    * buys in Settings without stopping the worker. Returns the
    * parallel-buy knobs as a struct; we don't pass the whole Settings
@@ -2711,17 +2718,30 @@ export async function runForProfile(
         cid,
       );
     }
-    if (job.bypassPrimeCheck === true) {
+    // Global override composes OR-wise with the BG-side per-job flag
+    // — either side saying "bypass" skips the Prime check. The
+    // worker-wide toggle lives on Settings.bypassPrimeCheck and is
+    // configured in Settings → Accounts (default false).
+    const bypassPrime =
+      job.bypassPrimeCheck === true || deps.bypassPrimeCheck === true;
+    if (bypassPrime) {
       logger.info(
         'step.verify.prime.bypass',
-        { jobId: job.id, profile, reason: 'user_opt_in' },
+        {
+          jobId: job.id,
+          profile,
+          reason:
+            job.bypassPrimeCheck === true
+              ? 'user_opt_in_job'
+              : 'user_opt_in_global',
+        },
         cid,
       );
     }
     const constraints = {
       ...DEFAULT_CONSTRAINTS,
       maxPrice: effectiveMaxPrice,
-      ...(job.bypassPrimeCheck === true ? { requirePrime: false } : {}),
+      ...(bypassPrime ? { requirePrime: false } : {}),
     };
     const enabledChecks = [
       ...(constraints.requireInStock ? ['inStock'] : []),

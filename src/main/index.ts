@@ -1137,6 +1137,7 @@ async function startWorkerNow(): Promise<void> {
     // need to bounce the worker (matches how minCashbackPct and the
     // address prefixes work today).
     bgNameToggleEnabled: settings.bgNameToggleEnabled !== false,
+    bypassPrimeCheck: settings.bypassPrimeCheck === true,
     // Hot-reload parallelism settings per claim — Settings page
     // changes (Parallel buys + Filler add-to-cart speed) take effect
     // on the next deal without requiring a worker restart.

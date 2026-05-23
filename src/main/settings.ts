@@ -56,6 +56,11 @@ const DEFAULTS: Settings = {
   // toggle is wasted time (structurally-ineligible account/deal pairs)
   // or when they want to manage the suffix manually on Amazon.
   bgNameToggleEnabled: true,
+  // Global Prime-badge gate override. False (default) = enforce the
+  // visible ✓prime check before buying. True = skip the check
+  // worker-wide (every account, every job). See ipc.ts for the
+  // full rationale.
+  bypassPrimeCheck: false,
   // Redis pub/sub push (Path C migration, Phase 3). On by default
   // as of v0.13.79 after Phase 2 soak validated sub-100ms wakes and
   // the safety-net 10s Postgres poll remains active as defense in

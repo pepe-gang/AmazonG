@@ -67,6 +67,7 @@ export function AccountsView({
         <BuyWithFillersPanel profiles={profiles} />
         <BgNameTogglePanel />
         <RedisPushPanel />
+        <PrimeCheckTogglePanel />
         <HeadlessTogglePanel profiles={profiles} />
       </div>
       {/* Cards panel sits OUTSIDE the worker-locked block — the
@@ -783,6 +784,55 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
         )}
       </div>
       )}
+    </div>
+  );
+}
+
+function PrimeCheckTogglePanel() {
+  const { settings, update, busy } = useSettings();
+  if (!settings) return null;
+  // Label semantics: switch is "Prime check enabled". On = enforce
+  // (default). Off = skip the badge check worker-wide. Stored as
+  // `bypassPrimeCheck` so the polarity matches BG's per-job flag.
+  const enforced = settings.bypassPrimeCheck !== true;
+  const toggle = async () => {
+    await update({ bypassPrimeCheck: enforced });
+  };
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Prime check</div>
+          <div className="prefix-sub">
+            Enforce Amazon&apos;s visible ✓prime badge before placing
+            an order. On (default) is safe — the worker refuses to
+            buy when the badge is missing. Turn off if the static
+            parser is misreading the badge across the board and
+            you&apos;d rather buy than fail with{' '}
+            <code>not_prime</code>. Takes effect on the next worker
+            Start. Applies to every account; BG&apos;s per-job
+            &quot;Bypass Prime check&quot; still wins for jobs that
+            opt in.
+          </div>
+        </div>
+        <label
+          className="flex items-center gap-2 cursor-pointer"
+          title={
+            enforced
+              ? 'Prime check enforced — orders only when ✓prime badge is visible'
+              : 'Prime check off — buys regardless of Prime badge'
+          }
+        >
+          <Switch
+            checked={enforced}
+            onCheckedChange={() => void toggle()}
+            disabled={busy}
+          />
+          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+            {enforced ? 'On' : 'Off'}
+          </span>
+        </label>
+      </div>
     </div>
   );
 }
