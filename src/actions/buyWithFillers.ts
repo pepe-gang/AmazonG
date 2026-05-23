@@ -154,11 +154,12 @@ type BuyWithFillersOptions = {
    */
   fillerPool?: FillerPool;
   /**
-   * Override for the target filler count (non-eero pools). When set,
-   * replaces the legacy FILLER_COUNT=8 default. Eero pool is unaffected
-   * — it stays at EERO_FILLER_COUNT=5 because its smaller candidate
-   * pool can't reliably produce more. User-configurable in
-   * Settings → Accounts → Buy-with-Fillers.
+   * Override for the target filler count, honored for ALL pools.
+   * Replaces the legacy FILLER_COUNT=8 default. Eero pool's smaller
+   * candidate set (~10 per term) may yield fewer than requested for
+   * high N — the partial-OK path still ships the buy. Clamped to
+   * [1, 20] in the dispatcher. User-configurable in Settings →
+   * Accounts → Buy-with-Fillers.
    */
   fillerCount?: number;
   /**
@@ -512,9 +513,11 @@ function isBlockedByPool(
   return false;
 }
 
-// Eero pool yields ~10 candidates per term under the current filters;
-// 5 fills cleanly with margin.
-const EERO_FILLER_COUNT = 5;
+// EERO_FILLER_COUNT removed 2026-05-23: the eero pool now honors the
+// user's opts.fillerCount setting like every other pool. The hardcoded
+// 5 was a guard against eero's smaller search pool (~10 candidates per
+// term) but it ignored explicit user intent. Partial-OK behavior in
+// addFillerItems handles the under-yield case naturally.
 
 // Inter-term pacing for the filler-search loop. Amazon's edge rate-
 // limiter (INC-2026-05-10) returns a ~2.6KB meta-refresh stub when
@@ -996,23 +999,20 @@ export async function buyWithFillers(
   //    search is worse than a slightly smaller cover.
   //
   // Pool + count picked here so log lines downstream can attribute
-  // results to the active mode. Eero uses a smaller target (~5)
-  // because the search pool only yields ~10 unique items under the
-  // current filters; FILLER_COUNT=8 would guarantee 0-filler buys
-  // after a retry exhausts attemptedAsins (INC-2026-05-10).
-  // amazon-basics + general stay at the historical fixed count since
-  // their search pools are wide enough.
+  // results to the active mode. All pools honor opts.fillerCount;
+  // eero's smaller candidate set (~10/term) leans on the partial-OK
+  // path when N exceeds what the pool can produce — see the
+  // fillerTargetCount comment below.
   const poolOverride = termsForPool(opts.fillerPool);
   const fillerTerms = poolOverride ?? FILLER_SEARCH_TERMS;
-  const useEeroPool = opts.fillerPool === 'eero';
-  // Eero pool stays hardcoded at 5 — its smaller candidate pool
-  // can't reliably produce more. Other pools honor the user's
-  // fillerCount setting (default 8). Clamp to a safe range so a
-  // typo'd 0 / 9999 doesn't produce a no-fillers buy or hammer the
-  // search endpoint.
-  const fillerTargetCount = useEeroPool
-    ? EERO_FILLER_COUNT
-    : Math.max(1, Math.min(20, opts.fillerCount ?? FILLER_COUNT));
+  // Honor opts.fillerCount for ALL pools (clamped to [1,20]). The eero
+  // pool's smaller candidate set (~10 per term) may yield fewer than
+  // requested for high N — existing partial-OK behavior kicks in
+  // (`step.fillerBuy.fillers.partial`) so the buy still ships with
+  // whatever fillers it got. Pre-2026-05-23 this was hardcoded to
+  // EERO_FILLER_COUNT=5 to avoid 0-filler retries; that constraint
+  // moves to the user's setting now.
+  const fillerTargetCount = Math.max(1, Math.min(20, opts.fillerCount ?? FILLER_COUNT));
   logger.info(
     'step.fillerBuy.fillers.config',
     {
