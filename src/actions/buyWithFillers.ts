@@ -2037,10 +2037,29 @@ export async function buyWithFillers(
     const placed = await detectOrderLikelyPlaced(page);
     recoveredFromConfirmTimeout = true;
     confirmTimedOutNoSignal = !placed.likelyPlaced;
+    // QLA-bounce diagnostic: when the 60s confirmation wait expires AND
+    // Amazon has redirected us to /checkout/p/<purchaseId>/itemselect
+    // with the "Sorry, the quantity you requested is no longer
+    // available" banner, the Place Order click was rejected post-hoc
+    // because the item's available qty dropped between our /spc scan
+    // and the click. Default reason "confirmation page never loaded" is
+    // misleading — surface this as the real QLA cause so the user
+    // knows the order didn't place and why.
+    //
+    // Why detect it here rather than recover: chosen explicitly
+    // (2026-05-23) — auto-clicking through with a reduced qty risks
+    // placing at qty=1 when the user wanted 8. Surfacing the real
+    // reason lets BG / the user retry manually with eyes-open.
+    if (confirmTimedOutNoSignal) {
+      const qlaDetail = await detectItemSelectQlaBounce(page).catch(() => null);
+      if (qlaDetail) {
+        confirmFailReason = qlaDetail;
+      }
+    }
     logger.warn(
       'step.fillerBuy.confirm.timeout.recovering',
       {
-        reason: confirmWait.reason,
+        reason: confirmFailReason,
         url: page.url(),
         signal: placed.reason,
         likelyPlaced: placed.likelyPlaced,
@@ -2561,6 +2580,57 @@ export async function buyWithFillers(
  * to the legacy ASIN-walker; degraded behavior but doesn't fail the
  * buy.
  */
+/**
+ * After a confirmation-URL timeout, detect Amazon's "we bounced you back
+ * to /itemselect because your quantity is no longer available" signal.
+ *
+ * Mechanism: Amazon accepts the Place Order POST but then realizes the
+ * requested qty exceeds current availability. Instead of placing, it
+ * redirects to `/checkout/p/<purchaseId>/itemselect?...&referrer=itemselect`
+ * and renders a banner inside `<span class="break-word">Sorry, the
+ * quantity you requested is no longer available. We updated your
+ * quantity to the maximum available.</span>` plus an
+ * `<input name="purchaseLevelMessageIds" value="ItemQuantityUnavailableCVMessage">`
+ * marker. The order never placed.
+ *
+ * Returns a human-readable failure reason when the bounce is detected;
+ * null when the page state doesn't match (the caller keeps the default
+ * "confirmation page never loaded" message). Best-effort — any DOM read
+ * failure returns null so the caller's existing recovery path runs.
+ */
+async function detectItemSelectQlaBounce(
+  page: Page,
+): Promise<string | null> {
+  const url = page.url();
+  if (!/\/checkout\/p\/[^/]+\/itemselect/.test(url)) return null;
+  const sig = await page
+    .evaluate(() => {
+      // The marker input is the most reliable signal — Amazon stamps it
+      // every time the bounce fires regardless of UI re-skins.
+      const marker = document.querySelector(
+        'input[name="purchaseLevelMessageIds"][value*="ItemQuantityUnavailable"]',
+      );
+      if (!marker) return { ok: false as const };
+      // Banner copy for the operator-facing message. Span is shown in
+      // `.break-word` next to the banner; fall back to a generic
+      // string if Amazon ever re-skins the wording.
+      const banner = Array.from(
+        document.querySelectorAll<HTMLElement>('span.break-word, .a-alert-content'),
+      )
+        .map((el) => (el.innerText || '').trim())
+        .find((t) =>
+          /quantity\s+you\s+requested\s+is\s+no\s+longer\s+available/i.test(t),
+        );
+      return { ok: true as const, banner: banner ?? null };
+    })
+    .catch(() => ({ ok: false as const }));
+  if (!sig.ok) return null;
+  const tail = sig.banner
+    ? ` (Amazon: "${sig.banner.slice(0, 200)}")`
+    : '';
+  return `Amazon adjusted quantity at checkout (QLA bounce to /itemselect) — order did not place${tail}`;
+}
+
 async function snapshotOrderHistoryIds(
   page: Page,
   cid: string | undefined,
