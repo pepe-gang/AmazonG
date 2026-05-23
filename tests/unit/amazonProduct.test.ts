@@ -392,6 +392,38 @@ describe('parseAmazonProduct', () => {
     expect(parseAmazonProduct(docOf(htmlNo), 'x').inStock).toBe(false);
   });
 
+  it('inStock=true for "Available to ship in 1-2 days" variants — Amazon uses these for buyable listings with shipping delay (INC 2026-05-23, iPad B0DZ773FRV)', () => {
+    // No buy-button — exercises the path where the live PDP buy-box
+    // hasn't hydrated yet (the live race that lost B0DZ773FRV).
+    // Pre-fix, the regex fell through to the button check and returned
+    // false. Post-fix, the availability text alone proves buyable.
+    const cases = [
+      'Available to ship in 1-2 days',
+      'Available to ship in 2-3 days',
+      'Available to ship in 1 day',
+      'Ships within 24 hours',
+      'Usually ships in 2 days',
+    ];
+    for (const text of cases) {
+      const html = `<html><body>
+        <span id="productTitle">x</span>
+        <div id="availability"><span class="a-color-success">${text}</span></div>
+      </body></html>`;
+      expect(parseAmazonProduct(docOf(html), 'x').inStock).toBe(true);
+    }
+  });
+
+  it('inStock=true on the real B0DZ773FRV iPad fixture (Available to ship in 1-2 days)', () => {
+    const path = join(process.cwd(), 'fixtures', 'product', 'B0DZ773FRV.html');
+    if (!existsSync(path)) return;
+    const html = readFileSync(path, 'utf8');
+    const info = parseAmazonProduct(docOf(html), 'https://www.amazon.com/dp/B0DZ773FRV');
+    expect(info.inStock).toBe(true);
+    expect(info.availabilityText).toMatch(/available to ship/i);
+    expect(info.hasBuyNow).toBe(true);
+    expect(info.price).toBe(399);
+  });
+
   it('passes through renewed condition', () => {
     const html = `
       <html><body>

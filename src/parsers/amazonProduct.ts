@@ -98,7 +98,20 @@ function classifyInStock(doc: Document, availabilityText: string | null): boolea
   if (!t) {
     return Boolean(doc.querySelector('#add-to-cart-button, #buy-now-button'));
   }
-  if (/in stock/.test(t)) return true;
+  // Positive signals — Amazon shows these ONLY for buyable listings.
+  //   "in stock"                — canonical
+  //   "available to ship in N day(s)"  — buyable with shipping delay,
+  //                                rendered in a-color-success (green).
+  //                                The verifier was rejecting these as oos
+  //                                during scrape when the buy-box hadn't
+  //                                hydrated yet, even though the order
+  //                                would have placed successfully — see
+  //                                INC 2026-05-23 (DL-05260025/026, iPad
+  //                                B0DZ773FRV; saved-PDP parser ran fine
+  //                                but live scrape lost the race).
+  //   "ships within N day(s)"  — older Amazon copy variant
+  //   "usually ships in"        — long-tail copy variant
+  if (/in stock|available to ship|ships within|usually ships/.test(t)) return true;
   if (/out of stock|currently unavailable|temporarily out of stock/.test(t)) return false;
   return Boolean(doc.querySelector('#add-to-cart-button, #buy-now-button'));
 }
