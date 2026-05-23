@@ -516,6 +516,16 @@ function isBlockedByPool(
 // 5 fills cleanly with margin.
 const EERO_FILLER_COUNT = 5;
 
+// Inter-term pacing for the filler-search loop. Amazon's edge rate-
+// limiter (INC-2026-05-10) returns a ~2.6KB meta-refresh stub when
+// search HTTP requests fire in rapid succession (7 terms in <1s
+// triggered it for cpnnick's rebuy). Sleeping ~400ms between terms
+// keeps the request rate under the threshold without meaningfully
+// extending wall-clock (most buys settle on the first term). The
+// PER-CALL meta-refresh retry inside `searchFillerCandidatesViaHttp`
+// is the safety net if pacing isn't enough.
+const INTER_TERM_DELAY_MS = 400;
+
 /**
  * Wrap the shared logger so every call auto-merges a context bundle
  * (`jobId`, `profile`) into the data argument. The disk-log sink at
@@ -5146,16 +5156,8 @@ async function addFillerItems(
   // 1. Walk through search terms until we have enough fresh candidates.
   //    Most of the time one term is enough (~50 results per page; even
   //    after dedup we usually have 30+ fresh candidates).
-  //
-  //    Pacing — Amazon's edge rate-limiter (INC-2026-05-10) returns a
-  //    ~2.6KB meta-refresh stub when search HTTP requests fire in
-  //    rapid succession (7 terms in <1s triggered it for cpnnick's
-  //    rebuy). Sleeping ~400ms between terms keeps the request rate
-  //    under the threshold without meaningfully extending wall-clock
-  //    (most buys settle on the first term). The PER-CALL meta-refresh
-  //    retry inside `searchFillerCandidatesViaHttp` is the safety net
-  //    if pacing isn't enough.
-  const INTER_TERM_DELAY_MS = 400;
+  //    Inter-term pacing lives at file scope (INTER_TERM_DELAY_MS) —
+  //    see the docstring there for the rate-limit history.
   const candidates: SearchResultCandidate[] = [];
   let csrf: string | null = null;
   let metaRefreshHits = 0;
@@ -5328,12 +5330,10 @@ async function runFillerSearchLoop(
   targetCount: number,
   seen: Set<string>,
   cid: string | undefined,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  logger: any,
+  logger: ReturnType<typeof makeBoundLogger>,
 ): Promise<{ candidates: SearchResultCandidate[]; metaRefreshHits: number }> {
-  // Match the existing throttle pacing so cache-leader searches don't
-  // accidentally trip Amazon's edge rate-limiter on their own.
-  const INTER_TERM_DELAY_MS = 400;
+  // Uses file-scope INTER_TERM_DELAY_MS so cache-leader searches and
+  // the inline slow-path search loop pace identically.
   const candidates: SearchResultCandidate[] = [];
   let metaRefreshHits = 0;
   // The cache wants a wide population — keep going past targetCount up
@@ -5388,8 +5388,7 @@ async function postBatchAndEvictOnFailure(
   csrf: string,
   poolKey: FillerCachePoolKey,
   cid: string | undefined,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  logger: any,
+  logger: ReturnType<typeof makeBoundLogger>,
 ): Promise<{ asins: string[] }> {
   const slim = items.map((c) => ({ asin: c.asin, offerListingId: c.offerListingId }));
   const body = buildBatchCartAddBody(csrf, slim, { clientName: SEARCH_CART_ADD_CLIENT_NAME });
