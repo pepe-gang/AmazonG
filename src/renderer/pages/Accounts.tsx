@@ -911,10 +911,10 @@ function PrimeCheckTogglePanel() {
             buy when the badge is missing. Turn off if the static
             parser is misreading the badge across the board and
             you&apos;d rather buy than fail with{' '}
-            <code>not_prime</code>. Takes effect on the next worker
-            Start. Applies to every account; BG&apos;s per-job
-            &quot;Bypass Prime check&quot; still wins for jobs that
-            opt in.
+            <code>not_prime</code> or <code>prime_unconfirmed</code>.
+            Takes effect on the next worker Start. Applies to every
+            account; BG&apos;s per-job &quot;Bypass Prime check&quot;
+            still wins for jobs that opt in.
           </div>
         </div>
         <label

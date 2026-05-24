@@ -107,10 +107,13 @@ describe('Prime gate regression — INC-2026-05-05 (non-Prime iPad placed an ord
     }
   });
 
-  it('STRICT: indeterminate isPrime (null) ALSO fails under requirePrime', () => {
+  it('STRICT: indeterminate isPrime (null) ALSO fails under requirePrime — with distinct reason', () => {
     // Synthetic info — simulates an unusual scrape state where neither
-    // static nor runtime could determine Prime status. Before the fix
-    // this passed as "indeterminate (assumed ok)". After: hard fail.
+    // static nor runtime could determine Prime status. Before the
+    // INC-2026-05-05 fix this passed as "indeterminate (assumed ok)".
+    // After: hard fail, but with `prime_unconfirmed` (distinct from
+    // `not_prime` which is reserved for the confirmed-no-badge case)
+    // so logs/UI can tell the two failure modes apart.
     const info = {
       asin: 'B0XXXXXXXX',
       title: 'Test',
@@ -129,7 +132,7 @@ describe('Prime gate regression — INC-2026-05-05 (non-Prime iPad placed an ord
     const report = verifyProductDetailed(info, { ...DEFAULT_CONSTRAINTS, maxPrice: 10_000 });
     expect(report.ok).toBe(false);
     if (!report.ok) {
-      expect(report.reason).toBe('not_prime');
+      expect(report.reason).toBe('prime_unconfirmed');
     }
   });
 

@@ -150,13 +150,33 @@ describe('checkProductConstraints', () => {
   // which let an order place on a non-Prime iPad whose Prime status
   // the runtime could not confirm. Strict-by-default is what the user
   // expects from the Prime gate — money risk if we're wrong.
-  it('FAILS null isPrime when requirePrime (was: passed as indeterminate)', () => {
+  //
+  // The two failure modes return DISTINCT reasons so logs/UI can
+  // distinguish "confirmed no Prime" (permanent for the deal) from
+  // "couldn't determine" (recoverable on a fresh scrape, the case the
+  // Settings.bypassPrimeCheck toggle exists to override).
+  it('FAILS null isPrime when requirePrime — with prime_unconfirmed reason', () => {
     const r = checkProductConstraints(info({ isPrime: null }), {
       ...DEFAULT,
       requirePrime: true,
     });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toBe('not_prime');
+    if (!r.ok) expect(r.reason).toBe('prime_unconfirmed');
+  });
+
+  it('keeps not_prime distinct from prime_unconfirmed', () => {
+    const confirmedNoPrime = checkProductConstraints(info({ isPrime: false }), {
+      ...DEFAULT,
+      requirePrime: true,
+    });
+    const indeterminate = checkProductConstraints(info({ isPrime: null }), {
+      ...DEFAULT,
+      requirePrime: true,
+    });
+    expect(confirmedNoPrime.ok).toBe(false);
+    expect(indeterminate.ok).toBe(false);
+    if (!confirmedNoPrime.ok) expect(confirmedNoPrime.reason).toBe('not_prime');
+    if (!indeterminate.ok) expect(indeterminate.reason).toBe('prime_unconfirmed');
   });
 
   it('allows non-Prime when requirePrime is false', () => {

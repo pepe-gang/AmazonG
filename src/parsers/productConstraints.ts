@@ -18,6 +18,7 @@ export type VerifyReason =
   | 'renewed_condition'
   | 'wont_ship'
   | 'not_prime'
+  | 'prime_unconfirmed'
   | 'no_buy_now'
   | 'quantity_limit';
 
@@ -269,19 +270,33 @@ export function verifyProductDetailed(
   // Pages where Prime can't be determined are typically partial loads
   // / error states, and those are exactly the cases where we should
   // refuse to place an order.
+  //
+  // Distinct reasons for the two failure modes so logs/UI can tell
+  // them apart — `not_prime` (confirmed no Prime badge) is usually
+  // permanent for the deal, while `prime_unconfirmed` (indeterminate)
+  // is recoverable on a fresh scrape and is exactly the case the
+  // bypassPrimeCheck toggle exists to override.
   if (c.requirePrime) {
-    if (info.isPrime !== true) {
+    if (info.isPrime === false) {
       const step: CheckStep = {
         name: 'prime',
         pass: false,
-        observed: info.isPrime === false
-          ? 'no visible prime badge'
-          : 'prime status indeterminate (page likely partial/blocked)',
+        observed: 'no visible prime badge',
         expected: 'prime badge',
         reason: 'not_prime',
-        detail: info.isPrime === false
-          ? 'item is not Prime-eligible'
-          : 'could not confirm Prime — refusing to place order',
+        detail: 'item is not Prime-eligible',
+      };
+      steps.push(step);
+      return { ok: false, reason: step.reason, detail: step.detail, steps };
+    }
+    if (info.isPrime === null) {
+      const step: CheckStep = {
+        name: 'prime',
+        pass: false,
+        observed: 'prime status indeterminate (page likely partial/blocked)',
+        expected: 'prime badge',
+        reason: 'prime_unconfirmed',
+        detail: 'could not confirm Prime — refusing to place order',
       };
       steps.push(step);
       return { ok: false, reason: step.reason, detail: step.detail, steps };

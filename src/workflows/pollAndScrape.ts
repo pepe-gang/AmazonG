@@ -731,7 +731,13 @@ async function runFillerBuyWithRetries(
       minCashbackPct,
       requireMinCashback,
       bypassPriceCheck: job.bypassPriceCheck === true,
-      bypassPrimeCheck: job.bypassPrimeCheck === true,
+      // OR-compose the per-job flag with the worker-wide Settings.bypassPrimeCheck
+      // toggle (deps.bypassPrimeCheck) — matches the outer PDP-verify call site
+      // at line ~2705. Without this, the global "Prime check off" toggle is
+      // honored only by the outer verify and the filler-buy's inner verify
+      // still fails with not_prime / prime_unconfirmed.
+      bypassPrimeCheck:
+        job.bypassPrimeCheck === true || deps.bypassPrimeCheck === true,
       bgNameToggleEnabled: deps.bgNameToggleEnabled,
       resolveCardNumber: deps.resolveCardNumber,
       dryRun: deps.buyDryRun,
