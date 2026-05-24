@@ -420,21 +420,6 @@ export type Settings = {
    * board and you'd rather buy than fail with `not_prime`.
    */
   bypassPrimeCheck: boolean;
-  /**
-   * Redis pub/sub push subscriber switch. Default true since v0.13.79.
-   * When true, the worker uses ioredis to subscribe to BG's
-   * "job-ready" channel and the scheduler's idle wait becomes
-   * Promise.race([wake, sleep(60_000)]) instead of a flat 10s poll.
-   * Saves ~$25-35/cycle in Vercel costs and drops pickup latency to
-   * <100ms. Polling is kept as the safety-net fallback when the
-   * subscriber can't connect — flip this off to force poll-only
-   * mode for debugging.
-   *
-   * Only does anything when BG has REDIS_NOTIFY_ENABLED=true
-   * server-side; otherwise the token fetch returns 404 and the
-   * worker silently falls back to legacy polling.
-   */
-  useRedisPush: boolean;
 };
 
 /**

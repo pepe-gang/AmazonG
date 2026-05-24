@@ -1295,36 +1295,37 @@ async function startWorkerNow(): Promise<void> {
     });
   }, 30_000);
 
-  if (settings.useRedisPush === true) {
-    await redisSubscriber
-      .start({
-        fetchTokenAndChannel: () => bg.getRedisToken(),
-        onWake: () => {
-          signalWake();
-          // Also kick the account-config orchestrator. The internal
-          // `inFlight` lock skips a redundant tick if we're already
-          // mid-dispatch from the 30s sweep.
-          void runAccountConfigTickOnce(accountConfigDeps).catch((err) => {
-            logger.warn('accountConfig.wake.error', {
-              error: err instanceof Error ? err.message : String(err),
-            });
+  // Start the Redis pub/sub subscriber unconditionally. If it can't
+  // connect (e.g., REDIS_NOTIFY_ENABLED off on BG, network blip), the
+  // 60s safety-net sleep in the scheduler covers idle wakes.
+  await redisSubscriber
+    .start({
+      fetchTokenAndChannel: () => bg.getRedisToken(),
+      onWake: () => {
+        signalWake();
+        // Also kick the account-config orchestrator. The internal
+        // `inFlight` lock skips a redundant tick if we're already
+        // mid-dispatch from the 30s sweep.
+        void runAccountConfigTickOnce(accountConfigDeps).catch((err) => {
+          logger.warn('accountConfig.wake.error', {
+            error: err instanceof Error ? err.message : String(err),
           });
-        },
-        onDuplicateInstanceWarning: () => {
-          logger.warn('worker.duplicate_instance.detected', {
-            note: 'Another AmazonG instance appears active for this user. The atomic claim prevents duplicate orders, but two instances polling the same queue waste resources. Stop one to clean up.',
-          });
-        },
-        onStatus: (s, detail) =>
-          logger.info('worker.redisSubscriber.status', { status: s, detail }),
-      })
-      .catch((err) => {
-        logger.warn('worker.redisSubscriber.start_failed', {
-          error: err instanceof Error ? err.message : String(err),
-          note: 'Falling back to polling. Safety-net poll still active.',
         });
+      },
+      onDuplicateInstanceWarning: () => {
+        logger.warn('worker.duplicate_instance.detected', {
+          note: 'Another AmazonG instance appears active for this user. The atomic claim prevents duplicate orders, but two instances polling the same queue waste resources. Stop one to clean up.',
+        });
+      },
+      onStatus: (s, detail) =>
+        logger.info('worker.redisSubscriber.status', { status: s, detail }),
+    })
+    .catch((err) => {
+      logger.warn('worker.redisSubscriber.start_failed', {
+        error: err instanceof Error ? err.message : String(err),
+        note: 'Worker idle waits will rely on the 60s safety-net sleep.',
       });
-  }
+    });
 }
 
 app.whenReady().then(async () => {

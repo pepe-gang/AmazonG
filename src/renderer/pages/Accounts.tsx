@@ -64,7 +64,6 @@ export function AccountsView({
       >
         <BuyWithFillersPanel profiles={profiles} />
         <BgNameTogglePanel />
-        <RedisPushPanel />
         <PrimeCheckTogglePanel />
         <AutoRebuyOnCancelPanel />
       </div>
@@ -968,48 +967,6 @@ function BgNameTogglePanel() {
         <label
           className="flex items-center gap-2 cursor-pointer"
           title={on ? 'BG1/BG2 toggle recovery enabled' : 'Toggle recovery disabled — cashback misses fail fast'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={() => void toggle()}
-            disabled={busy}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {on ? 'On' : 'Off'}
-          </span>
-        </label>
-      </div>
-    </div>
-  );
-}
-
-function RedisPushPanel() {
-  const { settings, update, busy } = useSettings();
-  if (!settings) return null;
-  // Default ON since v0.13.79. Polling stays as a safety-net fallback
-  // when the subscriber can't reach BG's Redis channel.
-  const on = settings.useRedisPush === true;
-  const toggle = async () => {
-    await update({ useRedisPush: !on });
-  };
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Use Redis push</div>
-          <div className="prefix-sub">
-            When on, the worker subscribes to BetterBG&apos;s Redis
-            &quot;job-ready&quot; channel and wakes the instant a new
-            job is created instead of polling every 10s. Drops pickup
-            latency to under 100ms and cuts Vercel invocations
-            dramatically. Polling stays on as a safety net — turning
-            this off forces the worker into poll-only mode. Takes
-            effect on the next worker Start.
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Redis push enabled' : 'Polling at 10s'}
         >
           <Switch
             checked={on}

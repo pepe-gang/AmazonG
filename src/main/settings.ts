@@ -62,13 +62,6 @@ const DEFAULTS: Settings = {
   // worker-wide (every account, every job). See ipc.ts for the
   // full rationale.
   bypassPrimeCheck: false,
-  // Redis pub/sub push subscriber. Default ON since v0.13.79.
-  // Subscriber connects to BG's job-ready channel for sub-100ms wakes;
-  // the 10s Postgres poll stays active as defense-in-depth (handles
-  // Upstash disconnects + cold-start race + old AmazonG versions that
-  // poll-only). Operators flip off via Settings → Accounts → "Use
-  // Redis push" to force poll-only mode for debugging.
-  useRedisPush: true,
 };
 
 function filePath(): string {

@@ -215,7 +215,11 @@ export class StreamingScheduler {
     // a brand-new job while the worker is sleeping, worst-case
     // pickup latency goes from 2s to 10s. Avg 5s. Invisible against
     // the 60-90s per-buy wall-clock.
-    const NO_JOB_SLEEP_MS = 10_000;
+    // Safety-net sleep — runs when the Redis wake signal misses (a brief
+    // subscriber hiccup, cold-start before the token is fetched, etc.).
+    // 60s because push handles the common case in <100ms; this is just
+    // insurance, not the primary cadence.
+    const NO_JOB_SLEEP_MS = 60_000;
     // Eligibility / error backoff stays at 5s — these are "wait for a
     // user action / wait for BG to recover" cases, not "wait for the
     // next job to be ready". No reason to hammer BG when no profile
@@ -290,20 +294,11 @@ export class StreamingScheduler {
       );
       const claimed = claimedRaw.filter((j): j is AutoGJob => j !== null);
       if (claimed.length === 0) {
-        // Idle wait — race the legacy fixed sleep against the Redis
-        // pub/sub wake signal. When useRedisPush is OFF the wake
-        // signal never fires (main never starts the subscriber) and
-        // we behave exactly as before: a flat 10s poll.
-        //
-        // When useRedisPush is ON the wake signal fires the instant
-        // BG publishes a job-ready message — pickup latency drops
-        // to <100ms. The flat sleep here becomes the safety-net
-        // (catches anything the pub/sub missed). We keep it at
-        // NO_JOB_SLEEP_MS rather than bumping to 60s because the
-        // race-wins case (wake fires) is what we expect to dominate;
-        // the sleep is just insurance for a brief subscriber
-        // hiccup. If we ever want a longer safety net (push-only
-        // accounts), this becomes a tunable.
+        // Idle wait — race the Redis pub/sub wake signal against the
+        // safety-net sleep. Wake fires the instant BG publishes a
+        // job-ready message; the sleep is just defense-in-depth for
+        // subscriber hiccups (Upstash blip, cold-start race, reconnect
+        // backoff). Push handles the common case in <100ms.
         await Promise.race([
           waitForWake(),
           sleep(NO_JOB_SLEEP_MS, () => this.running),
