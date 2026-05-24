@@ -123,7 +123,6 @@ function makeDeps(opts: {
         effectiveMinByEmail: new Map(),
         requireMinByEmail: new Map(),
         fillerAttempts: ['general'],
-        surgicalCashbackRecovery: false,
       };
     },
     runners: {

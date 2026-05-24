@@ -68,18 +68,6 @@ function filePath(): string {
   return join(app.getPath('userData'), 'settings.json');
 }
 
-/** Pre-v0.13.19 settings.json shape — single + filler split into two
- *  fields. Pre-v0.13.36: wheyProteinFillerOnly was a boolean before
- *  the multi-pool refactor. Pre-v0.13.62: `fillerPool` was a single
- *  enum before the per-attempt `fillerAttempts` array. Used only by
- *  `loadSettings` for migration. */
-type LegacyKnobs = {
-  maxConcurrentSingleBuys?: number;
-  maxConcurrentFillerBuys?: number;
-  wheyProteinFillerOnly?: boolean;
-  fillerPool?: FillerPool | 'whey';
-};
-
 const VALID_FILLER_POOLS: readonly FillerPool[] = [
   'general',
   'eero',
@@ -89,63 +77,19 @@ const VALID_FILLER_POOLS: readonly FillerPool[] = [
 export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await readFile(filePath(), 'utf8');
-    const parsed = JSON.parse(raw) as Partial<Settings> & LegacyKnobs;
+    const parsed = JSON.parse(raw) as Partial<Settings>;
 
-    // v0.13.19 migration: the split single/filler concurrency knobs were
-    // unified into one `maxConcurrentBuys` because the batch cart-add
-    // refactor made filler-mode's per-account resource profile match
-    // single-mode. Take min(single, filler) so users who throttled
-    // filler-mode keep that lower cap globally instead of getting
-    // bumped up.
-    const migrated: Partial<Settings> = { ...parsed };
-    if (migrated.maxConcurrentBuys === undefined) {
-      const single = parsed.maxConcurrentSingleBuys;
-      const filler = parsed.maxConcurrentFillerBuys;
-      if (typeof single === 'number' || typeof filler === 'number') {
-        const candidates = [single, filler].filter(
-          (n): n is number => typeof n === 'number',
-        );
-        if (candidates.length > 0) {
-          migrated.maxConcurrentBuys = Math.min(...candidates);
-        }
-      }
-    }
+    // Defensive normalization for fillerAttempts: drop unknown pool
+    // values and clamp 1–5 entries. Guards against hand-edited
+    // settings.json or out-of-range arrays.
+    let fa = (parsed.fillerAttempts ?? []).filter(
+      (p): p is FillerPool => VALID_FILLER_POOLS.includes(p),
+    );
+    if (fa.length === 0) fa = ['eero'];
+    if (fa.length > 5) fa = fa.slice(0, 5);
+    parsed.fillerAttempts = fa;
 
-    // v0.13.62 migration: the single `fillerPool` enum became the
-    // `fillerAttempts` array (per-attempt pool plan — sets both the
-    // retry count and each attempt's pool). Resolve the legacy value
-    // through the older chain first:
-    //   - pre-v0.13.36 it was the boolean `wheyProteinFillerOnly`
-    //     (true → 'eero', false → 'general')
-    //   - v0.13.40 removed the 'whey' pool → 'eero'
-    // Migrate to a SINGLE attempt on the saved pool — matches the new
-    // 1-attempt default. Retries are now opt-in: a user re-adds them
-    // (with whatever pool per attempt) via the Filler Attempts UI.
-    if (migrated.fillerAttempts === undefined) {
-      let legacyPool: FillerPool | 'whey' | undefined = parsed.fillerPool;
-      if (legacyPool === undefined && parsed.wheyProteinFillerOnly !== undefined) {
-        legacyPool = parsed.wheyProteinFillerOnly ? 'eero' : 'general';
-      }
-      if (legacyPool === 'whey' || legacyPool === undefined) {
-        legacyPool = 'eero';
-      }
-      migrated.fillerAttempts = [legacyPool];
-    }
-    // The legacy single-pool field no longer exists on Settings.
-    delete (migrated as { fillerPool?: unknown }).fillerPool;
-
-    // Normalize fillerAttempts to a sane shape regardless of source:
-    // drop unknown pool values, clamp to 1–5 entries.
-    {
-      let fa = (migrated.fillerAttempts ?? []).filter(
-        (p): p is FillerPool => VALID_FILLER_POOLS.includes(p),
-      );
-      if (fa.length === 0) fa = ['eero'];
-      if (fa.length > 5) fa = fa.slice(0, 5);
-      migrated.fillerAttempts = fa;
-    }
-
-    return { ...DEFAULTS, ...migrated };
+    return { ...DEFAULTS, ...parsed };
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ...DEFAULTS };
     throw err;

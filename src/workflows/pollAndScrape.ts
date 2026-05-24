@@ -136,13 +136,6 @@ export type Deps = {
      *  so a Settings change takes effect on the next deal without
      *  restarting the worker. */
     fillerAttempts: FillerPool[];
-    /** Experimental: when true AND the buy is in filler mode AND the
-     *  cashback gate fails with B1 (target's group has no "% back"
-     *  radio at all), run surgical recovery (remove bundle-mates
-     *  from cart, optionally replace fillers) instead of the default
-     *  3-attempt replace-everything retry. Read every claim so a
-     *  Settings toggle takes effect on the next deal. */
-    surgicalCashbackRecovery: boolean;
   }>;
   /** Returns every enabled+loggedIn profile we should fan out the job to. */
   listEligibleProfiles: () => Promise<AmazonProfile[]>;
@@ -664,11 +657,6 @@ async function runFillerBuyWithRetries(
    *  length is the retry count; entry N is attempt N's pool.
    *  Single-mode buys never reach here. */
   fillerAttempts: FillerPool[],
-  /** Live experimental.surgicalCashbackRecovery toggle. When on,
-   *  buyWithFillers handles B1 cashback failures via the inline
-   *  surgical flow AND we skip the 3-attempt outer retry — surgical
-   *  is the only recovery path. */
-  surgicalCashbackRecovery: boolean,
   /** Pre-scraped info from the worker's verify phase. Passed to the
    *  FIRST attempt so buyWithFillers can skip its internal scrapeProduct
    *  (saves 2-4s). Subsequent retries refetch in case Amazon changed
@@ -702,17 +690,10 @@ async function runFillerBuyWithRetries(
   const attemptedAsins = new Set<string>();
   // The number of attempts and each attempt's pool come straight from
   // the user's `fillerAttempts` setting (clamped to 1–5 on load).
-  // When surgical recovery is on we run buyWithFillers ONCE — it
-  // handles B1 cashback failures inline via the surgical flow, an
-  // incompatible in-place recovery strategy — so we use only the
-  // first configured attempt's pool.
-  const attemptPools: FillerPool[] = surgicalCashbackRecovery
-    ? fillerAttempts.slice(0, 1)
-    : fillerAttempts;
-  const maxAttempts = Math.max(1, attemptPools.length);
+  const maxAttempts = Math.max(1, fillerAttempts.length);
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const effectivePool: FillerPool =
-      attemptPools[attempt - 1] ?? attemptPools[0] ?? 'eero';
+      fillerAttempts[attempt - 1] ?? fillerAttempts[0] ?? 'eero';
     if (attempt > 1) {
       logger.info(
         'step.fillerBuy.retryWhole.start',
@@ -722,7 +703,7 @@ async function runFillerBuyWithRetries(
           priorReason: lastRaw.ok ? null : lastRaw.reason,
           excludedAsinsCount: attemptedAsins.size,
           effectivePool,
-          ...(effectivePool !== attemptPools[0]
+          ...(effectivePool !== fillerAttempts[0]
             ? { poolSwitched: true }
             : {}),
         },
@@ -770,9 +751,6 @@ async function runFillerBuyWithRetries(
       // disk-log sink (main/index.ts:798-815).
       jobId: job.id,
       profile,
-      // Experimental — buyWithFillers handles B1 cashback failures
-      // inline when this is on. See BuyWithFillersOptions.surgicalCashbackRecovery.
-      surgicalCashbackRecovery,
       onStage,
       // Plumb the worker's debugDir so inner helpers like
       // toggleBGNameAndRetry can dump HTML + screenshot + selector
@@ -947,7 +925,6 @@ export function startWorker(deps: Deps): WorkerHandle {
         effectiveMinByEmail: new Map<string, number>(),
         requireMinByEmail: new Map<string, boolean>(),
         fillerAttempts: ['general'] as FillerPool[],
-        surgicalCashbackRecovery: false,
         ...(emptyReason ? { emptyReason } : {}),
       };
     }
@@ -968,7 +945,6 @@ export function startWorker(deps: Deps): WorkerHandle {
     const parallelism = await deps.loadParallelism().catch(() => ({
       maxConcurrentBuys: DEFAULT_CONCURRENT_BUYS,
       fillerAttempts: ['general'] as FillerPool[],
-      surgicalCashbackRecovery: false,
     }));
 
     const fillerByEmail = new Map<string, boolean>(
@@ -1005,7 +981,6 @@ export function startWorker(deps: Deps): WorkerHandle {
       effectiveMinByEmail,
       requireMinByEmail,
       fillerAttempts: parallelism.fillerAttempts,
-      surgicalCashbackRecovery: parallelism.surgicalCashbackRecovery,
     };
   };
 
@@ -2562,10 +2537,6 @@ export async function runForProfile(
   /** Per-attempt filler-pool plan. Re-read per claim by the caller.
    *  Single-mode buys ignore. */
   fillerAttempts: FillerPool[],
-  /** Live experimental.surgicalCashbackRecovery toggle. Re-read per
-   *  claim. Filler-mode only (single-mode buys never hit the cashback
-   *  gate's recovery paths in the same way). */
-  surgicalCashbackRecovery: boolean,
   /** Shared kill-switch fired when ONE profile in the fan-out detects
    *  a PRODUCT-level failure (out_of_stock / price_exceeds). When this
    *  signal is aborted, every other profile bails at its next
@@ -2933,7 +2904,7 @@ export async function runForProfile(
         ? await deps.resolveCardById(profileData.cardId).catch(() => null)
         : null;
     if (useFillers) {
-      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, fillerAttempts, surgicalCashbackRecovery, info, preflightCleared, profileData.bgAddress, paymentCard, onStage);
+      const r = await runFillerBuyWithRetries(page, deps, job, cid, profile, effectiveMinCashbackPct, requireMinCashback, fillerAttempts, info, preflightCleared, profileData.bgAddress, paymentCard, onStage);
       buy = r.buy;
       fillerOrderIds = r.fillerOrderIds;
       cartAsins = r.cartAsins;

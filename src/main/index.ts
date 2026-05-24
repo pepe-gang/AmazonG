@@ -1156,7 +1156,6 @@ async function startWorkerNow(): Promise<void> {
       return {
         maxConcurrentBuys: s.maxConcurrentBuys,
         fillerAttempts: s.fillerAttempts,
-        surgicalCashbackRecovery: s.experimental?.surgicalCashbackRecovery === true,
       };
     },
     listEligibleProfiles: async () => {
