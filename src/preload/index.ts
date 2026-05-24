@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { IPC, type AutoGBridge, type Settings } from '../shared/ipc.js';
+import { IPC, type AutoGBridge, type Settings, type UserAutoBuyPrefs } from '../shared/ipc.js';
 import type {
   AmazonProfile,
   ChaseProfile,
@@ -19,6 +19,10 @@ const bridge: AutoGBridge = {
   statusGet: () => ipcRenderer.invoke(IPC.statusGet) as Promise<RendererStatus>,
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet) as Promise<Settings>,
   settingsSet: (p) => ipcRenderer.invoke(IPC.settingsSet, p) as Promise<Settings>,
+  userAutoBuyGet: () =>
+    ipcRenderer.invoke(IPC.userAutoBuyGet) as Promise<UserAutoBuyPrefs | null>,
+  userAutoBuySet: (max: number) =>
+    ipcRenderer.invoke(IPC.userAutoBuySet, max) as Promise<UserAutoBuyPrefs>,
   openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url) as Promise<void>,
   appVersion: () => ipcRenderer.invoke(IPC.appVersion) as Promise<string>,
   versionCheck: () =>

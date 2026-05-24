@@ -1667,6 +1667,39 @@ function registerIpcHandlers(): void {
     return merged;
   });
 
+  // User-scoped auto-buy preferences (currently: autoRebuyOnCancelMax).
+  // Proxies BG's /api/user/auto-buy GET/PATCH endpoints — the value
+  // lives on BG.User, not in AmazonG settings.json, because the
+  // status-route reads it server-side when deciding whether to schedule
+  // a rebuy on cancel.
+  ipcMain.handle(IPC.userAutoBuyGet, async () => {
+    if (!apiKey) return null;
+    try {
+      const settings = await loadSettings();
+      return await createBGClient(settings.bgBaseUrl, apiKey).getUserAutoBuy();
+    } catch (err) {
+      logger.warn('userAutoBuy.get.failed', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  });
+  ipcMain.handle(IPC.userAutoBuySet, async (_e, max: number) => {
+    if (!apiKey) throw new Error('not connected to BG');
+    if (
+      typeof max !== 'number' ||
+      !Number.isInteger(max) ||
+      max < 0 ||
+      max > 10
+    ) {
+      throw new Error('autoRebuyOnCancelMax must be an integer in [0, 10]');
+    }
+    const settings = await loadSettings();
+    return await createBGClient(settings.bgBaseUrl, apiKey).patchUserAutoBuy({
+      autoRebuyOnCancelMax: max,
+    });
+  });
+
   ipcMain.handle(IPC.openExternal, async (_e, url: string) => {
     if (!/^https?:\/\//i.test(url)) throw new Error('invalid url');
     await shell.openExternal(url);

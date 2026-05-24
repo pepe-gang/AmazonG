@@ -359,6 +359,13 @@ export type BGClient = {
     chaseProfiles: SyncChaseProfile[];
     addressAssignments: Record<string, BGAddress>;
   }): Promise<{ updatedAt: string }>;
+  /** GET /api/user/auto-buy — user-scoped auto-buy preferences. */
+  getUserAutoBuy(): Promise<{ enabled: boolean; autoRebuyOnCancelMax: number } | null>;
+  /** PATCH /api/user/auto-buy — update one or more user prefs. */
+  patchUserAutoBuy(patch: {
+    enabled?: boolean;
+    autoRebuyOnCancelMax?: number;
+  }): Promise<{ enabled: boolean; autoRebuyOnCancelMax: number }>;
 };
 
 /**
@@ -797,6 +804,25 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
       );
       if (!r) throw new BGApiError(500, '/api/autog/sync', 'empty response');
       return { updatedAt: r.updatedAt };
+    },
+
+    async getUserAutoBuy() {
+      return await request<{ enabled: boolean; autoRebuyOnCancelMax: number }>(
+        '/api/user/auto-buy',
+        { method: 'GET' },
+      );
+    },
+
+    async patchUserAutoBuy(patch) {
+      const r = await request<{
+        enabled: boolean;
+        autoRebuyOnCancelMax: number;
+      }>('/api/user/auto-buy', {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+      if (!r) throw new BGApiError(500, '/api/user/auto-buy', 'empty response');
+      return r;
     },
   };
 }

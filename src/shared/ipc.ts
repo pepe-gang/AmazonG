@@ -25,6 +25,13 @@ export const IPC = {
   statusGet: 'status:get',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  /** Get the BG-side user-scoped auto-buy preferences. Proxies to
+   *  /api/user/auto-buy GET. Returns the autoRebuyOnCancelMax integer
+   *  (0 = off; N = max retries via the parentJobId chain). */
+  userAutoBuyGet: 'user-auto-buy:get',
+  /** Set autoRebuyOnCancelMax. Proxies to /api/user/auto-buy PATCH.
+   *  Clamped to [0, 10] on BG. Returns the persisted value. */
+  userAutoBuySet: 'user-auto-buy:set',
   openExternal: 'shell:open-external',
   appVersion: 'app:version',
   versionCheck: 'version:check',
@@ -195,6 +202,14 @@ export const IPC = {
  * src/actions/buyWithFillers.ts for the per-pool term lists.
  */
 export type FillerPool = 'general' | 'eero' | 'amazon-basics';
+
+/** Shape of GET/PATCH /api/user/auto-buy responses. Mirrored locally
+ *  in AmazonG so the renderer can render a numeric input without
+ *  refetching the BG schema. */
+export type UserAutoBuyPrefs = {
+  enabled: boolean;
+  autoRebuyOnCancelMax: number;
+};
 
 export type Settings = {
   headless: boolean;
@@ -451,6 +466,12 @@ export type AutoGBridge = {
   statusGet(): Promise<RendererStatus>;
   settingsGet(): Promise<Settings>;
   settingsSet(partial: Partial<Settings>): Promise<Settings>;
+  /** GET /api/user/auto-buy via the BG-client proxy. Returns null
+   *  when not connected. */
+  userAutoBuyGet(): Promise<UserAutoBuyPrefs | null>;
+  /** PATCH /api/user/auto-buy with the new max retries (0..10).
+   *  Returns the persisted prefs or throws on validation/network error. */
+  userAutoBuySet(autoRebuyOnCancelMax: number): Promise<UserAutoBuyPrefs>;
   openExternal(url: string): Promise<void>;
   appVersion(): Promise<string>;
   versionCheck(): Promise<{

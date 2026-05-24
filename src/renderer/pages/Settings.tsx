@@ -57,6 +57,7 @@ export function SettingsView({
         <AllowedPrefixesPanel />
         <AutoStartWorkerPanel />
         <ParallelBuysPanel />
+        <AutoRebuyOnCancelPanel />
         <SnapshotSettingsPanel />
         <ExperimentalPanel />
         <BetterBGConnectionPanel identity={identity} workerRunning={workerRunning} />
@@ -136,6 +137,114 @@ function ParallelBuysPanel() {
         trigger Amazon's anti-bot checks. Changes apply on the next
         deal AmazonG claims (no need to stop / restart the worker —
         settings are re-read every claim).
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   Auto-rebuy on cancel (numeric — max chain depth)
+   ============================================================ */
+const REBUY_MIN = 0;
+const REBUY_MAX = 10;
+
+function AutoRebuyOnCancelPanel() {
+  const [value, setValue] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const prefs = await window.autog.userAutoBuyGet();
+        if (cancelled) return;
+        if (!prefs) {
+          setValue(0);
+          setError('Connect to BetterBG to load this setting.');
+          return;
+        }
+        setValue(prefs.autoRebuyOnCancelMax);
+      } catch (err) {
+        if (cancelled) return;
+        setValue(0);
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const persist = async (next: number) => {
+    const clamped = Math.max(REBUY_MIN, Math.min(REBUY_MAX, Math.round(next)));
+    if (clamped === value) return;
+    const prev = value;
+    setValue(clamped);
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await window.autog.userAutoBuySet(clamped);
+      setValue(saved.autoRebuyOnCancelMax);
+    } catch (err) {
+      setValue(prev);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (value === null) return null;
+  const isOff = value === 0;
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Auto-rebuy on cancel</div>
+          <div className="prefix-sub">
+            When Amazon cancels a placed order, automatically queue a
+            filler-mode rebuy 5 minutes later on the same account.
+            Counts the rebuy chain — if a rebuy is also cancelled, we
+            retry again, up to this many total retries. <b>0</b>{' '}
+            disables. <b>1</b> means one retry. <b>2</b> means: retry,
+            and if that's also cancelled, retry once more.
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => persist(value - 1)}
+            disabled={saving || value <= REBUY_MIN}
+            aria-label="Decrease max retries"
+            className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            −
+          </button>
+          <span className="tabular-nums w-7 text-center text-base font-medium">
+            {value}
+          </span>
+          <button
+            type="button"
+            onClick={() => persist(value + 1)}
+            disabled={saving || value >= REBUY_MAX}
+            aria-label="Increase max retries"
+            className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            +
+          </button>
+          <span className="text-xs text-muted-foreground ml-1">
+            {isOff ? 'off' : value === 1 ? 'retry' : 'retries'}
+          </span>
+        </div>
+      </div>
+      <div className="text-[11px] text-muted-foreground/70 mt-3">
+        Range {REBUY_MIN}–{REBUY_MAX}. Setting persists on BetterBG and
+        is shared across every device connected with this API key.
+        Cancellations during the fetch-tracking phase (shipped items)
+        are never auto-rebought regardless of this setting.
+        {error && (
+          <span className="block mt-1 text-rose-300/90">⚠ {error}</span>
+        )}
       </div>
     </div>
   );
