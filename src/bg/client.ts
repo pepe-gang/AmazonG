@@ -359,9 +359,9 @@ export type BGClient = {
     chaseProfiles: SyncChaseProfile[];
     addressAssignments: Record<string, BGAddress>;
   }): Promise<{ updatedAt: string }>;
-  /** GET /api/user/auto-buy — user-scoped auto-buy preferences. */
+  /** GET /api/autog/auto-buy — user-scoped auto-buy preferences. */
   getUserAutoBuy(): Promise<{ enabled: boolean; autoRebuyOnCancelMax: number } | null>;
-  /** PATCH /api/user/auto-buy — update one or more user prefs. */
+  /** PATCH /api/autog/auto-buy — update one or more user prefs. */
   patchUserAutoBuy(patch: {
     enabled?: boolean;
     autoRebuyOnCancelMax?: number;
