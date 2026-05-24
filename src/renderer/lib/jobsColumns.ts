@@ -78,19 +78,18 @@ export const STATUS_LABEL: Record<JobAttemptStatus, string> = {
   awaiting_verification: 'Pending',
   verified: 'Success',
   completed: 'Success',
-  dry_run_success: 'Success',
   cancelled_by_amazon: 'Cancelled',
   failed: 'Failed',
   action_required: 'Action Required',
 };
 
 /**
- * Visible status buckets. The underlying JobAttemptStatus enum still
- * has 8 values for the worker's internal state machine, but the user
- * only ever sees 4 buckets in the filter + badge — Pending, Success,
- * Cancelled, Failed. The `Done` and `Dry-run OK` raw statuses get
- * folded into Success; the in-flight three (queued / in_progress /
- * awaiting_verification) all read as Pending.
+ * Visible status buckets. The underlying JobAttemptStatus enum has
+ * more states for the worker's internal state machine, but the user
+ * only ever sees 5 buckets in the filter + badge — Pending, Success,
+ * Action Required, Cancelled, Failed. The `verified` / `completed`
+ * statuses both fold into Success; the in-flight three (queued /
+ * in_progress / awaiting_verification) all read as Pending.
  */
 export type StatusGroup = 'pending' | 'success' | 'cancelled' | 'failed' | 'action_required';
 
@@ -100,7 +99,6 @@ export const STATUS_GROUP: Record<JobAttemptStatus, StatusGroup> = {
   awaiting_verification: 'pending',
   verified: 'success',
   completed: 'success',
-  dry_run_success: 'success',
   cancelled_by_amazon: 'cancelled',
   failed: 'failed',
   action_required: 'action_required',
@@ -116,16 +114,13 @@ export const STATUS_GROUP: Record<JobAttemptStatus, StatusGroup> = {
  * still need revision; carrier may not have picked up). It buckets
  * into Pending until codes arrive.
  *
- * Two exemptions to the tracking gate:
- *   1. `dry_run_success` — no real order exists, no tracking is ever
- *      expected, demoting it to Pending would be wrong.
- *   2. Rows with no `orderId` — there's nothing to track and the row
- *      can't be re-verified either (verify needs an orderId). These
- *      are usually the result of an explicit cleanup (e.g. the
- *      cross-deal orderId-contamination NULL pass on 2026-05-09).
- *      Demoting them to Pending would imply "waiting for tracking,"
- *      which can never arrive — they need user attention via a
- *      different path, not by hiding in Pending.
+ * Exemption: rows with no `orderId` — there's nothing to track and
+ * the row can't be re-verified either (verify needs an orderId).
+ * These are usually the result of an explicit cleanup (e.g. the
+ * cross-deal orderId-contamination NULL pass on 2026-05-09). Demoting
+ * them to Pending would imply "waiting for tracking," which can never
+ * arrive — they need user attention via a different path, not by
+ * hiding in Pending.
  *
  * Use this — not `STATUS_GROUP[attempt.status]` directly — wherever
  * a JobAttempt row is being bucketed for the user-facing table,
@@ -135,7 +130,6 @@ export function effectiveStatusGroup(attempt: JobAttempt): StatusGroup {
   const base = STATUS_GROUP[attempt.status];
   if (
     base === 'success' &&
-    attempt.status !== 'dry_run_success' &&
     !!attempt.orderId &&
     (!attempt.trackingIds || attempt.trackingIds.length === 0)
   ) {

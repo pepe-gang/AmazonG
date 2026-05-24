@@ -65,7 +65,6 @@ export type OrderConfirmation = {
 export type BuyResult =
   | {
       ok: true;
-      dryRun: boolean;
       orderId: string | null;
       /**
        * Amazon's checkout-session ID from the thank-you URL (`?purchaseId=`).
@@ -684,8 +683,7 @@ export type JobAttemptStatus =
    *  rather than rows that failed for product-side reasons (oos, price,
    *  etc.). Set when verify reports `signed_out` or buyNow hits the
    *  PMTS "Verify your card" challenge. */
-  | 'action_required'
-  | 'dry_run_success';
+  | 'action_required';
 
 export type JobAttempt = {
   attemptId: string;
@@ -709,7 +707,6 @@ export type JobAttempt = {
   status: JobAttemptStatus;
   error: string | null;
   buyMode: 'single' | 'filler';
-  dryRun: boolean;
   /** Carrier tracking codes collected by fetch_tracking. Null until the
    *  fetch_tracking loop runs; empty array if the loop ran but Amazon
    *  hasn't shipped anything yet. */

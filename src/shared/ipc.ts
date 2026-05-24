@@ -171,8 +171,6 @@ export const IPC = {
   jobsRebuy: 'jobs:rebuy',
   jobsSnapshot: 'jobs:snapshot',
   jobsOpenTrace: 'jobs:open-trace',
-  snapshotsDiskUsage: 'snapshots:disk-usage',
-  snapshotsClearAll: 'snapshots:clear-all',
 
   evtLog: 'evt:log',
   evtStatus: 'evt:status',
@@ -214,7 +212,6 @@ export type UserAutoBuyPrefs = {
 export type Settings = {
   headless: boolean;
   bgBaseUrl: string;
-  buyDryRun: boolean;
   minCashbackPct: number;
   /**
    * Allowed house-number prefixes for the Amazon delivery address. The
@@ -254,10 +251,6 @@ export type Settings = {
    * full set whenever the user toggles, so any change survives.
    */
   jobsStatusFilter: string[];
-  /** Capture screenshot + HTML snapshot on checkout failure. */
-  snapshotOnFailure: boolean;
-  /** Which error groups to capture. Empty = capture all groups. */
-  snapshotGroups: string[];
   /**
    * Global default for "Buy with Fillers" mode. When on, the worker places
    * the target item alongside ~10 random Prime filler items to disguise the
@@ -603,8 +596,6 @@ export type AutoGBridge = {
 
   jobsSnapshot(attemptId: string): Promise<{ screenshot: string | null; html: string | null; hasTrace: boolean }>;
   jobsOpenTrace(attemptId: string): Promise<void>;
-  snapshotsDiskUsage(): Promise<{ count: number; bytes: number }>;
-  snapshotsClearAll(): Promise<number>;
   onLog(cb: (events: LogEvent[]) => void): () => void;
   onStatus(cb: (s: RendererStatus) => void): () => void;
   onProfiles(cb: (profiles: AmazonProfile[]) => void): () => void;

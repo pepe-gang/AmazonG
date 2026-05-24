@@ -34,27 +34,21 @@ export function buildBuyJobReport(
 ): JobStatusReport {
   const { results, fillerByEmail } = input;
 
-  const successes = results.filter(
-    (r) => r.status === 'completed' && !r.dryRun,
-  );
-  const dryRunPasses = results.filter(
-    (r) => r.status === 'completed' && r.dryRun,
-  );
+  const successes = results.filter((r) => r.status === 'completed');
   const failures = results.filter((r) => r.status === 'failed');
   const actionRequireds = results.filter(
     (r) => r.status === 'action_required',
   );
 
-  // Winner pick: highest-cashback successful real (non-dry-run) result.
-  // Ties broken by first appearance in input order.
+  // Winner pick: highest-cashback successful result. Ties broken by
+  // first appearance in input order.
   const winner = [...successes].sort(
     (a, b) => (b.placedCashbackPct ?? 0) - (a.placedCashbackPct ?? 0),
   )[0];
 
-  // Overall status rollup (handleJob lines 1248-1285):
+  // Overall status rollup:
   //   - success + no failures + no action_required → awaiting_verification
   //   - success + any non-success siblings → partial
-  //   - all dry-runs → failed (BG must NOT schedule verify on dry-runs)
   //   - no success but action_required → action_required
   //   - else → failed
   let overallStatus: 'awaiting_verification' | 'partial' | 'failed' | 'action_required';
@@ -65,12 +59,6 @@ export function buildBuyJobReport(
       failures.length === 0 && actionRequireds.length === 0
         ? 'awaiting_verification'
         : 'partial';
-  } else if (dryRunPasses.length > 0) {
-    overallStatus = 'failed';
-    parentError =
-      failures.length === 0
-        ? `[DRY RUN OK] All ${dryRunPasses.length} profile(s) passed all checks and would have placed orders. No real Place Order click — flip to LIVE mode to actually buy.`
-        : `[DRY RUN] ${dryRunPasses.length} profile(s) would have placed orders; ${failures.length} failed verification.`;
   } else if (actionRequireds.length > 0) {
     overallStatus = 'action_required';
     parentError = actionRequireds[0]!.error ?? 'profile needs attention';
@@ -81,7 +69,7 @@ export function buildBuyJobReport(
 
   // Per-profile purchase rows. Live successes report as
   // awaiting_verification (NOT completed) so BG schedules the
-  // verify-phase job. Dry-runs ALWAYS report failed (no real order).
+  // verify-phase job.
   //
   // Defensive ?? null on optional fields: test mocks + future
   // ProfileResult variants may omit some fields. We never want this
@@ -91,14 +79,13 @@ export function buildBuyJobReport(
   // null fields than no row at all.
   const purchases = results.map((r) => ({
     amazonEmail: r.email,
-    status: r.dryRun
-      ? ('failed' as const)
-      : r.status === 'completed'
+    status:
+      r.status === 'completed'
         ? ('awaiting_verification' as const)
         : r.status === 'action_required'
           ? ('action_required' as const)
           : ('failed' as const),
-    ...(fillerByEmail.get(r.email) && !r.dryRun && r.status === 'completed'
+    ...(fillerByEmail.get(r.email) && r.status === 'completed'
       ? { viaFiller: true as const }
       : {}),
     purchasedCount: r.placedQuantity ?? 0,
@@ -220,7 +207,6 @@ export function syntheticFailedResult(
     placedQuantity: 0,
     error,
     stage: null,
-    dryRun: false,
     fillerOrderIds: [],
     amazonPurchaseId: null,
     targetAsin: null,

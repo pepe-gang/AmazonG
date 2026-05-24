@@ -21,7 +21,6 @@ function attempt(overrides: Partial<JobAttempt> = {}): JobAttempt {
     status: 'verified' as JobAttemptStatus,
     error: null,
     buyMode: 'single',
-    dryRun: false,
     trackingIds: null,
     fillerOrderIds: null,
     productTitle: null,
@@ -118,7 +117,6 @@ describe('computeProfit', () => {
     'in_progress',
     'cancelled_by_amazon',
     'failed',
-    'dry_run_success',
   ])('returns null for status=%s (buy did not place or did not stick)', (status) => {
     expect(computeProfit(attempt({ status }))).toBeNull();
   });

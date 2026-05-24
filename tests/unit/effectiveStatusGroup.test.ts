@@ -99,18 +99,6 @@ describe("effectiveStatusGroup", () => {
     });
   });
 
-  describe("dry_run_success exemption (no real order, no tracking expected)", () => {
-    it("dry_run_success without tracking stays success", () => {
-      const a = attempt({ status: "dry_run_success", trackingIds: null });
-      expect(effectiveStatusGroup(a)).toBe("success");
-    });
-
-    it("dry_run_success with empty trackingIds stays success", () => {
-      const a = attempt({ status: "dry_run_success", trackingIds: [] });
-      expect(effectiveStatusGroup(a)).toBe("success");
-    });
-  });
-
   describe("non-success buckets pass through unchanged", () => {
     it("queued is pending regardless of tracking", () => {
       expect(effectiveStatusGroup(attempt({ status: "queued" }))).toBe("pending");

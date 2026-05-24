@@ -2,17 +2,15 @@ import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import type { RendererStatus } from '../../shared/types.js';
-import { SNAPSHOT_ERROR_GROUPS } from '../../shared/snapshotGroups.js';
 import { useSettings } from '../hooks/useSettings.js';
 import { useConfirm } from '../components/ConfirmDialog.js';
-import { formatBytes, formatDate } from '../lib/format.js';
+import { formatDate } from '../lib/format.js';
 
 /* ============================================================
    Settings view (full page)
    Split out of AccountsView so the Accounts page stays focused on
-   per-account management. Anything global — live/dry-run, address
-   prefixes, headless default, auto-start, snapshots, BG link — lives
-   here.
+   per-account management. Anything global — address prefixes,
+   headless default, auto-start, parallel buys, BG link — lives here.
    ============================================================ */
 export function SettingsView({
   workerRunning,
@@ -36,7 +34,7 @@ export function SettingsView({
           <span>🔒</span>
           <span>
             Settings are locked while the worker is running. Click <b>Stop</b> in the header
-            to change live mode, prefixes, headless, auto-start, or snapshots.
+            to change prefixes, headless, auto-start, or parallel buys.
           </span>
         </div>
       )}
@@ -53,11 +51,9 @@ export function SettingsView({
           handleLockedClick();
         }}
       >
-        <LiveModePanel />
         <AllowedPrefixesPanel />
         <AutoStartWorkerPanel />
         <ParallelBuysPanel />
-        <SnapshotSettingsPanel />
         <BetterBGConnectionPanel identity={identity} workerRunning={workerRunning} />
       </div>
       {lockedToast && (
@@ -140,46 +136,6 @@ function ParallelBuysPanel() {
   );
 }
 
-/* ============================================================
-   Dry-run banner (toggle)
-   ============================================================ */
-function LiveModePanel() {
-  const { settings, busy, update } = useSettings();
-  if (!settings) return null;
-  const live = !settings.buyDryRun;
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Live mode</div>
-          <div className="prefix-sub">
-            When on, real Amazon orders are placed. When off, dry-run — runs the full flow
-            (including saved-address mutations like BG1/BG2) but stops before clicking Place Order.
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={live ? 'Real orders will be placed' : 'Dry-run — no orders placed'}
-        >
-          <Switch
-            checked={live}
-            onCheckedChange={(v) => void update({ buyDryRun: !v })}
-            disabled={busy}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {live ? 'On' : 'Off'}
-          </span>
-        </label>
-      </div>
-    </div>
-  );
-}
-
-/**
- * BetterBG identity + disconnect action. Lives with the other global
- * settings — irreversible "detach this device" belongs here, not in
- * the per-account list.
- */
 function BetterBGConnectionPanel({
   identity,
   workerRunning,
@@ -283,120 +239,6 @@ function AutoStartWorkerPanel() {
   );
 }
 
-function SnapshotSettingsPanel() {
-  const { settings, busy, update } = useSettings();
-  const [diskUsage, setDiskUsage] = useState<{ count: number; bytes: number } | null>(null);
-  const [clearing, setClearing] = useState(false);
-
-  useEffect(() => {
-    void window.autog.snapshotsDiskUsage().then(setDiskUsage);
-  }, []);
-
-  const clearSnapshots = async () => {
-    if (!confirm('Delete all snapshot files (screenshots, HTML, traces)? Job history and logs are kept.')) return;
-    setClearing(true);
-    try {
-      await window.autog.snapshotsClearAll();
-      setDiskUsage({ count: 0, bytes: 0 });
-    } finally {
-      setClearing(false);
-    }
-  };
-
-  if (!settings) return null;
-  const on = settings.snapshotOnFailure;
-  const groups = settings.snapshotGroups ?? [];
-  const allSelected = groups.length === 0;
-
-  const toggleGroup = (id: string) => {
-    if (allSelected) {
-      const next = SNAPSHOT_ERROR_GROUPS.map((g) => g.id).filter((g) => g !== id);
-      void update({ snapshotGroups: next });
-    } else if (groups.includes(id)) {
-      const next = groups.filter((g) => g !== id);
-      void update({ snapshotGroups: next });
-    } else {
-      const next = [...groups, id];
-      if (next.length >= SNAPSHOT_ERROR_GROUPS.length) {
-        void update({ snapshotGroups: [] });
-      } else {
-        void update({ snapshotGroups: next });
-      }
-    }
-  };
-
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Capture snapshots on failure</div>
-          <div className="prefix-sub">
-            When on, AmazonG saves a screenshot and HTML snapshot of the page whenever a checkout
-            error occurs. Snapshots appear in the log viewer for debugging. Stored locally, cleaned
-            up automatically after 30 days.
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Snapshots enabled' : 'Snapshots disabled'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={(v) => void update({ snapshotOnFailure: v })}
-            disabled={busy}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {on ? 'On' : 'Off'}
-          </span>
-        </label>
-      </div>
-      {on && (
-        <div className="snapshot-groups">
-          <div className="snapshot-groups-head">
-            <span className="prefix-sub">Capture errors:</span>
-            <button
-              className="ghost-btn snapshot-all-btn"
-              onClick={() => void update({ snapshotGroups: [] })}
-              disabled={busy || allSelected}
-            >
-              {allSelected ? 'All selected' : 'Select all'}
-            </button>
-          </div>
-          <div className="snapshot-group-list">
-            {SNAPSHOT_ERROR_GROUPS.map((g) => {
-              const checked = allSelected || groups.includes(g.id);
-              return (
-                <label key={g.id} className="snapshot-group-item">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleGroup(g.id)}
-                    disabled={busy}
-                  />
-                  <span>{g.label}</span>
-                </label>
-              );
-            })}
-          </div>
-        </div>
-      )}
-      {diskUsage && diskUsage.count > 0 && (
-        <div className="snapshot-disk">
-          <span className="snapshot-disk-label">
-            {diskUsage.count} snapshot{diskUsage.count !== 1 ? 's' : ''} · {formatBytes(diskUsage.bytes)}
-          </span>
-          <button
-            className="ghost-btn snapshot-clear-btn"
-            onClick={() => void clearSnapshots()}
-            disabled={clearing}
-          >
-            {clearing ? 'Clearing…' : 'Clear all snapshots'}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
 
 function AllowedPrefixesPanel() {
   const { settings, busy, update } = useSettings();

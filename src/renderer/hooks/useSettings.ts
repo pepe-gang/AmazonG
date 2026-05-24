@@ -8,8 +8,8 @@ import type { Settings } from '../../shared/ipc.js';
 const SETTINGS_EVENT = 'autog:settings-changed';
 
 /** Fetch settings once on mount + provide an updater. Used by the
- *  settings panels (LiveModePanel / HeadlessTogglePanel /
- *  AllowedPrefixesPanel) instead of each panel doing its own IPC dance.
+ *  settings panels (AllowedPrefixesPanel, ParallelBuysPanel, etc.)
+ *  instead of each panel doing its own IPC dance.
  *  Subscribes to SETTINGS_EVENT so that when one component updates a
  *  setting, every other `useSettings()` copy in the tree re-fetches
  *  and re-renders (previously each instance cached the initial fetch

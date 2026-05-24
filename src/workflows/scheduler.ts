@@ -488,7 +488,6 @@ export class StreamingScheduler {
               buyMode: ctx.fillerByEmail.get(t.profile.email)
                 ? 'filler'
                 : 'single',
-              dryRun: this.sd.deps.buyDryRun,
               trackingIds: null,
               fillerOrderIds: null,
               fillerCancelTasks: null,
@@ -835,7 +834,6 @@ export class StreamingScheduler {
       placedQuantity: 0,
       error: null,
       stage: null,
-      dryRun: false,
       fillerOrderIds: [],
       amazonPurchaseId: null,
       targetAsin: null,

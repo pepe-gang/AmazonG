@@ -22,7 +22,6 @@ import { recordPlacedOrderEvent } from '../main/placedOrderLedger.js';
 import { captureGhostForensic } from '../main/ghostForensics.js';
 
 type BuyOptions = {
-  dryRun: boolean;
   minCashbackPct: number;
   /** Per-account toggle (default true). When false, the cashback gate
    *  is skipped entirely and a missing on-page reading defaults to
@@ -324,7 +323,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
   const dealAsin = parseAsinFromUrl(page.url());
 
   try {
-    step('step.buy.start', { dryRun: opts.dryRun, productUrl: page.url() });
+    step('step.buy.start', { productUrl: page.url() });
 
     // 1. Quantity: read the max numeric option from the PDP's #quantity
     //    dropdown so the HTTP cart-add commits the right quantity in
@@ -648,26 +647,6 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     }
     let cashbackPct: number | null = gate.cashbackPct;
 
-    // 8. Dry-run gate — stop before clicking Place Order. Treat as a
-    //    POSITIVE outcome: every check passed, the only thing skipped was
-    //    the final irreversible click.
-    if (opts.dryRun) {
-      step('step.buy.dryrun.success', {
-        cashbackPct,
-        message: `✓ Dry run successful — order would have been placed (cashback ${cashbackPct ?? 'n/a'}%). Skipped Place Order click.`,
-      });
-      return {
-        ok: true,
-        dryRun: true,
-        orderId: null,
-        amazonPurchaseId: null,
-        finalPrice: null,
-        finalPriceText: null,
-        cashbackPct,
-        quantity: placedQuantity,
-      };
-    }
-
     // 9. Pre-place stability. Amazon can flag orders submitted mid-render
     //    after a delivery/address update; we want the Place Order button
     //    to be visible/stable before clicking. Was previously a blind 1s
@@ -919,7 +898,6 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
     });
     return {
       ok: true,
-      dryRun: false,
       orderId,
       amazonPurchaseId,
       finalPrice: confirmation.finalPrice,

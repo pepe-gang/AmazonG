@@ -34,7 +34,7 @@ import { runBuyTuple } from './runners.js';
 import { buildBuyJobReport } from './jobReport.js';
 import { shouldUseFillers } from '../shared/fillerMode.js';
 import { logger } from '../shared/logger.js';
-import { captureFailureSnapshot, discardTracing, shouldCapture, startTracing } from '../browser/snapshot.js';
+import { captureFailureSnapshot, discardTracing, startTracing } from '../browser/snapshot.js';
 import { makeAttemptId, parseAsinFromUrl } from '../shared/sanitize.js';
 import type {
   AmazonProfile,
@@ -85,11 +85,7 @@ export type Deps = {
   userDataRoot: string;
   /** Where buyNow drops debug screenshots when checkout silently fails. */
   debugDir: string;
-  /** Snapshot capture settings — read from Settings at worker start. */
-  snapshotOnFailure: boolean;
-  snapshotGroups: string[];
   headless: boolean;
-  buyDryRun: boolean;
   /**
    * Global "Buy with Fillers" switch — when true EVERY enabled account's
    * buy phase routes through the cart+filler flow (Buy Now as add-to-cart,
@@ -737,7 +733,6 @@ async function runFillerBuyWithRetries(
         job.bypassPrimeCheck === true || deps.bypassPrimeCheck === true,
       bgNameToggleEnabled: deps.bgNameToggleEnabled,
       resolveCardNumber: deps.resolveCardNumber,
-      dryRun: deps.buyDryRun,
       fillerPool: effectivePool,
       fillerCount: deps.fillerCount,
       attemptedAsins,
@@ -812,10 +807,8 @@ function fillerToBuyResult(f: BuyWithFillersResult): BuyResult {
       ...(f.detail ? { detail: f.detail } : {}),
     };
   }
-  const isDryRun = f.stage === 'dry_run_success';
   return {
     ok: true,
-    dryRun: isDryRun,
     orderId: 'orderId' in f ? f.orderId : null,
     amazonPurchaseId: f.amazonPurchaseId,
     finalPrice: 'finalPrice' in f ? f.finalPrice : null,
@@ -835,15 +828,14 @@ export type ProfileResult = {
   /** Quantity actually checked out (max numeric option from /spc dropdown). */
   placedQuantity: number;
   error: string | null;
-  /** Failure stage from BuyResult.stage (null on success, dry run, or
-   *  pre-buy verify-stage failures). Propagated to BG so the server can
-   *  decide on follow-up actions like auto-rebuy on cashback_gate
-   *  without text-matching the reason string. */
+  /** Failure stage from BuyResult.stage (null on success or pre-buy
+   *  verify-stage failures). Propagated to BG so the server can decide
+   *  on follow-up actions like auto-rebuy on cashback_gate without
+   *  text-matching the reason string. */
   stage: string | null;
-  dryRun: boolean;
   /** Filler-only order ids from this profile's Place Order fan-out.
-   *  Empty on single-mode / dry-run / failure. Snapshot at buy time —
-   *  propagated to BG via the /status report for the audit trail. */
+   *  Empty on single-mode / failure. Snapshot at buy time — propagated
+   *  to BG via the /status report for the audit trail. */
   fillerOrderIds: string[];
   /** Amazon's checkout-session purchaseId from the thank-you URL.
    *  Distinct from orderId; one per Place Order click, persists across
@@ -1150,7 +1142,7 @@ async function handleVerifyJob(
   let verifyPage: Page | null = null;
   try {
     const session = await getSession(deps, sessions, profile.email, profile.headless);
-    if (deps.snapshotOnFailure) await startTracing(session.context);
+    if (await isUnpackagedRun()) await startTracing(session.context);
     // Always open a fresh page for the verify work. Reusing
     // `context.pages()[0]` would navigate a user-owned tab when the
     // session was borrowed from openOrderSessions, and leave that tab
@@ -2078,7 +2070,6 @@ async function resolveRolloverAttemptRow(
       status: 'in_progress',
       error: null,
       buyMode: 'single',
-      dryRun: false,
       trackingIds: null,
       fillerOrderIds: null,
       cartAsins: null,
@@ -2613,7 +2604,7 @@ export async function runForProfile(
         return aborted;
       }
     }
-    if (deps.snapshotOnFailure) await startTracing(session.context);
+    if (await isUnpackagedRun()) await startTracing(session.context);
     // Always open our own page. A borrowed session (user previously
     // clicked "Order ID" on this profile, opening a window tracked in
     // openOrderSessions) would otherwise have the user's tab at
@@ -2915,7 +2906,6 @@ export async function runForProfile(
       productTitle = r.productTitle;
     } else {
       buy = await buyNow(page, {
-        dryRun: deps.buyDryRun,
         minCashbackPct: effectiveMinCashbackPct,
         requireMinCashback,
         bypassPriceCheck: job.bypassPriceCheck === true,
@@ -2984,39 +2974,23 @@ export async function runForProfile(
         : failed(profile, error, buy.stage);
     }
 
-    if (session && deps.snapshotOnFailure) await discardTracing(session.context);
+    if (session && (await isUnpackagedRun())) await discardTracing(session.context);
 
-    if (buy.dryRun) {
-      logger.info(
-        'job.profile.dryrun.success',
-        {
-          jobId: job.id,
-          profile,
-          cashbackPct: buy.cashbackPct,
-          message: `✓ Dry run successful for ${profile} — would have placed an order (cashback ${buy.cashbackPct ?? 'n/a'}%)`,
-        },
-        cid,
-      );
-      // Close the session so the visible browser window goes away. Next
-      // job for this profile will reopen a fresh session.
-      await closeAndForgetSession(sessions, profile);
-    } else {
-      logger.info(
-        'job.profile.placed',
-        {
-          jobId: job.id,
-          profile,
-          orderId: buy.orderId,
-          finalPrice: buy.finalPrice,
-          cashbackPct: buy.cashbackPct,
-          message: `✓ Order placed for ${profile} — orderId ${buy.orderId ?? '(unknown)'}`,
-        },
-        cid,
-      );
-      // Close the session so the visible browser window goes away on
-      // successful live placements (mirrors dry-run cleanup).
-      await closeAndForgetSession(sessions, profile);
-    }
+    logger.info(
+      'job.profile.placed',
+      {
+        jobId: job.id,
+        profile,
+        orderId: buy.orderId,
+        finalPrice: buy.finalPrice,
+        cashbackPct: buy.cashbackPct,
+        message: `✓ Order placed for ${profile} — orderId ${buy.orderId ?? '(unknown)'}`,
+      },
+      cid,
+    );
+    // Close the session so the visible browser window goes away on
+    // successful placements.
+    await closeAndForgetSession(sessions, profile);
 
     const placedAt = new Date().toISOString();
     // Ghost-order guard. buyNow / buyWithFillers only return ok:true
@@ -3030,7 +3004,7 @@ export async function runForProfile(
     // message pointing the user at Amazon's order history. We still
     // keep placedAt + amazonPurchaseId + filler context so the row is
     // a real, reconcilable record — not a vanished order.
-    const orderIdUnknown = !buy.dryRun && !buy.orderId;
+    const orderIdUnknown = !buy.orderId;
     const orderIdUnknownError = orderIdUnknown
       ? `Order placed but AmazonG could not capture the Amazon orderId. Open Amazon order history for ${profile} and reconcile manually` +
         (buy.amazonPurchaseId
@@ -3054,11 +3028,9 @@ export async function runForProfile(
     // cancel it. Show as "Waiting for Verification" in the table.
     // orderId-unknown placements go to action_required instead — verify
     // can't run without an orderId, and a human needs to reconcile.
-    const finalStatus: JobAttemptStatus = buy.dryRun
-      ? 'dry_run_success'
-      : orderIdUnknown
-        ? 'action_required'
-        : 'awaiting_verification';
+    const finalStatus: JobAttemptStatus = orderIdUnknown
+      ? 'action_required'
+      : 'awaiting_verification';
     // Retail price source: Amazon's confirmation page first (reflects any
     // mid-flow delivery-price bumps), PDP scrape as fallback when the
     // confirmation parser doesn't find a price element. Used for BOTH
@@ -3105,7 +3077,6 @@ export async function runForProfile(
       placedQuantity: buy.quantity,
       error: orderIdUnknownError,
       stage: null,
-      dryRun: buy.dryRun,
       fillerOrderIds,
       amazonPurchaseId: buy.amazonPurchaseId,
       targetAsin: parseAsinFromUrl(job.productUrl),
@@ -3192,10 +3163,12 @@ async function maybeSnapshot(
   cid: string,
   logCtx: Record<string, unknown>,
 ): Promise<void> {
-  if (page && shouldCapture(error, deps.snapshotOnFailure, deps.snapshotGroups)) {
+  const inDev = await isUnpackagedRun();
+  if (page && inDev) {
     const snap = await captureFailureSnapshot(page, attemptId, session?.context).catch(() => null);
     if (snap) logger.info('snapshot.captured', { ...logCtx, ...snap }, cid);
-  } else if (session && deps.snapshotOnFailure) {
+  } else if (session && inDev) {
+    // Dev started tracing earlier — stop it cleanly when we can't capture.
     await discardTracing(session.context).catch(() => undefined);
   }
 }
@@ -3211,7 +3184,6 @@ function failed(email: string, error: string, stage: string | null = null): Prof
     placedQuantity: 0,
     error,
     stage,
-    dryRun: false,
     fillerOrderIds: [],
     amazonPurchaseId: null,
     targetAsin: null,
@@ -3238,7 +3210,6 @@ function actionRequired(email: string, error: string, stage: string | null = nul
     placedQuantity: 0,
     error,
     stage,
-    dryRun: false,
     fillerOrderIds: [],
     amazonPurchaseId: null,
     targetAsin: null,

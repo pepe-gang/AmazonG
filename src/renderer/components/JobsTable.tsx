@@ -1120,10 +1120,9 @@ function JobsCell({
           ) : (
             <div className="cell-item-title">{a.dealTitle ?? '(untitled)'}</div>
           )}
-          {(a.phase === 'verify' || a.dryRun) && (
+          {a.phase === 'verify' && (
             <div className="cell-item-sub">
-              {a.phase === 'verify' ? <span className="chip chip-purple">VERIFY</span> : null}
-              {a.dryRun ? <span className="chip chip-blue">DRY-RUN</span> : null}
+              <span className="chip chip-purple">VERIFY</span>
             </div>
           )}
         </td>

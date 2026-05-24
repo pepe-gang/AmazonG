@@ -7,9 +7,6 @@ import type { FillerPool, Settings } from '../shared/ipc.js';
 const DEFAULTS: Settings = {
   headless: true,
   bgBaseUrl: process.env.BG_BASE_URL ?? 'https://betterbg.vercel.app',
-  // Default to Live mode — fresh installs should buy for real. Flip to true
-  // via Settings if you want the dry-run preview (no Place Order click).
-  buyDryRun: false,
   minCashbackPct: 6,
   // Matches the house-number prefixes AutoG hardcoded for BG's warehouses
   // (e.g. "13132 NE Portland Way" — prefix "13132"). Users can override via
@@ -19,8 +16,6 @@ const DEFAULTS: Settings = {
   jobsColumnOrder: [],
   jobsColumnHidden: [],
   jobsStatusFilter: [],
-  snapshotOnFailure: false,
-  snapshotGroups: [],
   buyWithFillers: false,
   fillerCount: 8,
   // One eero attempt by default — no retries. Users add attempts (and

@@ -91,7 +91,7 @@ import {
   setAccountSnapshot,
 } from './chaseAccountSnapshotStore.js';
 import { openSession } from '../browser/driver.js';
-import { snapshotDir, snapshotsDiskUsage, clearAllSnapshots } from '../browser/snapshot.js';
+import { snapshotDir } from '../browser/snapshot.js';
 import { compareSemver } from '../shared/version.js';
 import { isLoggedInAmazon, loginAmazon } from '../actions/loginAmazon.js';
 import type { AmazonProfile, CreditCardSafe, CreditCardInput, CreditCardEdit, IdentityInfo, RendererStatus } from '../shared/types.js';
@@ -645,7 +645,6 @@ function serverRowToJobAttempt(s: ServerPurchase): JobAttempt {
     // post-prune; making that case durable needs an AutoBuyPurchase
     // column (separate migration).
     buyMode: s.viaFiller ? 'filler' : 'single',
-    dryRun: false,
     trackingIds: s.trackingIds ?? null,
     // BG now serves fillerOrderIds in /api/autog/purchases. Read it so
     // the column survives the local 30-day prune — pre-fix the field
@@ -735,7 +734,6 @@ async function listMergedAttempts(): Promise<JobAttempt[]> {
       merged.set(k, {
         ...existing,
         attemptId: l.attemptId,
-        dryRun: l.dryRun,
         ...(preferLocalStatus
           ? { status: l.status, error: l.error ?? existing.error }
           : {}),
@@ -1131,10 +1129,7 @@ async function startWorkerNow(): Promise<void> {
     bg,
     userDataRoot: profileDir(),
     debugDir: join(app.getPath('userData'), 'debug-screenshots'),
-    snapshotOnFailure: settings.snapshotOnFailure,
-    snapshotGroups: settings.snapshotGroups,
     headless: settings.headless,
-    buyDryRun: settings.buyDryRun,
     buyWithFillers: settings.buyWithFillers,
     minCashbackPct: settings.minCashbackPct,
     allowedAddressPrefixes: settings.allowedAddressPrefixes,
@@ -2850,8 +2845,6 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC.jobsOpenTrace, (_e, attemptId: string) => {
     shell.showItemInFolder(join(snapshotDir(attemptId), 'trace.zip'));
   });
-  ipcMain.handle(IPC.snapshotsDiskUsage, () => snapshotsDiskUsage());
-  ipcMain.handle(IPC.snapshotsClearAll, () => clearAllSnapshots());
   ipcMain.handle(IPC.jobsClearAll, async () => {
     await storeClearAll();
     scheduleBroadcastJobs();

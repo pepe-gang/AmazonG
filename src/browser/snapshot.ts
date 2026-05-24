@@ -1,8 +1,7 @@
 import type { BrowserContext, Page } from 'playwright';
-import { mkdir, writeFile, readdir, stat, rm } from 'node:fs/promises';
+import { mkdir, writeFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { app } from 'electron';
-export { classifyError, shouldCapture } from '../shared/snapshotGroups.js';
 
 export type SnapshotResult = {
   screenshotPath: string;
@@ -81,38 +80,10 @@ export async function captureFailureSnapshot(
 }
 
 /**
- * Calculate disk usage of all snapshot directories.
- * Returns { count: number of attempt dirs, bytes: total size }.
- */
-export async function snapshotsDiskUsage(): Promise<{ count: number; bytes: number }> {
-  const dir = snapshotsDir();
-  let entries: string[];
-  try {
-    entries = await readdir(dir);
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { count: 0, bytes: 0 };
-    throw err;
-  }
-  const results = await Promise.all(
-    entries.map(async (entry) => {
-      try {
-        const entryPath = join(dir, entry);
-        const s = await stat(entryPath);
-        if (!s.isDirectory()) return { count: 0, bytes: 0 };
-        const files = await readdir(entryPath);
-        const sizes = await Promise.all(
-          files.map((f) => stat(join(entryPath, f)).then((s) => s.size).catch(() => 0)),
-        );
-        return { count: 1, bytes: sizes.reduce((a, b) => a + b, 0) };
-      } catch { return { count: 0, bytes: 0 }; }
-    }),
-  );
-  return results.reduce((acc, r) => ({ count: acc.count + r.count, bytes: acc.bytes + r.bytes }), { count: 0, bytes: 0 });
-}
-
-/**
  * Delete all snapshot directories. Returns number of dirs removed.
- * Job rows and logs are kept — only the heavy debug files go away.
+ * Called from jobStore.clearAll() — wipes the snapshot folder when the
+ * user clears the attempts table. Captures only happen in dev mode, so
+ * this is a no-op for packaged installs (no snapshots to delete).
  */
 export async function clearAllSnapshots(): Promise<number> {
   const dir = snapshotsDir();

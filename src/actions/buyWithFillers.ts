@@ -139,13 +139,6 @@ type BuyWithFillersOptions = {
    */
   resolveCardNumber?: (last4: string) => Promise<string | null>;
   /**
-   * When true, stop immediately before the final "Place Order" click.
-   * All other mutations (cart edits, address swap, BG name toggle) still
-   * run — they're intentional — but we skip the one irreversible step
-   * so the user can verify the pipeline without spending money.
-   */
-  dryRun: boolean;
-  /**
    * Filler-search-term pool. 'eero' / 'amazon-basics' use narrow
    * brand-specific term lists; 'general' (default) uses the broad
    * impulse mix. Prime + $20–$100 rules unchanged across pools.
@@ -288,12 +281,6 @@ type BuyWithFillersSuccessBase = {
 };
 
 export type BuyWithFillersResult =
-  | (BuyWithFillersSuccessBase & {
-      /** Dry-run short-circuit: every check and mutation ran EXCEPT the
-       *  final Place Order click. Safe outcome — treat as a validation
-       *  pass, not a placed order. */
-      stage: 'dry_run_success';
-    })
   | (BuyWithFillersSuccessBase & {
       /** Order placed — Place Order was clicked AND the confirmation
        *  page (or its follow-up "you placed a similar order" interstitial)
@@ -1788,34 +1775,9 @@ export async function buyWithFillers(
     placeOrderSelector: ready.detected,
     targetCashbackPct,
     placedQuantity,
-    // Filled in below on the placed path; null on dry-run since Place
-    // Order was never clicked.
+    // Filled in below once Place Order goes through.
     amazonPurchaseId: null as string | null,
   };
-
-  // 12. Dry-run gate. Every mutation above this line is intentional —
-  //     cart edits, address selection, BG name toggle are part of the
-  //     workflow we want to validate. The ONLY thing dry-run skips is
-  //     the irreversible Place Order click.
-  if (opts.dryRun) {
-    logger.info(
-      'step.fillerBuy.dryrun.success',
-      {
-        targetCashbackPct,
-        fillersAdded,
-        message:
-          `✓ Dry run successful — order would have been placed ` +
-          `(cashback ${targetCashbackPct ?? 'n/a'}%, ${fillersAdded}/${fillerTargetCount} fillers). ` +
-          `Skipped Place Order click.`,
-      },
-      cid,
-    );
-    return {
-      ok: true,
-      stage: 'dry_run_success',
-      ...successBase,
-    };
-  }
 
   // 13. Click Place Order. Mirrors buyNow's checkout[9]-[10]: locate the
   //     Place Order control across Amazon's layout variants, then wait

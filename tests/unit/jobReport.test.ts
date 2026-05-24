@@ -20,7 +20,6 @@ function res(overrides: Partial<ProfileResult> & { email: string; status: Profil
     placedQuantity: 0,
     error: null,
     stage: null,
-    dryRun: false,
     fillerOrderIds: [],
     amazonPurchaseId: null,
     targetAsin: null,
@@ -86,32 +85,6 @@ describe('buildBuyJobReport — overall status rollup', () => {
     expect(r.error).toBe('verify-card');
   });
 
-  it('all dry-run successes → failed with [DRY RUN OK] prefix', () => {
-    const r = buildBuyJobReport({
-      results: [
-        res({ email: 'a@x', status: 'completed', dryRun: true }),
-        res({ email: 'b@x', status: 'completed', dryRun: true }),
-      ],
-      fillerByEmail: new Map(),
-    });
-    expect(r.status).toBe('failed');
-    expect(r.error).toMatch(/^\[DRY RUN OK\]/);
-    expect(r.error).toContain('2 profile(s)');
-  });
-
-  it('mixed dry-run + real failures → failed with [DRY RUN] (no OK)', () => {
-    const r = buildBuyJobReport({
-      results: [
-        res({ email: 'a@x', status: 'completed', dryRun: true }),
-        res({ email: 'b@x', status: 'failed', error: 'oos' }),
-      ],
-      fillerByEmail: new Map(),
-    });
-    expect(r.status).toBe('failed');
-    expect(r.error).toMatch(/^\[DRY RUN\]/);
-    expect(r.error).not.toMatch(/\[DRY RUN OK\]/);
-  });
-
   it('empty results array → failed with default error', () => {
     const r = buildBuyJobReport({
       results: [],
@@ -160,17 +133,6 @@ describe('buildBuyJobReport — winner selection (placed* fields)', () => {
     expect(r.placedEmail).toBe('b@x');
   });
 
-  it('does NOT pick dry-run results as winner', () => {
-    const r = buildBuyJobReport({
-      results: [
-        res({ email: 'dry@x', status: 'completed', dryRun: true, placedCashbackPct: 9 }),
-        res({ email: 'real@x', status: 'completed', dryRun: false, placedCashbackPct: 3, orderId: '111-1' }),
-      ],
-      fillerByEmail: new Map(),
-    });
-    expect(r.placedEmail).toBe('real@x');
-  });
-
   it('placed fields are null when no real success', () => {
     const r = buildBuyJobReport({
       results: [
@@ -198,14 +160,6 @@ describe('buildBuyJobReport — purchases rows', () => {
     expect(r.purchases![0]!.orderId).toBe('111-1');
   });
 
-  it('completed-dryrun → failed (BG must NOT schedule verify)', () => {
-    const r = buildBuyJobReport({
-      results: [res({ email: 'a@x', status: 'completed', dryRun: true })],
-      fillerByEmail: new Map(),
-    });
-    expect(r.purchases![0]!.status).toBe('failed');
-  });
-
   it('action_required → action_required', () => {
     const r = buildBuyJobReport({
       results: [res({ email: 'a@x', status: 'action_required', error: 'signed_out' })],
@@ -231,12 +185,10 @@ describe('buildBuyJobReport — purchases rows', () => {
         res({ email: 'filler@x', status: 'completed', orderId: '111-1' }),
         res({ email: 'single@x', status: 'completed', orderId: '111-2' }),
         res({ email: 'failed-filler@x', status: 'failed', error: 'oos' }),
-        res({ email: 'dryrun-filler@x', status: 'completed', dryRun: true }),
       ],
       fillerByEmail: new Map([
         ['filler@x', true],
         ['failed-filler@x', true],
-        ['dryrun-filler@x', true],
         ['single@x', false],
       ]),
     });
@@ -244,7 +196,6 @@ describe('buildBuyJobReport — purchases rows', () => {
     expect((byEmail.get('filler@x') as { viaFiller?: boolean }).viaFiller).toBe(true);
     expect((byEmail.get('single@x') as { viaFiller?: boolean }).viaFiller).toBeUndefined();
     expect((byEmail.get('failed-filler@x') as { viaFiller?: boolean }).viaFiller).toBeUndefined();
-    expect((byEmail.get('dryrun-filler@x') as { viaFiller?: boolean }).viaFiller).toBeUndefined();
   });
 
   it('fillerOrderIds is included only when non-empty', () => {
@@ -302,7 +253,6 @@ describe('syntheticFailedResult', () => {
     expect(r.email).toBe('victim@x');
     expect(r.status).toBe('failed');
     expect(r.error).toBe('lock acquire failed');
-    expect(r.dryRun).toBe(false);
     expect(r.placedQuantity).toBe(0);
     expect(r.fillerOrderIds).toEqual([]);
     // every other optional field is null
