@@ -986,8 +986,8 @@ function BgNameTogglePanel() {
 function RedisPushPanel() {
   const { settings, update, busy } = useSettings();
   if (!settings) return null;
-  // Default off — the migration ships dark (Phase 0). Operator opts
-  // in explicitly per the rollout plan.
+  // Default ON since v0.13.79. Polling stays as a safety-net fallback
+  // when the subscriber can't reach BG's Redis channel.
   const on = settings.useRedisPush === true;
   const toggle = async () => {
     await update({ useRedisPush: !on });
@@ -996,16 +996,15 @@ function RedisPushPanel() {
     <div className="prefix-panel">
       <div className="prefix-head">
         <div>
-          <div className="prefix-title">Use Redis push (experimental)</div>
+          <div className="prefix-title">Use Redis push</div>
           <div className="prefix-sub">
             When on, the worker subscribes to BetterBG&apos;s Redis
             &quot;job-ready&quot; channel and wakes the instant a new
             job is created instead of polling every 10s. Drops pickup
             latency to under 100ms and cuts Vercel invocations
-            dramatically. Requires Better-BuyingGroup to have
-            REDIS_NOTIFY_ENABLED on; otherwise the worker silently
-            falls back to polling. Takes effect on the next worker
-            Start.
+            dramatically. Polling stays on as a safety net — turning
+            this off forces the worker into poll-only mode. Takes
+            effect on the next worker Start.
           </div>
         </div>
         <label

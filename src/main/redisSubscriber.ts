@@ -1,7 +1,11 @@
 /**
  * AmazonG-side Redis pub/sub subscriber for the "job-ready" doorbell.
+ * Shipped in v0.13.78 + default-on since v0.13.79.
  *
- * Phase 0 of the Path C migration — see
+ * Replaces the prior poll-every-10s loop with an instant wake when BG
+ * publishes a job for this user. The 10s poll loop stays active as a
+ * safety-net fallback (handles disconnects, cold-start race, and old
+ * AmazonG versions). Background:
  * docs/migration/redis-pub-sub-push.md in the BetterBG repo.
  *
  * Lifecycle:

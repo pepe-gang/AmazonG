@@ -1256,9 +1256,9 @@ async function startWorkerNow(): Promise<void> {
   lastError = null;
   broadcastStatus();
 
-  // Path C: start the Redis pub/sub subscriber if the user has
-  // opted in. Failure is non-fatal — the scheduler's idle wait
-  // race still works; the wake side just never fires.
+  // Start the Redis pub/sub subscriber (default on since v0.13.79).
+  // Failure is non-fatal — the scheduler's idle wait race still works
+  // via the 10s poll fallback; the wake side just never fires.
   // Account-config orchestrator deps — uses the SAME openSession
   // primitive the rest of the worker does. closeSession is best-
   // effort; we don't track sessions here because the orchestrator

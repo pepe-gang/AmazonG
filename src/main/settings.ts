@@ -62,13 +62,12 @@ const DEFAULTS: Settings = {
   // worker-wide (every account, every job). See ipc.ts for the
   // full rationale.
   bypassPrimeCheck: false,
-  // Redis pub/sub push (Path C migration, Phase 3). On by default
-  // as of v0.13.79 after Phase 2 soak validated sub-100ms wakes and
-  // the safety-net 10s Postgres poll remains active as defense in
-  // depth. Users on saved settings keep their existing value; only
-  // fresh installs pick up this default. Operators can flip off via
-  // Settings → Accounts → "Use Redis push" if Upstash has issues.
-  // See docs/migration/redis-pub-sub-push.md in the BetterBG repo.
+  // Redis pub/sub push subscriber. Default ON since v0.13.79.
+  // Subscriber connects to BG's job-ready channel for sub-100ms wakes;
+  // the 10s Postgres poll stays active as defense-in-depth (handles
+  // Upstash disconnects + cold-start race + old AmazonG versions that
+  // poll-only). Operators flip off via Settings → Accounts → "Use
+  // Redis push" to force poll-only mode for debugging.
   useRedisPush: true,
 };
 
