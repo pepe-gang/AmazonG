@@ -277,26 +277,19 @@ export function verifyProductDetailed(
   // is recoverable on a fresh scrape and is exactly the case the
   // bypassPrimeCheck toggle exists to override.
   if (c.requirePrime) {
-    if (info.isPrime === false) {
+    if (info.isPrime !== true) {
+      const confirmedNo = info.isPrime === false;
       const step: CheckStep = {
         name: 'prime',
         pass: false,
-        observed: 'no visible prime badge',
+        observed: confirmedNo
+          ? 'no visible prime badge'
+          : 'prime status indeterminate (page likely partial/blocked)',
         expected: 'prime badge',
-        reason: 'not_prime',
-        detail: 'item is not Prime-eligible',
-      };
-      steps.push(step);
-      return { ok: false, reason: step.reason, detail: step.detail, steps };
-    }
-    if (info.isPrime === null) {
-      const step: CheckStep = {
-        name: 'prime',
-        pass: false,
-        observed: 'prime status indeterminate (page likely partial/blocked)',
-        expected: 'prime badge',
-        reason: 'prime_unconfirmed',
-        detail: 'could not confirm Prime — refusing to place order',
+        reason: confirmedNo ? 'not_prime' : 'prime_unconfirmed',
+        detail: confirmedNo
+          ? 'item is not Prime-eligible'
+          : 'could not confirm Prime — refusing to place order',
       };
       steps.push(step);
       return { ok: false, reason: step.reason, detail: step.detail, steps };
