@@ -807,8 +807,12 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
     },
 
     async getUserAutoBuy() {
+      // /api/autog/auto-buy — bearer-authed mirror of /api/user/auto-buy.
+      // The /api/user/* route uses NextAuth session cookies; desktop has
+      // no browser session, so we use the dedicated /api/autog/* route
+      // that authenticates via the bearer apiKey.
       return await request<{ enabled: boolean; autoRebuyOnCancelMax: number }>(
-        '/api/user/auto-buy',
+        '/api/autog/auto-buy',
         { method: 'GET' },
       );
     },
@@ -817,11 +821,13 @@ export function createBGClient(baseUrl: string, apiKey: string): BGClient {
       const r = await request<{
         enabled: boolean;
         autoRebuyOnCancelMax: number;
-      }>('/api/user/auto-buy', {
+      }>('/api/autog/auto-buy', {
         method: 'PATCH',
         body: JSON.stringify(patch),
       });
-      if (!r) throw new BGApiError(500, '/api/user/auto-buy', 'empty response');
+      if (!r) {
+        throw new BGApiError(500, '/api/autog/auto-buy', 'empty response');
+      }
       return r;
     },
   };
