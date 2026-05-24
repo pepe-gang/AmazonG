@@ -63,7 +63,7 @@ export function SettingsView({
       </div>
       {lockedToast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 glass-strong px-4 py-2 text-sm rounded-full shadow-lg z-50" role="status">
-          Stop the worker first — settings can't be changed while jobs are polling.
+          Stop the worker first — settings can't be changed while the worker is running.
         </div>
       )}
     </div>
@@ -239,7 +239,7 @@ function BetterBGConnectionPanel({
           disabled={busy || workerRunning}
           title={
             workerRunning
-              ? 'Stop the worker first — can\'t disconnect while jobs are polling'
+              ? 'Stop the worker first — can\'t disconnect while the worker is running'
               : 'Unlink this device from BetterBG'
           }
         >
@@ -261,7 +261,7 @@ function AutoStartWorkerPanel() {
         <div>
           <div className="prefix-title">Auto-start worker</div>
           <div className="prefix-sub">
-            When on, the polling worker starts as soon as AmazonG launches (assuming you're
+            When on, the worker starts as soon as AmazonG launches (assuming you're
             connected to BetterBG). Pairs well with leaving the app running in the background —
             you don't have to click Start every time.
           </div>

@@ -681,8 +681,8 @@ export function JobsTable({
         {attempts.length === 0 ? (
           <div className="flex items-center justify-center min-h-[200px] text-sm text-muted-foreground text-center px-8">
             {workerRunning
-              ? 'Worker is polling. Rows will appear once a job is claimed.'
-              : 'Click Start to begin polling BetterBG for jobs. Each claimed job will create one row per Amazon account.'}
+              ? 'Worker is running. Rows will appear once BetterBG queues a job.'
+              : 'Click Start to begin claiming jobs from BetterBG. Each claimed job will create one row per Amazon account.'}
           </div>
         ) : visible.length === 0 ? (
           <div className="flex items-center justify-center min-h-[200px] text-sm text-muted-foreground">

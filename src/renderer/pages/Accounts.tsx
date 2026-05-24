@@ -89,7 +89,7 @@ export function AccountsView({
       </div>
       {lockedToast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 glass-strong px-4 py-2 text-sm rounded-full shadow-lg z-50" role="status">
-          Stop the worker first — accounts can't be changed while jobs are polling.
+          Stop the worker first — accounts can't be changed while the worker is running.
         </div>
       )}
     </div>

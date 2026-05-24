@@ -225,7 +225,7 @@ export type Settings = {
    */
   allowedAddressPrefixes: string[];
   /**
-   * Whether the polling worker should start automatically when the app
+   * Whether the worker should start automatically when the app
    * launches (assuming a connected BG identity exists). Off by default
    * so a fresh launch doesn't start spending money before the user has
    * had a chance to review settings.

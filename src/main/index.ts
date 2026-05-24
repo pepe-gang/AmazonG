@@ -1100,7 +1100,7 @@ function resizeToOnboarding(): void {
 }
 
 /**
- * Start the polling worker with the current persisted settings + identity.
+ * Start the worker with the current persisted settings + identity.
  * Called from the workerStart IPC handler AND from the auto-start hook
  * on app launch when settings.autoStartWorker is on.
  *
