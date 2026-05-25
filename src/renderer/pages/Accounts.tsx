@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Switch } from '@/components/ui/switch';
 import type { AmazonProfile, CreditCardSafe } from '../../shared/types.js';
-import type { FillerPool } from '../../shared/ipc.js';
 import { useSettings } from '../hooks/useSettings.js';
 import { useConfirm } from '../components/ConfirmDialog.js';
 import { PencilIcon, PlusIcon, UsersIcon } from '../components/icons.js';
@@ -16,9 +15,14 @@ const CARDS_EVENT = 'autog:cards-changed';
 
 /* ============================================================
    Accounts view (full page)
-   Per-account management lives here. Global toggles (live mode,
-   prefixes, headless default, auto-start, snapshots, BG link) moved
-   to the Settings page.
+   Per-account management ONLY:
+     1. Credit cards (CreditCardsPanel)
+     2. Amazon accounts list (AccountsList) — enable / autoBuy /
+        per-account filler override / login button on each row
+   Every global / worker-wide knob (filler defaults, Prime check,
+   BG1/BG2 toggle, parallel buys, prefixes, auto-rebuy, BG identity,
+   auto-start) moved to the Settings page under the Auto-Buy /
+   Worker / BetterBG sections.
    ============================================================ */
 export function AccountsView({
   profiles,
@@ -46,27 +50,6 @@ export function AccountsView({
           </span>
         </div>
       )}
-      <div
-        className={
-          'flex flex-col gap-3 ' +
-          (workerRunning ? 'opacity-60 pointer-events-none' : '')
-        }
-        aria-disabled={workerRunning}
-        onClickCapture={(e) => {
-          if (!workerRunning) return;
-          // Intercept clicks on any descendant — don't let them reach the
-          // now-disabled buttons. Scroll / wheel events still pass through
-          // because this is click-only.
-          e.preventDefault();
-          e.stopPropagation();
-          handleLockedClick();
-        }}
-      >
-        <BuyWithFillersPanel profiles={profiles} />
-        <BgNameTogglePanel />
-        <PrimeCheckTogglePanel />
-        <AutoRebuyOnCancelPanel />
-      </div>
       {/* Cards panel sits OUTSIDE the worker-locked block — the
           "Verify your card" challenge fires mid-buy, so a card must
           be addable while the worker is running. It renders above the
@@ -80,6 +63,9 @@ export function AccountsView({
         aria-disabled={workerRunning}
         onClickCapture={(e) => {
           if (!workerRunning) return;
+          // Intercept clicks on any descendant — don't let them reach the
+          // now-disabled buttons. Scroll / wheel events still pass through
+          // because this is click-only.
           e.preventDefault();
           e.stopPropagation();
           handleLockedClick();
@@ -610,377 +596,6 @@ function BulkSwitch({
   );
 }
 
-function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
-  const { settings, busy, update } = useSettings();
-  const [applying, setApplying] = useState(false);
-  if (!settings) return null;
-  const on =
-    profiles.length > 0
-      ? profiles.every((p) => p.buyWithFillers === true)
-      : settings.buyWithFillers;
-  const fillerAttempts = settings.fillerAttempts;
-  const setAttemptPool = (idx: number, pool: FillerPool) =>
-    update({
-      fillerAttempts: fillerAttempts.map((p, i) => (i === idx ? pool : p)),
-    });
-  const addAttempt = () => {
-    if (fillerAttempts.length >= 5) return undefined;
-    return update({
-      fillerAttempts: [
-        ...fillerAttempts,
-        fillerAttempts[fillerAttempts.length - 1] ?? 'eero',
-      ],
-    });
-  };
-  const removeAttempt = (idx: number) => {
-    if (fillerAttempts.length <= 1) return undefined;
-    return update({
-      fillerAttempts: fillerAttempts.filter((_, i) => i !== idx),
-    });
-  };
-  const anyOff = profiles.some((p) => p.buyWithFillers !== true);
-  const toggle = async () => {
-    const next = !on;
-    setApplying(true);
-    try {
-      for (const p of profiles) {
-        await window.autog.profilesSetBuyWithFillers(p.email, next);
-      }
-      await update({ buyWithFillers: next });
-    } finally {
-      setApplying(false);
-    }
-  };
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Buy with Fillers</div>
-          <div className="prefix-sub">
-            When enabled, every account&apos;s buy phase places the target item alongside ~8
-            random Prime fillers, then cancels the fillers once the order is verified. Flip any
-            individual account below off and this master switch turns off automatically. Caps
-            worker concurrency to 1 account at a time. Shows as &quot;Filler&quot; in the Buy
-            Mode column. Takes effect on the next worker Start.
-            {anyOff && profiles.length > 0 && (
-              <>
-                {' '}
-                <span className="muted">
-                  ({profiles.filter((p) => p.buyWithFillers !== true).length} of {profiles.length}{' '}
-                  currently off)
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'Filler mode enabled — all accounts' : 'At least one account is set to Off'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={() => void toggle()}
-            disabled={busy || applying}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {on ? 'On' : 'Off'}
-          </span>
-        </label>
-      </div>
-
-      {/* Filler count + attempt plan. Both hidden when the master Filler
-          toggle is off — they have no effect there. */}
-      {on && (
-      <div className="mt-3 pt-3 border-t border-white/[0.04]">
-        <div className="text-xs font-medium text-foreground/80">
-          Filler Count
-        </div>
-        <div className="text-[11px] text-muted-foreground leading-snug mt-0.5 max-w-md">
-          Number of random filler items added alongside the target.
-          Higher = better disguise but slower checkout + higher risk
-          of <code>no_filler_candidates</code> when Amazon rate-limits
-          search. Default 8. (The Eero pool keeps a hardcoded 5
-          regardless — its candidate pool is smaller.)
-        </div>
-        <div className="mt-2 flex items-center gap-2">
-          <input
-            type="number"
-            min={1}
-            max={20}
-            step={1}
-            value={settings.fillerCount ?? 8}
-            onChange={(e) => {
-              const n = parseInt(e.target.value, 10);
-              if (!Number.isFinite(n)) return;
-              void update({ fillerCount: Math.max(1, Math.min(20, n)) });
-            }}
-            disabled={busy}
-            className="bg-transparent border border-white/10 rounded px-2 py-1 text-xs text-foreground/90 w-20"
-          />
-          <span className="text-[11px] text-muted-foreground">
-            fillers per buy (1–20)
-          </span>
-        </div>
-        <div className="text-xs font-medium text-foreground/80 mt-4">
-          Filler Attempts
-        </div>
-        <div className="text-[11px] text-muted-foreground leading-snug mt-0.5 max-w-md">
-          How many times a filler buy retries, and which search-term
-          pool each attempt uses. Attempt 1 runs first; later attempts
-          fire only if an earlier one fails with a recoverable error.
-          Eero / Amazon Basics use narrow brand-specific term lists;
-          General uses the broad impulse mix.
-        </div>
-        <div className="mt-2 flex flex-col gap-1.5">
-          {fillerAttempts.map((pool, idx) => (
-            <div key={idx} className="flex items-center gap-2">
-              <span className="text-[11px] text-muted-foreground w-16 shrink-0">
-                Attempt {idx + 1}
-              </span>
-              <select
-                className="bg-transparent border border-white/10 rounded px-2 py-1 text-xs text-foreground/90 cursor-pointer"
-                value={pool}
-                onChange={(e) =>
-                  void setAttemptPool(idx, e.target.value as FillerPool)
-                }
-                disabled={busy}
-              >
-                <option value="general">General mix</option>
-                <option value="eero">Amazon Eero</option>
-                <option value="amazon-basics">Amazon Basics</option>
-              </select>
-              {fillerAttempts.length > 1 && (
-                <button
-                  className="text-[11px] text-red-400 hover:text-red-300 px-1.5 py-1 rounded border border-red-500/30 hover:border-red-500/50 cursor-pointer disabled:opacity-40"
-                  onClick={() => void removeAttempt(idx)}
-                  disabled={busy}
-                  title="Remove this attempt"
-                  aria-label={`Remove attempt ${idx + 1}`}
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-        {fillerAttempts.length < 5 && (
-          <button
-            className="mt-2 text-[11px] text-foreground/80 hover:text-foreground px-2 py-1 rounded border border-white/10 cursor-pointer disabled:opacity-40"
-            onClick={() => void addAttempt()}
-            disabled={busy}
-          >
-            + Add attempt
-          </button>
-        )}
-      </div>
-      )}
-    </div>
-  );
-}
-
-/* ============================================================
-   Auto-rebuy on cancel (numeric — max chain depth)
-   Lives on Accounts (global toggle group) because it shapes how
-   every Amazon account behaves when an order gets cancelled. The
-   value persists on BG.User, not in settings.json — see
-   /api/user/auto-buy and src/main/index.ts userAutoBuyGet/Set.
-   ============================================================ */
-const REBUY_MIN = 0;
-const REBUY_MAX = 10;
-
-function AutoRebuyOnCancelPanel() {
-  const [value, setValue] = useState<number | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const prefs = await window.autog.userAutoBuyGet();
-        if (cancelled) return;
-        if (!prefs) {
-          setValue(0);
-          setError('Connect to BetterBG to load this setting.');
-          return;
-        }
-        setValue(prefs.autoRebuyOnCancelMax);
-      } catch (err) {
-        if (cancelled) return;
-        setValue(0);
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const persist = async (next: number) => {
-    const clamped = Math.max(REBUY_MIN, Math.min(REBUY_MAX, Math.round(next)));
-    if (clamped === value) return;
-    const prev = value;
-    setValue(clamped);
-    setSaving(true);
-    setError(null);
-    try {
-      const saved = await window.autog.userAutoBuySet(clamped);
-      setValue(saved.autoRebuyOnCancelMax);
-    } catch (err) {
-      setValue(prev);
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (value === null) return null;
-  const isOff = value === 0;
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Auto-rebuy on cancel</div>
-          <div className="prefix-sub">
-            When Amazon cancels a placed order, automatically queue a
-            filler-mode rebuy 5 minutes later on the same account.
-            Counts the rebuy chain — if a rebuy is also cancelled, we
-            retry again, up to this many total retries. <b>0</b>{' '}
-            disables. <b>1</b> means one retry. <b>2</b> means: retry,
-            and if that&apos;s also cancelled, retry once more.
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => void persist(value - 1)}
-            disabled={saving || value <= REBUY_MIN}
-            aria-label="Decrease max retries"
-            className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            −
-          </button>
-          <span className="tabular-nums w-7 text-center text-base font-medium">
-            {value}
-          </span>
-          <button
-            type="button"
-            onClick={() => void persist(value + 1)}
-            disabled={saving || value >= REBUY_MAX}
-            aria-label="Increase max retries"
-            className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            +
-          </button>
-          <span className="text-xs text-muted-foreground ml-1">
-            {isOff ? 'off' : value === 1 ? 'retry' : 'retries'}
-          </span>
-        </div>
-      </div>
-      <div className="text-[11px] text-muted-foreground/70 mt-3">
-        Range {REBUY_MIN}–{REBUY_MAX}. Persists on BetterBG and is
-        shared across every device connected with this API key.
-        Cancellations during the fetch-tracking phase (shipped items)
-        are never auto-rebought regardless of this setting.
-        {error && (
-          <span className="block mt-1 text-rose-300/90">⚠ {error}</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function PrimeCheckTogglePanel() {
-  const { settings, update, busy } = useSettings();
-  if (!settings) return null;
-  // Label semantics: switch is "Prime check enabled". On = enforce
-  // (default). Off = skip the badge check worker-wide. Stored as
-  // `bypassPrimeCheck` so the polarity matches BG's per-job flag.
-  const enforced = settings.bypassPrimeCheck !== true;
-  const toggle = async () => {
-    await update({ bypassPrimeCheck: enforced });
-  };
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">Prime check</div>
-          <div className="prefix-sub">
-            Enforce Amazon&apos;s visible ✓prime badge before placing
-            an order. On (default) is safe — the worker refuses to
-            buy when the badge is missing. Turn off if the static
-            parser is misreading the badge across the board and
-            you&apos;d rather buy than fail with{' '}
-            <code>not_prime</code> or <code>prime_unconfirmed</code>.
-            Takes effect on the next worker Start. Applies to every
-            account; BG&apos;s per-job &quot;Bypass Prime check&quot;
-            still wins for jobs that opt in.
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={
-            enforced
-              ? 'Prime check enforced — orders only when ✓prime badge is visible'
-              : 'Prime check off — buys regardless of Prime badge'
-          }
-        >
-          <Switch
-            checked={enforced}
-            onCheckedChange={() => void toggle()}
-            disabled={busy}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {enforced ? 'On' : 'Off'}
-          </span>
-        </label>
-      </div>
-    </div>
-  );
-}
-
-function BgNameTogglePanel() {
-  const { settings, update, busy } = useSettings();
-  if (!settings) return null;
-  // Treat any non-false (incl. undefined on a fresh-from-disk read) as
-  // on, matching the worker-side default.
-  const on = settings.bgNameToggleEnabled !== false;
-  const toggle = async () => {
-    await update({ bgNameToggleEnabled: !on });
-  };
-  return (
-    <div className="prefix-panel">
-      <div className="prefix-head">
-        <div>
-          <div className="prefix-title">BG1/BG2 address toggle</div>
-          <div className="prefix-sub">
-            When the /spc cashback gate misses the floor, the worker can
-            recover by editing the saved-address name suffix between
-            &quot;(BG1)&quot; and &quot;(BG2)&quot; (or appending
-            &quot;(BG1)&quot; the first time) and re-rendering checkout.
-            Turn this off if the recovery is wasted time on your
-            accounts (the buys still fail at cashback_gate) or you
-            manage the suffix manually on Amazon. Takes effect on the
-            next worker Start.
-          </div>
-        </div>
-        <label
-          className="flex items-center gap-2 cursor-pointer"
-          title={on ? 'BG1/BG2 toggle recovery enabled' : 'Toggle recovery disabled — cashback misses fail fast'}
-        >
-          <Switch
-            checked={on}
-            onCheckedChange={() => void toggle()}
-            disabled={busy}
-          />
-          <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
-            {on ? 'On' : 'Off'}
-          </span>
-        </label>
-      </div>
-    </div>
-  );
-}
 
 function Toast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (

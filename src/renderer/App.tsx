@@ -506,6 +506,7 @@ function MainShell({ status }: { status: RendererStatus }) {
                   <SettingsView
                     workerRunning={status.running}
                     identity={status.identity}
+                    profiles={profiles}
                   />
                 }
               />
@@ -762,6 +763,10 @@ function DashboardView(props: {
  */
 function AutoRedeemHeaderIndicator({ profiles }: { profiles: ChaseProfile[] }) {
   const [globalTime, setGlobalTime] = useState<string>('15:00');
+  // Global master switch — when off, the chip hides entirely. Default
+  // ON to match Settings.DEFAULTS (a missing key in the IPC payload
+  // reads as enabled).
+  const [globalEnabled, setGlobalEnabled] = useState<boolean>(true);
   const [redeeming, setRedeeming] = useState(false);
 
   useEffect(() => {
@@ -769,11 +774,15 @@ function AutoRedeemHeaderIndicator({ profiles }: { profiles: ChaseProfile[] }) {
     void (async () => {
       try {
         const s = await window.autog.settingsGet();
-        if (!cancelled && typeof s.chaseAutoRedeemTime === 'string') {
+        if (cancelled) return;
+        if (typeof s.chaseAutoRedeemTime === 'string') {
           setGlobalTime(s.chaseAutoRedeemTime);
         }
+        if (typeof s.chaseAutoRedeemEnabled === 'boolean') {
+          setGlobalEnabled(s.chaseAutoRedeemEnabled);
+        }
       } catch {
-        // Keep default; the chip stays readable even if settingsGet fails.
+        // Keep defaults; the chip stays readable even if settingsGet fails.
       }
     })();
     return () => {
@@ -781,9 +790,11 @@ function AutoRedeemHeaderIndicator({ profiles }: { profiles: ChaseProfile[] }) {
     };
   }, []);
 
-  const enabledProfiles = profiles.filter(
-    (p) => p.autoRedeem?.enabled && p.cardAccountId,
-  );
+  // Eligible = global on + has a card linked. Per-profile `enabled`
+  // is no longer consulted as of v0.13.93 (single global toggle).
+  const enabledProfiles = globalEnabled
+    ? profiles.filter((p) => p.cardAccountId)
+    : [];
   if (enabledProfiles.length === 0) return null;
 
   // Tooltip — list each enabled profile with the shared global time.
