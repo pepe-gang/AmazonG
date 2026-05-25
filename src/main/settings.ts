@@ -38,14 +38,14 @@ const DEFAULTS: Settings = {
   // typical Apple Silicon Macs. Customers on older / fanless laptops
   // can dial down to 1.
   maxConcurrentBuys: 3,
-  // Single daily fire time for Chase auto-redeem, shared across every
-  // Chase profile that has `autoRedeem.enabled = true`. Pre-v0.13.42
-  // each profile carried its own time; users found this surprising
-  // and wanted one schedule that drives all accounts. HH:MM 24h, local
-  // timezone. Default 15:00 (3 PM local) — matches the legacy default
-  // on per-profile time so first-load behavior is unchanged for
-  // anyone who never customised the time.
+  // Single daily fire time for Chase auto-redeem. HH:MM 24h, local
+  // timezone. Default 15:00 (3 PM local).
   chaseAutoRedeemTime: '15:00',
+  // Global master switch — when true (default), the scheduler runs
+  // auto-redeem on every Chase profile with a linked card at the
+  // configured time. When false, the tick skips entirely. Replaces the
+  // pre-v0.13.93 per-profile `autoRedeem.enabled` flag.
+  chaseAutoRedeemEnabled: true,
   // BG1/BG2 address-name toggle for cashback recovery — on by default
   // so existing installs behave the same as before this setting
   // existed. Operators on dial it off via Settings → Accounts when the

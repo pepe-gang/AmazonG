@@ -1,8 +1,10 @@
 /**
- * Pure helpers for the per-Chase-profile auto-redeem schedule.
+ * Pure helpers for the Chase auto-redeem schedule.
  *
  * The scheduler runs on a 60-second tick in the main process. On each
- * tick, for every profile with `autoRedeem.enabled === true`, we ask:
+ * tick, the consumer (`main/index.ts`) checks the GLOBAL master switch
+ * `Settings.chaseAutoRedeemEnabled` first. When on, for every profile
+ * with a linked card we ask:
  *   - has today's scheduled time elapsed?
  *   - has it already run today?
  *
@@ -13,8 +15,8 @@
  *
  * This module is intentionally side-effect-free so the firing decision
  * can be unit-tested without spinning up Chromium or Prisma. The
- * lifecycle wiring (timer + redeem invocation) lives in the consumer
- * (`main/index.ts`).
+ * lifecycle wiring (timer + redeem invocation + global-flag gate)
+ * lives in the consumer.
  */
 
 import type { ChaseProfile } from '../shared/types.js';
@@ -51,24 +53,22 @@ export function parseScheduleTime(s: string): { h: number; m: number } | null {
 
 /**
  * The decision: should this profile fire its auto-redeem on the
- * current tick?
+ * current tick? Caller is responsible for the GLOBAL gate
+ * (Settings.chaseAutoRedeemEnabled); this helper assumes the master
+ * switch is already on.
  *
- *   1. autoRedeem must be enabled (per-profile flag)
- *   2. profile must be ready to act on (has a card linked) — defended
+ *   1. profile must be ready to act on (has a card linked) — defended
  *      so a freshly-added profile that hasn't logged in yet can't get
  *      a run scheduled against a null cardAccountId
- *   3. parsed GLOBAL time valid (Settings.chaseAutoRedeemTime, single
- *      schedule shared by every enabled profile as of v0.13.42)
- *   4. now >= scheduled-instant-today
- *   5. lastRunAt (per-profile) is missing OR not today (local)
+ *   2. parsed GLOBAL time valid (Settings.chaseAutoRedeemTime)
+ *   3. now >= scheduled-instant-today
+ *   4. lastRunAt (per-profile) is missing OR not today (local)
  */
 export function isProfileDueNow(
   profile: ChaseProfile,
   globalTime: string,
   now: Date = new Date(),
 ): boolean {
-  const ar = profile.autoRedeem;
-  if (!ar?.enabled) return false;
   if (!profile.cardAccountId) return false;
 
   const t = parseScheduleTime(globalTime);
@@ -79,8 +79,9 @@ export function isProfileDueNow(
 
   if (now.getTime() < scheduledToday.getTime()) return false;
 
-  if (!ar.lastRunAt) return true;
-  const lastRun = new Date(ar.lastRunAt);
+  const lastRunAt = profile.autoRedeem?.lastRunAt;
+  if (!lastRunAt) return true;
+  const lastRun = new Date(lastRunAt);
   if (Number.isNaN(lastRun.getTime())) return true;
   return !isSameLocalDay(lastRun, now);
 }
@@ -127,20 +128,19 @@ export function selectDueProfiles(
 }
 
 /**
- * Compute the next-fire wall-clock instant for an enabled profile —
- * used by the header indicator chip to render "next run at HH:MM" or
- * "next run tomorrow at HH:MM" as a tooltip / label.
+ * Compute the next-fire wall-clock instant for a profile — used by
+ * the header indicator chip to render "next run at HH:MM" or "next
+ * run tomorrow at HH:MM" as a tooltip / label. Caller is responsible
+ * for the GLOBAL gate; this assumes auto-redeem is enabled.
  *
- * Returns null when the profile is disabled, has no card linked, or
- * has a malformed time (caller hides the chip).
+ * Returns null when the profile has no card linked or the global
+ * time is malformed (caller hides the chip).
  */
 export function nextFireAt(
   profile: ChaseProfile,
   globalTime: string,
   now: Date = new Date(),
 ): Date | null {
-  const ar = profile.autoRedeem;
-  if (!ar?.enabled) return null;
   if (!profile.cardAccountId) return null;
   const t = parseScheduleTime(globalTime);
   if (!t) return null;
@@ -149,8 +149,9 @@ export function nextFireAt(
   scheduledToday.setHours(t.h, t.m, 0, 0);
 
   // Already ran today → next fire is tomorrow's window.
-  if (ar.lastRunAt) {
-    const lastRun = new Date(ar.lastRunAt);
+  const lastRunAt = profile.autoRedeem?.lastRunAt;
+  if (lastRunAt) {
+    const lastRun = new Date(lastRunAt);
     if (!Number.isNaN(lastRun.getTime()) && isSameLocalDay(lastRun, now)) {
       const tomorrow = new Date(scheduledToday);
       tomorrow.setDate(tomorrow.getDate() + 1);

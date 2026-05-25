@@ -85,17 +85,13 @@ describe('isProfileDueNow', () => {
   // v0.13.42: schedule TIME moved to global settings — every test
   // passes "15:00" as the globalTime parameter to match the legacy
   // per-profile default that the tests previously relied on.
-  test('disabled → never due', () => {
-    const p: ChaseProfile = {
-      ...baseProfile,
-      autoRedeem: { ...baseProfile.autoRedeem!, enabled: false },
-    };
-    expect(isProfileDueNow(p, '15:00', new Date(2026, 4, 8, 16, 0))).toBe(false);
-  });
+  // v0.13.93: per-profile enabled gate REMOVED — the global master
+  // switch (Settings.chaseAutoRedeemEnabled) is checked by the
+  // consumer (chaseAutoRedeemTick), not by isProfileDueNow itself.
 
-  test('autoRedeem missing → never due (older profile)', () => {
+  test('autoRedeem missing → due when card linked + window passed (legacy field optional)', () => {
     const p: ChaseProfile = { ...baseProfile, autoRedeem: undefined };
-    expect(isProfileDueNow(p, '15:00', new Date(2026, 4, 8, 16, 0))).toBe(false);
+    expect(isProfileDueNow(p, '15:00', new Date(2026, 4, 8, 16, 0))).toBe(true);
   });
 
   test('no cardAccountId → never due (defensive — nothing to act on)', () => {
@@ -167,10 +163,10 @@ describe('isProfileDueNow', () => {
 describe('selectDueProfiles', () => {
   test('filters to only-due profiles', () => {
     const due: ChaseProfile = baseProfile;
-    const notDue: ChaseProfile = {
+    const noCard: ChaseProfile = {
       ...baseProfile,
       id: 'p2',
-      autoRedeem: { ...baseProfile.autoRedeem!, enabled: false },
+      cardAccountId: null,
     };
     const ranToday: ChaseProfile = {
       ...baseProfile,
@@ -181,7 +177,7 @@ describe('selectDueProfiles', () => {
       },
     };
     const result = selectDueProfiles(
-      [due, notDue, ranToday],
+      [due, noCard, ranToday],
       '15:00',
       new Date(2026, 4, 8, 16, 0),
     );
@@ -262,14 +258,6 @@ describe('nextFireAt', () => {
     const next = nextFireAt(baseProfile, '15:00', now);
     expect(next!.getDate()).toBe(8);
     expect(next!.getHours()).toBe(15);
-  });
-
-  test('disabled → null', () => {
-    const p: ChaseProfile = {
-      ...baseProfile,
-      autoRedeem: { ...baseProfile.autoRedeem!, enabled: false },
-    };
-    expect(nextFireAt(p, '15:00', new Date())).toBeNull();
   });
 
   test('no card linked → null', () => {

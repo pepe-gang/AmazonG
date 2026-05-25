@@ -352,15 +352,18 @@ export type Settings = {
    */
   maxConcurrentBuys: number;
   /**
-   * Single daily fire time for Chase auto-redeem, shared across every
-   * Chase profile whose `autoRedeem.enabled` is true. HH:MM 24h, local
-   * timezone. Pre-v0.13.42 each profile carried its own time field;
-   * users wanted one schedule driving all accounts so they don't have
-   * to update each profile separately. Per-profile `enabled` flag
-   * stays — users still toggle individual accounts on/off; just the
-   * time is shared. Default 15:00 (3 PM local).
+   * Single daily fire time for Chase auto-redeem. HH:MM 24h, local
+   * timezone. Default 15:00 (3 PM local).
    */
   chaseAutoRedeemTime: string;
+  /**
+   * Global master switch for Chase auto-redeem. When true (default),
+   * every Chase profile with a linked card auto-redeems at
+   * `chaseAutoRedeemTime` daily. When false, the scheduler skips the
+   * tick entirely. Replaces the pre-v0.13.93 per-profile `autoRedeem.enabled`
+   * flag — users wanted one switch instead of toggling each card.
+   */
+  chaseAutoRedeemEnabled: boolean;
   /**
    * Experimental flags. Default unset / off — none of these change
    * production behavior unless explicitly opted in via settings.json.

@@ -179,6 +179,10 @@ async function chaseAutoRedeemTick(): Promise<void> {
   if (!triggerChaseRedeem) return;
   const { selectDueProfiles } = await import('./chaseRedeemScheduler.js');
   const settings = await loadSettings().catch(() => null);
+  // Global master switch — when off, the tick is a no-op. When the
+  // settings file predates this field, treat the absence as ON
+  // (matches DEFAULTS so first-load behaviour stays the same).
+  if (settings?.chaseAutoRedeemEnabled === false) return;
   const globalTime = settings?.chaseAutoRedeemTime ?? '15:00';
   const profiles = await loadChaseProfiles().catch(() => []);
   const due = selectDueProfiles(profiles, globalTime);
