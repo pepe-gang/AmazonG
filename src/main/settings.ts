@@ -16,8 +16,8 @@ const DEFAULTS: Settings = {
   jobsColumnOrder: [],
   jobsColumnHidden: [],
   jobsStatusFilter: [],
-  buyWithFillers: false,
-  fillerCount: 8,
+  buyWithFillers: true,
+  fillerCount: 7,
   // One eero attempt by default — no retries. Users add attempts (and
   // pick each one's pool) via the Filler Attempts UI.
   fillerAttempts: ['eero'],
@@ -34,10 +34,10 @@ const DEFAULTS: Settings = {
   autoEnqueueMaxPerTick: 75,
   autoEnqueueLastRunAt: null,
   // How many Amazon accounts run a single deal in parallel. Each
-  // account opens its own Chrome window — 3 is the safe default for
-  // typical Apple Silicon Macs. Customers on older / fanless laptops
-  // can dial down to 1.
-  maxConcurrentBuys: 3,
+  // account opens its own Chrome window — 5 is the user-validated
+  // default for Apple Silicon Macs. Customers on older / fanless
+  // laptops can dial down to 1.
+  maxConcurrentBuys: 5,
   // Single daily fire time for Chase auto-redeem. HH:MM 24h, local
   // timezone. Default 15:00 (3 PM local).
   chaseAutoRedeemTime: '15:00',
@@ -46,17 +46,16 @@ const DEFAULTS: Settings = {
   // configured time. When false, the tick skips entirely. Replaces the
   // pre-v0.13.93 per-profile `autoRedeem.enabled` flag.
   chaseAutoRedeemEnabled: true,
-  // BG1/BG2 address-name toggle for cashback recovery — on by default
-  // so existing installs behave the same as before this setting
-  // existed. Operators on dial it off via Settings → Accounts when the
-  // toggle is wasted time (structurally-ineligible account/deal pairs)
-  // or when they want to manage the suffix manually on Amazon.
-  bgNameToggleEnabled: true,
-  // Global Prime-badge gate override. False (default) = enforce the
-  // visible ✓prime check before buying. True = skip the check
-  // worker-wide (every account, every job). See ipc.ts for the
-  // full rationale.
-  bypassPrimeCheck: false,
+  // BG1/BG2 address-name toggle for cashback recovery. False (default)
+  // = recovery is OFF; misses fail fast at cashback_gate. User-validated
+  // default — the recovery's wins are rare and the time cost on every
+  // miss dwarfs them on most account/deal pairs.
+  bgNameToggleEnabled: false,
+  // Global Prime-badge gate override. True (default) = skip the visible
+  // ✓prime check worker-wide. User-validated default — the static
+  // parser's false-negatives have been more common than the rare
+  // true-positive "this isn't actually Prime" catch.
+  bypassPrimeCheck: true,
 };
 
 function filePath(): string {

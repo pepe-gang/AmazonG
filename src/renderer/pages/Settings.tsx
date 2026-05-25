@@ -58,7 +58,11 @@ export function SettingsView({
           handleLockedClick();
         }}
       >
-        <SettingsSection title="Auto-Buy" sub="How each buy runs — fillers, retries, gates, concurrency.">
+        <SettingsSection
+          title="Auto-Buy"
+          sub="How each buy runs — fillers, retries, gates, concurrency."
+          headerExtra={<ResetAutoBuyDefaultsButton profiles={profiles} />}
+        >
           <BuyWithFillersPanel profiles={profiles} />
           <ParallelBuysPanel />
           <AllowedPrefixesPanel />
@@ -86,21 +90,28 @@ export function SettingsView({
 
 /** Section header + child stack. Adds a visible label so the three
  *  groupings (Auto-Buy / Worker / BetterBG) read clearly without an
- *  accordion or extra route. */
+ *  accordion or extra route. `headerExtra` mounts to the right of the
+ *  title row — used by Auto-Buy to surface its "Reset to defaults"
+ *  button without nesting it inside any individual panel. */
 function SettingsSection({
   title,
   sub,
+  headerExtra,
   children,
 }: {
   title: string;
   sub?: string;
+  headerExtra?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <section className="flex flex-col gap-3">
-      <div className="flex flex-col gap-0.5 pb-1 border-b border-white/[0.06]">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-foreground/85">{title}</h2>
-        {sub && <p className="text-[11px] text-muted-foreground">{sub}</p>}
+      <div className="flex items-end justify-between gap-3 pb-1 border-b border-white/[0.06]">
+        <div className="flex flex-col gap-0.5">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-foreground/85">{title}</h2>
+          {sub && <p className="text-[11px] text-muted-foreground">{sub}</p>}
+        </div>
+        {headerExtra}
       </div>
       <div className="flex flex-col gap-3">{children}</div>
     </section>
@@ -118,9 +129,10 @@ function ParallelBuysPanel() {
   if (!settings) return null;
   // Defensive default: existing installs may have a settings.json that
   // predates this field, in which case the IPC payload comes back
-  // missing it and the stepper would render `NaN` / blank. Show 3
-  // until the user clicks +/-, which persists the field for real.
-  const parallel = settings.maxConcurrentBuys ?? 3;
+  // missing it and the stepper would render `NaN` / blank. Show 5
+  // (the current factory default) until the user clicks +/-, which
+  // persists the field for real.
+  const parallel = settings.maxConcurrentBuys ?? 5;
   const setParallel = (v: number) => {
     const clamped = Math.max(PARALLEL_MIN, Math.min(PARALLEL_MAX, Math.round(v)));
     void update({ maxConcurrentBuys: clamped });
@@ -136,9 +148,9 @@ function ParallelBuysPanel() {
             more deals caught quickly when several of your accounts are
             eligible — but uses more memory and runs hotter on your
             laptop. <b>Lower</b> is quieter and cooler. Default is{' '}
-            <b>3</b>, tuned for typical Apple Silicon Macs; dial down to{' '}
-            <b>1</b> on older or fanless laptops if you hear fans
-            spinning. Applies to both single-mode and filler-mode buys.
+            <b>5</b> on Apple Silicon Macs; dial down to <b>1</b> on
+            older or fanless laptops if you hear fans spinning.
+            Applies to both single-mode and filler-mode buys.
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -169,8 +181,7 @@ function ParallelBuysPanel() {
         </div>
       </div>
       <div className="text-[11px] text-muted-foreground/70 mt-3">
-        Range {PARALLEL_MIN}–{PARALLEL_MAX}. Going higher than 3 may
-        trigger Amazon's anti-bot checks. Changes apply on the next
+        Range {PARALLEL_MIN}–{PARALLEL_MAX}. Changes apply on the next
         deal AmazonG claims (no need to stop / restart the worker —
         settings are re-read every claim).
       </div>
@@ -729,5 +740,86 @@ function BgNameTogglePanel() {
         </label>
       </div>
     </div>
+  );
+}
+
+/* ============================================================
+   Reset Auto-Buy defaults
+   Single-click "back to factory" for the Auto-Buy section. The
+   values written here are the user-validated defaults pinned in
+   v0.13.93 (matching the DEFAULTS in src/main/settings.ts):
+     buyWithFillers           true   (every account, plus the global flag)
+     fillerCount              7
+     fillerAttempts           ['eero']
+     maxConcurrentBuys        5
+     bypassPrimeCheck         true   (Prime check OFF)
+     bgNameToggleEnabled      false  (BG1/BG2 toggle OFF)
+     autoRebuyOnCancelMax     2      (BG-side write via /api/user/auto-buy)
+   ============================================================ */
+function ResetAutoBuyDefaultsButton({ profiles }: { profiles: AmazonProfile[] }) {
+  const { update } = useSettings();
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const [busy, setBusy] = useState(false);
+
+  const onReset = () => {
+    confirm({
+      title: 'Reset Auto-Buy to defaults?',
+      message:
+        'Resets every Auto-Buy setting to the recommended defaults: ' +
+        'Buy with Fillers on (every account), Filler Count 7, ' +
+        'Filler Attempts [Eero], Parallel Buys 5, Prime check off, ' +
+        'BG1/BG2 toggle off, Auto-rebuy on cancel 2. ' +
+        'Other sections (Worker, BetterBG) are untouched.',
+      confirmLabel: 'Reset',
+      onConfirm: async () => {
+        setBusy(true);
+        try {
+          // Flip every Amazon profile's per-account filler flag ON to
+          // match the new global default — the BuyWithFillersPanel's
+          // "all on?" derivation reads the per-account values, so this
+          // keeps the master switch's UI consistent.
+          for (const p of profiles) {
+            try {
+              await window.autog.profilesSetBuyWithFillers(p.email, true);
+            } catch {
+              /* per-account failure shouldn't block the global reset */
+            }
+          }
+          await update({
+            buyWithFillers: true,
+            fillerCount: 7,
+            fillerAttempts: ['eero'],
+            maxConcurrentBuys: 5,
+            bypassPrimeCheck: true,
+            bgNameToggleEnabled: false,
+          });
+          // Auto-rebuy lives on BG.User, not settings.json. Best-effort
+          // write — failure surfaces in the AutoRebuyOnCancelPanel's
+          // error line on its next refresh.
+          try {
+            await window.autog.userAutoBuySet(2);
+          } catch {
+            /* see comment above */
+          }
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onReset}
+        disabled={busy}
+        className="text-[11px] px-2 py-1 rounded border border-white/15 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+        title="Reset every Auto-Buy setting to the recommended defaults"
+      >
+        {busy ? 'Resetting…' : 'Reset to defaults'}
+      </button>
+      {confirmDialog}
+    </>
   );
 }
