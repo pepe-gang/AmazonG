@@ -486,7 +486,16 @@ function emitDevItemDump(
   pool: PoolKey,
   now: number = Date.now(),
 ): void {
-  if (!devGateResolved || !devGateValue) return;
+  // Mirror emitDevSummary: if the gate hasn't resolved yet, fire it
+  // (idempotent) and bail this call. The module-bottom eager call
+  // covers most cases, but this is belt-and-suspenders for the case
+  // where the first buy fires within the first microtask after module
+  // load (before the async electron import has resolved).
+  if (!devGateResolved) {
+    void resolveDevGate();
+    return;
+  }
+  if (!devGateValue) return;
   const entry = cache.get(pool);
   const items = entry
     ? entry.items.map((it) => ({
@@ -541,4 +550,10 @@ function emitDevSummary(
   console.log(`[FILLER_CACHE] ${event} pool=${pool} | ${cells || '(empty)'}`);
 }
 
-
+// Eagerly kick off the dev-gate resolution at module load so the very
+// first cache event can emit (instead of waiting for emitDevSummary to
+// trigger resolution on first call, which loses the FIRST buy's dump
+// to the race between the async electron import and the populate event).
+// Safe in vitest because resolveDevGate's try/catch handles missing
+// electron — devGateValue stays false there.
+void resolveDevGate();
