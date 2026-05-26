@@ -758,7 +758,7 @@ function BgNameTogglePanel() {
      fillerCount              8
      fillerAttempts           ['eero']
      maxConcurrentBuys        5
-     bypassPrimeCheck         true   (Prime check OFF)
+     bypassPrimeCheck         false  (Prime check ON)
      bgNameToggleEnabled      false  (BG1/BG2 toggle OFF)
      autoRebuyOnCancelMax     2      (BG-side write via /api/user/auto-buy)
    ============================================================ */
@@ -773,7 +773,7 @@ function ResetAutoBuyDefaultsButton({ profiles }: { profiles: AmazonProfile[] })
       message:
         'Resets every Auto-Buy setting to the recommended defaults: ' +
         'Buy with Fillers on (every account), Filler Count 8, ' +
-        'Filler Attempts [Eero], Parallel Buys 5, Prime check off, ' +
+        'Filler Attempts [Eero], Parallel Buys 5, Prime check on, ' +
         'BG1/BG2 toggle off, Auto-rebuy on cancel 2. ' +
         'Other sections (Worker, BetterBG) are untouched.',
       confirmLabel: 'Reset',
@@ -796,7 +796,7 @@ function ResetAutoBuyDefaultsButton({ profiles }: { profiles: AmazonProfile[] })
             fillerCount: 8,
             fillerAttempts: ['eero'],
             maxConcurrentBuys: 5,
-            bypassPrimeCheck: true,
+            bypassPrimeCheck: false,
             bgNameToggleEnabled: false,
           });
           // Auto-rebuy lives on BG.User, not settings.json. Best-effort

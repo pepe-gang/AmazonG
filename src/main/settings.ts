@@ -51,11 +51,13 @@ const DEFAULTS: Settings = {
   // default — the recovery's wins are rare and the time cost on every
   // miss dwarfs them on most account/deal pairs.
   bgNameToggleEnabled: false,
-  // Global Prime-badge gate override. True (default) = skip the visible
-  // ✓prime check worker-wide. User-validated default — the static
-  // parser's false-negatives have been more common than the rare
-  // true-positive "this isn't actually Prime" catch.
-  bypassPrimeCheck: true,
+  // Global Prime-badge gate override. False (default) = enforce the
+  // visible ✓prime check worker-wide. User-validated 2026-05-26 — the
+  // gate keeps non-Prime listings out of the cart even when Amazon
+  // search slips one in, at the cost of occasionally false-negative-
+  // rejecting a Prime item the static parser mis-reads. Set to true
+  // (per-account or globally) to skip the visible check.
+  bypassPrimeCheck: false,
 };
 
 function filePath(): string {
