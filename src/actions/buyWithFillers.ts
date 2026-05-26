@@ -381,13 +381,20 @@ const FILLER_SEARCH_TERMS: readonly string[] = [
   'face mask', 'hair clip', 'scrunchie', 'sunglasses', 'socks',
 ];
 
-// Whey-protein-only pool. Used when the user opts in via Settings →
-// Eero (Amazon-owned mesh-WiFi brand). User-curated 2026-05-10 to
-// generation-anchored queries — keeps the surface explicitly eero
-// (no Echo leakage) while spanning both current product lines.
+// Eero (Amazon-owned mesh-WiFi brand). User-curated 2026-05-26: widened
+// from the 2-term generation-anchored set to also include cross-
+// generation queries that surface the $15-$30 accessory band (wall
+// mounts, ethernet cables, USB-C adapters, etc.) which is what
+// actually fits the filler price window. The generation queries alone
+// surfaced too few in-band candidates when Amazon's eero catalog
+// shifted (INC-2026-05-26: client's pool hit 0 candidates while
+// amazon-basics worked fine).
 const EERO_SEARCH_TERMS: readonly string[] = [
   'amazon eero 6',
   'amazon eero 7',
+  'eero extender',
+  'eero pro',
+  'eero power',
 ];
 
 // Amazon Basics (house-brand commodities). Single broad term per user

@@ -39,8 +39,24 @@
  * Tested in tests/unit/fillerCache.test.ts (16 cases).
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { logger } from '../shared/logger.js';
 import type { FillerPool } from '../shared/ipc.js';
+
+/**
+ * Dev-mode-only path where every cache populate/evict appends a full
+ * item-level snapshot as one JSON line. Lets the user (or me, via
+ * `cat`) inspect exactly what's in the cache after a buy without
+ * trawling the npm-run-dev terminal scrollback.
+ *
+ * Production builds (electron.app.isPackaged === true) skip the file
+ * write — see emitDevItemDump's gate.
+ *
+ * Append-only. Wipe manually if it grows: `rm /tmp/amazong-filler-cache.log`
+ */
+export const DEV_DUMP_PATH = path.join(os.tmpdir(), 'amazong-filler-cache.log');
 
 /** Cache key. Mirrors FillerPool but adds an explicit 'default' bucket
  *  for the no-pool case (general filler list, no blocklist). Keeping
@@ -196,6 +212,7 @@ export function populateFromSearch(
     },
   );
   emitDevSummary('populate', pool, now);
+  emitDevItemDump('populate', pool, now);
 }
 
 /** Remove a single ASIN from a pool's cache. Called when a cart-add
@@ -212,6 +229,7 @@ export function evictAsin(pool: PoolKey, asin: string): void {
     { pool, asin, remaining: entry.items.length },
   );
   emitDevSummary('evict', pool);
+  emitDevItemDump('evict', pool);
 }
 
 /** Result shape from getOrPopulate. */
@@ -448,6 +466,55 @@ async function resolveDevGate(): Promise<void> {
     devGateValue = false;
   }
   devGateResolved = true;
+}
+
+/**
+ * Dev-mode-only: emit a full item-level snapshot of one pool to BOTH
+ * the console (visible in `npm run dev` terminal) AND a known file
+ * path (DEV_DUMP_PATH) so the operator can `cat` it after the fact.
+ *
+ * Fires on every populate / evict — the two events that mutate
+ * cache contents. Hit/miss events are not dumped (they don't change
+ * what's IN the cache, only what's read FROM it) — those still hit
+ * the existing emitDevSummary stats line.
+ *
+ * Gated on devGateValue (same gate as emitDevSummary), so production
+ * builds NEVER write to /tmp.
+ */
+function emitDevItemDump(
+  event: 'populate' | 'evict',
+  pool: PoolKey,
+  now: number = Date.now(),
+): void {
+  if (!devGateResolved || !devGateValue) return;
+  const entry = cache.get(pool);
+  const items = entry
+    ? entry.items.map((it) => ({
+        asin: it.asin,
+        title: it.title?.slice(0, 80) ?? null,
+        price: it.price,
+        ageSec: Math.round((now - it.cachedAt) / 1000),
+      }))
+    : [];
+  const line = JSON.stringify({
+    ts: new Date(now).toISOString(),
+    event,
+    pool,
+    count: items.length,
+    populatedAt: entry?.populatedAt ?? null,
+    items,
+  });
+  // Console (npm run dev terminal)
+  // eslint-disable-next-line no-console
+  console.log(`[FILLER_CACHE_DUMP] ${line}`);
+  // File — append-only for post-hoc inspection. Sync write is fine
+  // here: dev-mode only, fires a handful of times per buy.
+  try {
+    fs.appendFileSync(DEV_DUMP_PATH, line + '\n');
+  } catch {
+    // /tmp inaccessible or disk full — drop silently. The console
+    // line above is the primary path; file is a convenience.
+  }
 }
 
 function emitDevSummary(
