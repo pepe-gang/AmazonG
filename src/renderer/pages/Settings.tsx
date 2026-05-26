@@ -68,7 +68,6 @@ export function SettingsView({
           <AllowedPrefixesPanel />
           <PrimeCheckTogglePanel />
           <BgNameTogglePanel />
-          <AutoRebuyOnCancelPanel />
         </SettingsSection>
 
         <SettingsSection title="Worker" sub="App-side runtime defaults.">
@@ -536,6 +535,13 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
             + Add attempt
           </button>
         )}
+        {/* Auto-rebuy lives under Buy-with-Fillers because every rebuy
+            runs in filler mode — exposing it outside this section would
+            misleadingly imply non-filler rebuys are possible. Hidden
+            when fillers are off, per user spec 2026-05-26. */}
+        <div className="mt-4">
+          <AutoRebuyOnCancelPanel />
+        </div>
       </div>
       )}
     </div>
