@@ -755,7 +755,7 @@ function BgNameTogglePanel() {
    values written here are the user-validated defaults pinned in
    v0.13.93 (matching the DEFAULTS in src/main/settings.ts):
      buyWithFillers           true   (every account, plus the global flag)
-     fillerCount              7
+     fillerCount              8
      fillerAttempts           ['eero']
      maxConcurrentBuys        5
      bypassPrimeCheck         true   (Prime check OFF)
@@ -772,7 +772,7 @@ function ResetAutoBuyDefaultsButton({ profiles }: { profiles: AmazonProfile[] })
       title: 'Reset Auto-Buy to defaults?',
       message:
         'Resets every Auto-Buy setting to the recommended defaults: ' +
-        'Buy with Fillers on (every account), Filler Count 7, ' +
+        'Buy with Fillers on (every account), Filler Count 8, ' +
         'Filler Attempts [Eero], Parallel Buys 5, Prime check off, ' +
         'BG1/BG2 toggle off, Auto-rebuy on cancel 2. ' +
         'Other sections (Worker, BetterBG) are untouched.',
@@ -793,7 +793,7 @@ function ResetAutoBuyDefaultsButton({ profiles }: { profiles: AmazonProfile[] })
           }
           await update({
             buyWithFillers: true,
-            fillerCount: 7,
+            fillerCount: 8,
             fillerAttempts: ['eero'],
             maxConcurrentBuys: 5,
             bypassPrimeCheck: true,
