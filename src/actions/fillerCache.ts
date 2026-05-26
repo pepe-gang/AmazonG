@@ -383,6 +383,20 @@ type PickResult =
     }
   | { ok: false; reason: 'empty' | 'stale' | 'insufficient' };
 
+/** Fisher-Yates in-place shuffle. Used by pickFromCache and
+ *  pickAvailable so consecutive buys against a stable cache don't pick
+ *  the same top-N items every time. Same source pool, different
+ *  random subset per buy — eliminates the "every cart has the same 7
+ *  power adapters" pattern that Amazon anti-bot could fingerprint.
+ *  Math.random is fine here (not security-sensitive). */
+function shuffleInPlace<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j]!, arr[i]!];
+  }
+  return arr;
+}
+
 /** Hit-test: do we have ≥ (minCount + PICK_BUFFER) items net of
  *  excludes AND is the entry fresh? */
 function pickFromCache(
@@ -398,9 +412,13 @@ function pickFromCache(
   const usable = entry.items.filter((it) => !excludeAsins.has(it.asin));
   const need = minCount + PICK_BUFFER;
   if (usable.length < need) return { ok: false, reason: 'insufficient' };
-  // Return targetCount items (caller decides selection strategy by
-  // post-filtering). Items pre-sorted oldest-first; callers wanting
-  // recent items can reverse, callers wanting random can shuffle.
+  // Shuffle BEFORE slicing so each buy gets a random subset of the
+  // usable pool. Without this the same top-N items (by cachedAt asc)
+  // shipped in every cart until eviction rotated them — easy
+  // anti-bot pattern. The shuffle is on a fresh array (`usable` is
+  // the filtered copy, not entry.items), so cache order is preserved
+  // for the next pick.
+  shuffleInPlace(usable);
   return {
     ok: true,
     items: usable.slice(0, minCount),
@@ -411,7 +429,8 @@ function pickFromCache(
 
 /** Non-strict picker — returns whatever is available net of
  *  excludes, capped at minCount. Used as the partial-result fallback
- *  after a search that yielded fewer than minCount items. */
+ *  after a search that yielded fewer than minCount items.
+ *  Also shuffles for the same anti-pattern reason as pickFromCache. */
 function pickAvailable(
   pool: PoolKey,
   minCount: number,
@@ -420,6 +439,7 @@ function pickAvailable(
   const entry = cache.get(pool);
   if (!entry) return [];
   const usable = entry.items.filter((it) => !excludeAsins.has(it.asin));
+  shuffleInPlace(usable);
   return usable.slice(0, minCount);
 }
 
