@@ -604,8 +604,9 @@ export function readTargetCashbackFromDom(
   let testidMatch: Element | null = null;
   if (!link) {
     const spans = doc.querySelectorAll<HTMLElement>('[data-testid^="Item_asin_"]');
+    const want = asin.toUpperCase();
     for (const s of spans) {
-      if ((s.textContent ?? '').trim() === asin) {
+      if ((s.textContent ?? '').trim().toUpperCase() === want) {
         testidMatch = s;
         break;
       }

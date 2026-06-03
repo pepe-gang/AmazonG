@@ -3150,11 +3150,42 @@ async function scrollTargetIntoView(
   targetAsin: string,
   timeoutMs: number,
 ): Promise<void> {
-  await page
-    .locator(`a[href*="${targetAsin}"]`)
-    .first()
-    .scrollIntoViewIfNeeded({ timeout: timeoutMs })
-    .catch(() => undefined);
+  // /spc STRIPS the /dp/<asin> hrefs and VIRTUALIZES long item lists, so
+  // the old `a[href*="<asin>"]` scroll was a guaranteed no-op for filler
+  // buys — verified against a real /spc save (2026-06): zero /dp hrefs,
+  // the target ASIN lives ONLY in a hidden
+  // `<span data-testid="Item_asin_N_N_N" class="aok-hidden">ASIN</span>`,
+  // and a target buried below 8 fillers may not be in the DOM until
+  // scrolled near. Locate by that testid pin instead, and when it isn't
+  // rendered yet, scroll the page down step by step to force the
+  // virtualizer to materialize lower rows until the pin appears (or we
+  // time out). Case-normalized — a lowercase targetAsin must still match
+  // the uppercase span text (audit C4).
+  const asin = targetAsin.toUpperCase();
+  const deadline = Date.now() + timeoutMs;
+  const MAX_STEPS = 40;
+  for (let i = 0; i < MAX_STEPS && Date.now() < deadline; i++) {
+    const done = await page
+      .evaluate((wantAsin) => {
+        const spans = document.querySelectorAll<HTMLElement>(
+          '[data-testid^="Item_asin_"]',
+        );
+        for (const s of spans) {
+          if ((s.textContent ?? '').trim().toUpperCase() === wantAsin) {
+            (
+              s.closest('[class*="lineitem"], [data-feature-id*="line-item"]') ?? s
+            ).scrollIntoView({ block: 'center' });
+            return true;
+          }
+        }
+        // Target pin not in the DOM yet — pull in more rows.
+        window.scrollBy(0, Math.round(window.innerHeight * 0.85));
+        return false;
+      }, asin)
+      .catch(() => true); // evaluate error → stop; caller handles the miss
+    if (done) return;
+    await page.waitForTimeout(150); // let the virtualizer render the next rows
+  }
 }
 
 /**
@@ -3343,8 +3374,9 @@ async function verifyTargetCashback(
           const spans = document.querySelectorAll<HTMLElement>(
             '[data-testid^="Item_asin_"]',
           );
+          const want = asin.toUpperCase();
           for (const s of spans) {
-            if ((s.textContent ?? '').trim() === asin) {
+            if ((s.textContent ?? '').trim().toUpperCase() === want) {
               anchor = s;
               break;
             }
