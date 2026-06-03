@@ -1533,6 +1533,15 @@ export async function buyWithFillers(
   //      address/non-payment radio group and clicks the highest "N%
   //      back" option (≥ minCashbackPct) when it's better than the
   //      currently-selected one.
+  //
+  //      Materialize the target's row FIRST. /spc virtualizes long item
+  //      lists, and pickBestCashbackDelivery only sees RENDERED radios —
+  //      so a target buried below the fillers whose group isn't in the
+  //      DOM yet would never get its 6% option selected and would ship at
+  //      the default 0% option (the root of the `pct:null` /
+  //      "no % back on target" gate failures). Scrolling it into view
+  //      brings its radio group into the DOM before we pick.
+  if (targetAsin) await scrollTargetIntoView(page, targetAsin, 5_000);
   const delivery = await pickBestCashbackDelivery(page, opts.minCashbackPct);
   if (delivery.changes.length > 0) {
     logger.info(
