@@ -1073,15 +1073,28 @@ export async function buyWithFillers(
         fillersRequested: fillerTargetCount,
         termsTried: fillersResult.termsTried,
         metaRefreshHits: fillersResult.metaRefreshHits,
+        batchFailed: fillersResult.batchFailed,
       },
       cid,
     );
-    return {
-      ok: false,
-      stage: 'filler_search',
-      reason: 'no_filler_candidates — search rate-limited across all pools',
-      detail: `termsTried=${fillersResult.termsTried}, metaRefreshHits=${fillersResult.metaRefreshHits}, pool=${opts.fillerPool ?? 'default'}`,
-    };
+    // Two distinct causes were both reported as "search rate-limited",
+    // which was misleading: (a) the search genuinely returned no
+    // candidates (meta-refresh rate-limit), or (b) we HAD candidates but
+    // the /cart/add batch POST failed/timed out even after retries.
+    // Label them separately so the dashboard + logs tell the truth.
+    return fillersResult.batchFailed
+      ? {
+          ok: false,
+          stage: 'filler_search',
+          reason: 'no_filler_candidates — /cart/add batch POST failed after retries',
+          detail: `batchAddFailed, termsTried=${fillersResult.termsTried}, pool=${opts.fillerPool ?? 'default'}`,
+        }
+      : {
+          ok: false,
+          stage: 'filler_search',
+          reason: 'no_filler_candidates — search rate-limited across all pools',
+          detail: `termsTried=${fillersResult.termsTried}, metaRefreshHits=${fillersResult.metaRefreshHits}, pool=${opts.fillerPool ?? 'default'}`,
+        };
   }
   if (fillersAdded < fillerTargetCount) {
     logger.warn(
@@ -4390,7 +4403,7 @@ async function addFillerItems(
   // Appended last so existing call-sites that pass fillerOpts as the
   // trailing object literal still parse cleanly.
   logCtx: Record<string, unknown> = {},
-): Promise<{ added: number; asins: string[]; metaRefreshHits: number; termsTried: number }> {
+): Promise<{ added: number; asins: string[]; metaRefreshHits: number; termsTried: number; batchFailed: boolean }> {
   // Shadow `logger` so the 7 call sites in this function get the disk-log
   // routing fields (jobId+profile) merged in. See makeBoundLogger above.
   // eslint-disable-next-line @typescript-eslint/no-shadow
@@ -4471,6 +4484,7 @@ async function addFillerItems(
           asins: result.asins,
           metaRefreshHits: 0,
           termsTried: 0,
+          batchFailed: result.batchFailed,
         };
       }
     }
@@ -4602,7 +4616,7 @@ async function addFillerItems(
       { termsTried: terms.length, targetCount, metaRefreshHits },
       cid,
     );
-    return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length };
+    return { added: 0, asins: [], metaRefreshHits, termsTried: terms.length, batchFailed: false };
   }
 
   // Populate the shared cache with the candidates we just searched. Even
@@ -4636,6 +4650,7 @@ async function addFillerItems(
     asins: batchResult.asins,
     metaRefreshHits,
     termsTried: terms.length,
+    batchFailed: batchResult.batchFailed,
   };
 }
 
@@ -4715,80 +4730,104 @@ async function postBatchAndEvictOnFailure(
   poolKey: FillerCachePoolKey,
   cid: string | undefined,
   logger: ReturnType<typeof makeBoundLogger>,
-): Promise<{ asins: string[] }> {
+): Promise<{ asins: string[]; batchFailed: boolean }> {
   const slim = items.map((c) => ({ asin: c.asin, offerListingId: c.offerListingId }));
   const body = buildBatchCartAddBody(csrf, slim, { clientName: SEARCH_CART_ADD_CLIENT_NAME });
-  const t0 = Date.now();
-  let res;
-  try {
-    res = await mainPage.context().request.post(CART_ADD_URL, {
-      headers: {
-        ...HTTP_BROWSERY_HEADERS,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Origin: 'https://www.amazon.com',
-        Referer: 'https://www.amazon.com/',
-      },
-      data: body.toString(),
-      timeout: 20_000,
-    });
-  } catch (err) {
-    logger.warn(
-      'step.fillerBuy.fillers.batch.threw',
-      { error: String(err).slice(0, 120), candidates: slim.length },
-      cid,
-    );
-    // Whole-batch failure — evict every requested ASIN so a likely
-    // expired/throttled cache doesn't keep handing them out.
-    for (const it of slim) fillerCacheEvict(poolKey, it.asin);
-    return { asins: [] };
-  }
-  const tookMs = Date.now() - t0;
-  if (!res.ok()) {
-    logger.warn(
-      'step.fillerBuy.fillers.batch.httpError',
-      { status: res.status(), candidates: slim.length, tookMs },
-      cid,
-    );
-    for (const it of slim) fillerCacheEvict(poolKey, it.asin);
-    return { asins: [] };
-  }
-  const respText = await res.text().catch(() => '');
-  if (!looksLikeCartResponse(respText)) {
-    logger.warn(
-      'step.fillerBuy.fillers.batch.shapeMismatch',
-      { status: res.status(), candidates: slim.length, tookMs },
-      cid,
-    );
-    for (const it of slim) fillerCacheEvict(poolKey, it.asin);
-    return { asins: [] };
-  }
-  const committed = asinsCommittedInResponse(
-    respText,
-    slim.map((i) => i.asin),
-  );
-  // Per-ASIN eviction: anything we asked for but didn't get back is
-  // either OOS, region-restricted for this account, or otherwise
-  // unbuyable. Evict so the cache's hit rate stays meaningful.
-  const committedSet = new Set(committed);
-  let evicted = 0;
-  for (const it of slim) {
-    if (!committedSet.has(it.asin)) {
-      fillerCacheEvict(poolKey, it.asin);
-      evicted++;
+  // The single /cart/add POST was the #1 cause of terminal filler
+  // failures: a transient 20s timeout (Amazon slow under load) with NO
+  // retry left the cart with 0 fillers → buy failed and got MISLABELED as
+  // `no_filler_candidates — search rate-limited`. Retry transient
+  // failures (timeout/network/5xx) with a longer timeout and backoff, and
+  // — critically — do NOT evict the cache on a timeout: a timeout doesn't
+  // mean the items are bad, and evicting poisoned the shared cache for
+  // every other account on this worker, cascading one slow POST into a
+  // wave of failures. `batchFailed` lets the caller label the real cause.
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const t0 = Date.now();
+    let res;
+    try {
+      res = await mainPage.context().request.post(CART_ADD_URL, {
+        headers: {
+          ...HTTP_BROWSERY_HEADERS,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Origin: 'https://www.amazon.com',
+          Referer: 'https://www.amazon.com/',
+        },
+        data: body.toString(),
+        timeout: 30_000,
+      });
+    } catch (err) {
+      logger.warn(
+        'step.fillerBuy.fillers.batch.threw',
+        { error: String(err).slice(0, 120), candidates: slim.length, attempt },
+        cid,
+      );
+      if (attempt < MAX_ATTEMPTS) {
+        await mainPage.waitForTimeout(800 * attempt);
+        continue;
+      }
+      // Final timeout/network failure — leave the cache intact (see above).
+      return { asins: [], batchFailed: true };
     }
+    const tookMs = Date.now() - t0;
+    if (!res.ok()) {
+      const status = res.status();
+      logger.warn(
+        'step.fillerBuy.fillers.batch.httpError',
+        { status, candidates: slim.length, tookMs, attempt },
+        cid,
+      );
+      // 5xx is usually transient — retry, keep the cache. 4xx is more
+      // likely a bad csrf / unbuyable item — evict and give up.
+      if (status >= 500 && attempt < MAX_ATTEMPTS) {
+        await mainPage.waitForTimeout(800 * attempt);
+        continue;
+      }
+      if (status < 500) for (const it of slim) fillerCacheEvict(poolKey, it.asin);
+      return { asins: [], batchFailed: true };
+    }
+    const respText = await res.text().catch(() => '');
+    if (!looksLikeCartResponse(respText)) {
+      logger.warn(
+        'step.fillerBuy.fillers.batch.shapeMismatch',
+        { status: res.status(), candidates: slim.length, tookMs, attempt },
+        cid,
+      );
+      for (const it of slim) fillerCacheEvict(poolKey, it.asin);
+      return { asins: [], batchFailed: true };
+    }
+    const committed = asinsCommittedInResponse(
+      respText,
+      slim.map((i) => i.asin),
+    );
+    // Per-ASIN eviction: anything we asked for but didn't get back is
+    // either OOS, region-restricted for this account, or otherwise
+    // unbuyable. Evict so the cache's hit rate stays meaningful.
+    const committedSet = new Set(committed);
+    let evicted = 0;
+    for (const it of slim) {
+      if (!committedSet.has(it.asin)) {
+        fillerCacheEvict(poolKey, it.asin);
+        evicted++;
+      }
+    }
+    logger.info(
+      'step.fillerBuy.fillers.batch.ok',
+      {
+        requested: slim.length,
+        committed: committed.length,
+        ...(evicted > 0 ? { evictedFromCache: evicted } : {}),
+        tookMs,
+        status: res.status(),
+        ...(attempt > 1 ? { attempt } : {}),
+      },
+      cid,
+    );
+    return { asins: committed, batchFailed: false };
   }
-  logger.info(
-    'step.fillerBuy.fillers.batch.ok',
-    {
-      requested: slim.length,
-      committed: committed.length,
-      ...(evicted > 0 ? { evictedFromCache: evicted } : {}),
-      tookMs,
-      status: res.status(),
-    },
-    cid,
-  );
-  return { asins: committed };
+  // Unreachable — the loop always returns — but satisfies the type checker.
+  return { asins: [], batchFailed: true };
 }
 
 /**
