@@ -58,6 +58,12 @@ const DEFAULTS: Settings = {
   // rejecting a Prime item the static parser mis-reads. Set to true
   // (per-account or globally) to skip the visible check.
   bypassPrimeCheck: false,
+  // Browser-search fallback for filler search. OFF by default: when a
+  // filler HTTP search is rate-limited (Amazon's meta-refresh stub), ON
+  // retries the search via a real browser tab (far more lenient than the
+  // HTTP throttle) instead of failing with no_filler_candidates. Opt-in
+  // because it adds a browser navigation + latency per affected buy.
+  fillerBrowserFallback: false,
 };
 
 function filePath(): string {

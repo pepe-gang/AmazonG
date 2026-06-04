@@ -119,6 +119,13 @@ export type Deps = {
    */
   bypassPrimeCheck: boolean;
   /**
+   * Browser-search fallback for filler search (opt-in, default false).
+   * When a filler HTTP search is rate-limited, retry via a real browser
+   * tab instead of failing with no_filler_candidates. Threaded into the
+   * filler buy opts.
+   */
+  fillerBrowserFallback: boolean;
+  /**
    * Re-read each per-claim from disk so the user can tune Parallel
    * buys in Settings without stopping the worker. Returns the
    * parallel-buy knobs as a struct; we don't pass the whole Settings
@@ -734,6 +741,7 @@ async function runFillerBuyWithRetries(
       bgNameToggleEnabled: deps.bgNameToggleEnabled,
       resolveCardNumber: deps.resolveCardNumber,
       fillerPool: effectivePool,
+      fillerBrowserFallback: deps.fillerBrowserFallback,
       fillerCount: deps.fillerCount,
       attemptedAsins,
       recentOrderIds,

@@ -484,6 +484,32 @@ function BuyWithFillersPanel({ profiles }: { profiles: AmazonProfile[] }) {
             fillers per buy (1–20)
           </span>
         </div>
+        {/* Browser-search fallback — opt-in, off by default. */}
+        <div className="mt-4 flex items-start justify-between gap-3 max-w-md">
+          <div>
+            <div className="text-xs font-medium text-foreground/80">
+              Browser-search fallback
+            </div>
+            <div className="text-[11px] text-muted-foreground leading-snug mt-0.5">
+              When Amazon rate-limits the filler search (the{' '}
+              <code>no_filler_candidates</code> failure), retry the search in
+              a real browser tab instead of giving up. More reliable under
+              rate-limits, but adds a browser navigation + latency per
+              affected buy. Off by default. Takes effect on the next worker
+              Start.
+            </div>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer shrink-0 pt-0.5">
+            <Switch
+              checked={settings.fillerBrowserFallback === true}
+              onCheckedChange={(v) => void update({ fillerBrowserFallback: v })}
+              disabled={busy}
+            />
+            <span className="text-xs font-medium text-foreground/80 min-w-[24px]">
+              {settings.fillerBrowserFallback === true ? 'On' : 'Off'}
+            </span>
+          </label>
+        </div>
         <div className="text-xs font-medium text-foreground/80 mt-4">
           Filler Attempts
         </div>

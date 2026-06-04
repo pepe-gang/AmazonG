@@ -1143,6 +1143,7 @@ async function startWorkerNow(): Promise<void> {
     // address prefixes work today).
     bgNameToggleEnabled: settings.bgNameToggleEnabled !== false,
     bypassPrimeCheck: settings.bypassPrimeCheck === true,
+    fillerBrowserFallback: settings.fillerBrowserFallback === true,
     fillerCount:
       typeof settings.fillerCount === "number" && settings.fillerCount > 0
         ? settings.fillerCount

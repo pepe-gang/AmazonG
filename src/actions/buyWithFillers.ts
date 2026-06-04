@@ -146,6 +146,12 @@ type BuyWithFillersOptions = {
    */
   fillerPool?: FillerPool;
   /**
+   * When true, a rate-limited filler HTTP search retries via a real
+   * browser tab instead of failing with no_filler_candidates. Opt-in
+   * (Settings → off by default).
+   */
+  fillerBrowserFallback?: boolean;
+  /**
    * Override for the target filler count, honored for ALL pools.
    * Replaces the legacy FILLER_COUNT=8 default. Eero pool's smaller
    * candidate set (~10 per term) may yield fewer than requested for
@@ -1007,6 +1013,7 @@ export async function buyWithFillers(
     attemptedAsins: opts.attemptedAsins,
     pool: opts.fillerPool,
     precomputedCsrf: targetCsrf,
+    fillerBrowserFallback: opts.fillerBrowserFallback,
   }, logCtx);
   // In-attempt pool fallback for narrow pools when Amazon rate-limited
   // every search term. Triggers ONLY when:
@@ -1051,6 +1058,7 @@ export async function buyWithFillers(
         attemptedAsins: opts.attemptedAsins,
         pool: fallbackPool,
         precomputedCsrf: targetCsrf,
+        fillerBrowserFallback: opts.fillerBrowserFallback,
       }, logCtx);
     }
   }
@@ -4349,6 +4357,9 @@ type FillerOpts = {
    *  (`isBlockedByPool`) — e.g. eero pool excludes Echo / Fire TV.
    *  Undefined / 'general' = no blocklist. */
   pool?: FillerPool;
+  /** When true, a rate-limited HTTP filler search retries via a real
+   *  browser tab (opt-in; default off). Threaded down from Settings. */
+  fillerBrowserFallback?: boolean;
   /** Optional CSRF token harvested by the caller's prior PDP fetch
    *  (typically the target-add via `addFillerViaHttp`). When present,
    *  `addFillerItems` may serve filler ASINs from the shared cache
@@ -4446,6 +4457,7 @@ async function addFillerItems(
           seen,
           cid,
           logger,
+          fillerOpts.fillerBrowserFallback === true,
         );
         // Populate cache with EVERY fresh candidate (not just the
         // targetCount we'd need now) — future buys benefit from the
@@ -4573,7 +4585,11 @@ async function addFillerItems(
   // (~1.5-3s each) instead of one — a hard-throttled account often needs
   // more than a single nav to land enough fresh candidates.
   const BROWSER_FALLBACK_TERMS = 3;
-  if ((candidates.length === 0 || csrf === null) && metaRefreshHits > 0) {
+  if (
+    fillerOpts.fillerBrowserFallback === true &&
+    (candidates.length === 0 || csrf === null) &&
+    metaRefreshHits > 0
+  ) {
     for (let ti = 0; ti < terms.length && ti < BROWSER_FALLBACK_TERMS; ti++) {
       if (candidates.length >= targetCount && csrf !== null) break;
       const term = terms[ti]!;
@@ -4677,6 +4693,7 @@ async function runFillerSearchLoop(
   seen: Set<string>,
   cid: string | undefined,
   logger: ReturnType<typeof makeBoundLogger>,
+  browserFallback = false,
 ): Promise<{ candidates: SearchResultCandidate[]; metaRefreshHits: number }> {
   // Uses file-scope INTER_TERM_DELAY_MS so cache-leader searches and
   // the inline slow-path search loop pace identically.
@@ -4713,7 +4730,7 @@ async function runFillerSearchLoop(
   // EVERY account on this worker (including the throttled one that
   // triggered this search) serves from it. Without this, a throttled
   // leader returned empty, the cache stayed cold, and every buy re-failed.
-  if (candidates.length === 0 && metaRefreshHits > 0) {
+  if (browserFallback && candidates.length === 0 && metaRefreshHits > 0) {
     for (let ti = 0; ti < terms.length && ti < 3; ti++) {
       if (candidates.length >= HARVEST_CAP) break;
       const term = terms[ti]!;

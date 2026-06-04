@@ -394,6 +394,14 @@ export type Settings = {
    * board and you'd rather buy than fail with `not_prime`.
    */
   bypassPrimeCheck: boolean;
+  /**
+   * Browser-search fallback for filler search. When a filler HTTP search
+   * is rate-limited (Amazon's meta-refresh stub), retry the search via a
+   * real browser tab (much more lenient than the HTTP throttle) instead
+   * of failing with `no_filler_candidates`. Defaults to false (opt-in) —
+   * it adds a browser navigation + latency per affected buy.
+   */
+  fillerBrowserFallback: boolean;
 };
 
 /**
