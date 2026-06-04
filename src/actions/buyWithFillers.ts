@@ -4563,51 +4563,56 @@ async function addFillerItems(
     );
   }
 
-  // Last-resort browser fallback. Triggers ONLY when every HTTP term
-  // hit the meta-refresh rate-limit stub — that's the one failure
-  // mode browser nav can paper over (real Chromium nav handles the
-  // stub natively; Amazon's anti-bot is HTTP-API-specific). Costs
-  // ~1.5-3s; we cap at one attempt with the first term in the pool.
-  if (
-    (candidates.length === 0 || csrf === null) &&
-    metaRefreshHits > 0 &&
-    metaRefreshHits === terms.length &&
-    terms[0]
-  ) {
-    logger.warn(
-      'step.fillerBuy.fillers.browserFallback',
-      { term: terms[0], reason: 'every HTTP term rate-limited; trying browser nav' },
-      cid,
-    );
-    const browserCandidates = await searchFillerCandidatesViaBrowser(
-      mainPage,
-      terms[0],
-      fillerOpts.pool,
-    );
-    let added = 0;
-    let blocked = 0;
-    for (const c of browserCandidates) {
-      if (candidates.length >= targetCount) break;
-      if (seen.has(c.asin)) continue;
-      seen.add(c.asin);
-      if (isBlockedByPool(fillerOpts.pool, c.title)) {
-        blocked++;
-        continue;
+  // Browser fallback. Amazon throttles the HTTP search API (meta-refresh
+  // stub) but is far more lenient on real Chromium navigations (verified
+  // 2026-05-13: a burst of browser searches all returned results while
+  // every HTTP search was stub'd). Fire whenever HTTP yielded nothing AND
+  // we saw ANY throttle signal — NOT only when EVERY term stubbed, which
+  // missed mixed throttle/captcha/network patterns and let hard-throttled
+  // accounts fail with `no_filler_candidates`. Try up to 3 terms
+  // (~1.5-3s each) instead of one — a hard-throttled account often needs
+  // more than a single nav to land enough fresh candidates.
+  const BROWSER_FALLBACK_TERMS = 3;
+  if ((candidates.length === 0 || csrf === null) && metaRefreshHits > 0) {
+    for (let ti = 0; ti < terms.length && ti < BROWSER_FALLBACK_TERMS; ti++) {
+      if (candidates.length >= targetCount && csrf !== null) break;
+      const term = terms[ti]!;
+      logger.warn(
+        'step.fillerBuy.fillers.browserFallback',
+        { term, attempt: ti + 1, reason: 'HTTP search rate-limited; trying browser nav' },
+        cid,
+      );
+      const browserCandidates = await searchFillerCandidatesViaBrowser(
+        mainPage,
+        term,
+        fillerOpts.pool,
+      );
+      let added = 0;
+      let blocked = 0;
+      for (const c of browserCandidates) {
+        if (candidates.length >= targetCount) break;
+        if (seen.has(c.asin)) continue;
+        seen.add(c.asin);
+        if (isBlockedByPool(fillerOpts.pool, c.title)) {
+          blocked++;
+          continue;
+        }
+        candidates.push(c);
+        added++;
+        if (csrf === null) csrf = c.csrf;
       }
-      candidates.push(c);
-      added++;
-      if (csrf === null) csrf = c.csrf;
+      logger.info(
+        'step.fillerBuy.fillers.browserFallback.result',
+        {
+          term,
+          fresh: added,
+          ...(blocked > 0 ? { blockedByPool: blocked } : {}),
+          totalCandidates: candidates.length,
+          of: targetCount,
+        },
+        cid,
+      );
     }
-    logger.info(
-      'step.fillerBuy.fillers.browserFallback.result',
-      {
-        fresh: added,
-        ...(blocked > 0 ? { blockedByPool: blocked } : {}),
-        totalCandidates: candidates.length,
-        of: targetCount,
-      },
-      cid,
-    );
   }
 
   if (candidates.length === 0 || csrf === null) {
@@ -4701,6 +4706,29 @@ async function runFillerSearchLoop(
       if (seen.has(c.asin)) continue;
       if (isBlockedByPool(pool, c.title)) continue;
       candidates.push(c);
+    }
+  }
+  // Browser fallback for the cache-leader: when HTTP was throttled and we
+  // harvested nothing, populate the SHARED cache via real browser nav so
+  // EVERY account on this worker (including the throttled one that
+  // triggered this search) serves from it. Without this, a throttled
+  // leader returned empty, the cache stayed cold, and every buy re-failed.
+  if (candidates.length === 0 && metaRefreshHits > 0) {
+    for (let ti = 0; ti < terms.length && ti < 3; ti++) {
+      if (candidates.length >= HARVEST_CAP) break;
+      const term = terms[ti]!;
+      logger.warn(
+        'step.fillerBuy.fillers.cacheLeaderBrowserFallback',
+        { term, attempt: ti + 1 },
+        cid,
+      );
+      const browserCandidates = await searchFillerCandidatesViaBrowser(mainPage, term, pool);
+      for (const c of browserCandidates) {
+        if (candidates.length >= HARVEST_CAP) break;
+        if (seen.has(c.asin)) continue;
+        if (isBlockedByPool(pool, c.title)) continue;
+        candidates.push(c);
+      }
     }
   }
   logger.info(
