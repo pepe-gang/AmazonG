@@ -609,6 +609,9 @@ function Toast({ message, onDismiss }: { message: string; onDismiss: () => void 
 }
 
 function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
+  // Read the global cashback floor so the per-account gate label/tooltip
+  // shows the real configured number instead of a hard-coded "6%".
+  const { settings } = useSettings();
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [newEmail, setNewEmail] = useState('');
@@ -1213,17 +1216,20 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                     </label>
                     {(() => {
                       // Cashback gate — server-side setting on BG, reflected
-                      // here for flip. ON (default) = worker enforces the 6%
-                      // floor for this account. OFF = buy regardless of %.
+                      // here for flip. ON (default) = worker enforces the
+                      // configured floor for this account. OFF = buy
+                      // regardless of %. The floor itself is the global
+                      // "Minimum cashback %" on the Settings tab.
                       const require =
                         remoteSettings[p.email.toLowerCase()]?.requireMinCashback ?? true;
+                      const floor = settings?.minCashbackPct ?? 6;
                       return (
                         <label
                           className="flex items-center gap-2 cursor-pointer"
                           title={
                             require
-                              ? 'Cashback gate ON — buys only when cashback ≥ the worker floor (6% default). Click to allow any %.'
-                              : 'Cashback gate OFF — buys regardless of cashback. Click to re-enable the 6% floor.'
+                              ? `Cashback gate ON — buys only when cashback ≥ the worker floor (${floor}%, set on the Settings tab). Click to allow any %.`
+                              : `Cashback gate OFF — buys regardless of cashback. Click to re-enable the ${floor}% floor.`
                           }
                         >
                           <Switch
@@ -1231,7 +1237,7 @@ function AccountsList({ profiles }: { profiles: AmazonProfile[] }) {
                             onCheckedChange={() => void toggleRequireMinCashback(p.email)}
                           />
                           <span className="text-xs font-medium text-foreground/80">
-                            Require ≥ 6% CB
+                            Require ≥ {floor}% CB
                           </span>
                         </label>
                       );

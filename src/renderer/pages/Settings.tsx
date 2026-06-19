@@ -65,6 +65,7 @@ export function SettingsView({
         >
           <BuyWithFillersPanel profiles={profiles} />
           <ParallelBuysPanel />
+          <MinCashbackPanel />
           <AllowedPrefixesPanel />
           <PrimeCheckTogglePanel />
           <BgNameTogglePanel />
@@ -183,6 +184,70 @@ function ParallelBuysPanel() {
         Range {PARALLEL_MIN}–{PARALLEL_MAX}. Changes apply on the next
         deal AmazonG claims (no need to stop / restart the worker —
         settings are re-read every claim).
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   Minimum cashback floor (global checkout gate)
+   ============================================================ */
+const MIN_CB_FLOOR = 0;
+const MAX_CB_FLOOR = 30;
+
+function MinCashbackPanel() {
+  const { settings, busy, update } = useSettings();
+  if (!settings) return null;
+  // Defensive default mirrors ParallelBuysPanel: installs predating this
+  // field come back missing it over IPC; show the factory floor (6) until
+  // the user clicks +/-, which persists it for real.
+  const floor = settings.minCashbackPct ?? 6;
+  const setFloor = (v: number) => {
+    const clamped = Math.max(MIN_CB_FLOOR, Math.min(MAX_CB_FLOOR, Math.round(v)));
+    void update({ minCashbackPct: clamped });
+  };
+  return (
+    <div className="prefix-panel">
+      <div className="prefix-head">
+        <div>
+          <div className="prefix-title">Minimum cashback %</div>
+          <div className="prefix-sub">
+            The cashback floor every buy must clear. AmazonG reads the live{' '}
+            <b>% back</b> on the Amazon checkout page and only places the
+            order when it's <b>at or above</b> this number. Default{' '}
+            <b>6%</b>. Raise it during high-cashback events (e.g. Prime Day,
+            where deals run <b>7–10%</b>) so you only buy the richer ones;
+            lower it to catch more. <b>0</b> disables the floor. You can
+            still turn the gate fully off per-account on the Accounts tab.
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setFloor(floor - 1)}
+            disabled={busy || floor <= MIN_CB_FLOOR}
+            aria-label="Decrease minimum cashback"
+            className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            −
+          </button>
+          <span className="tabular-nums w-10 text-center text-base font-medium">
+            {floor}%
+          </span>
+          <button
+            type="button"
+            onClick={() => setFloor(floor + 1)}
+            disabled={busy || floor >= MAX_CB_FLOOR}
+            aria-label="Increase minimum cashback"
+            className="h-7 w-7 rounded-md border border-white/10 bg-white/[0.04] text-foreground/80 hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            +
+          </button>
+        </div>
+      </div>
+      <div className="text-[11px] text-muted-foreground/70 mt-3">
+        Range {MIN_CB_FLOOR}–{MAX_CB_FLOOR}%. Applies the next time you
+        start the worker.
       </div>
     </div>
   );

@@ -91,6 +91,16 @@ export async function loadSettings(): Promise<Settings> {
     if (fa.length > 5) fa = fa.slice(0, 5);
     parsed.fillerAttempts = fa;
 
+    // Clamp the cashback floor to a sane 0–30% range. Guards against a
+    // hand-edited settings.json or a NaN slipping through to the buy-path
+    // gate comparison (`pageCashbackPct < minCashbackPct`). 0 = no floor.
+    if (parsed.minCashbackPct !== undefined) {
+      const n = Number(parsed.minCashbackPct);
+      parsed.minCashbackPct = Number.isFinite(n)
+        ? Math.max(0, Math.min(30, n))
+        : DEFAULTS.minCashbackPct;
+    }
+
     return { ...DEFAULTS, ...parsed };
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ...DEFAULTS };
