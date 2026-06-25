@@ -14,33 +14,6 @@ export function parseCost(cost: string | null): number | null {
 }
 
 /**
- * The price string to report as `placedPrice` / `cost`. Prefer Amazon's
- * order-confirmation price; when that's null — which happens whenever a
- * buy completes via the confirmation-timeout recovery path, where the
- * confirmation page never rendered so its price element is absent — fall
- * back to the per-unit /spc price we scraped BEFORE Place Order (the
- * price-cap check already reads it on every buy). Both represent the
- * price actually paid; the /spc value is the accurate fallback and keeps
- * Retail/Profit from going blank. Returns null only when neither source
- * has a usable price.
- *
- * NOTE: pass the per-UNIT /spc price (`priceCheck.price`), NOT the line
- * total (`priceCheck.priceText`) — downstream Profit multiplies by qty.
- */
-export function placedPriceText(
-  confirmationPriceText: string | null,
-  spcUnitPrice: number | null,
-): string | null {
-  if (confirmationPriceText != null && confirmationPriceText.trim() !== '') {
-    return confirmationPriceText;
-  }
-  if (spcUnitPrice != null && Number.isFinite(spcUnitPrice) && spcUnitPrice > 0) {
-    return `$${spcUnitPrice.toFixed(2)}`;
-  }
-  return null;
-}
-
-/**
  * Effective retail price for a row: the actual Amazon /spc price we
  * captured at buy time (`cost`) when available, otherwise BG's retail
  * cap (`maxPrice`) as a fallback. Legacy rows placed before we started

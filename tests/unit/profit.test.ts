@@ -1,31 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { computeProfit, parseCost, placedPriceText, retailPrice } from '@shared/profit';
+import { computeProfit, parseCost, retailPrice } from '@shared/profit';
 import type { JobAttempt, JobAttemptStatus } from '@shared/types';
-
-describe('placedPriceText (confirmation-price → /spc fallback)', () => {
-  it('prefers the confirmation price when present', () => {
-    expect(placedPriceText('$84.99', 79.0)).toBe('$84.99');
-  });
-  it('falls back to the per-unit /spc price when confirmation is null', () => {
-    // The confirmation-timeout recovery path: no confirmation price, but
-    // the /spc unit price was captured before Place Order.
-    expect(placedPriceText(null, 84.99)).toBe('$84.99');
-  });
-  it('treats an empty/whitespace confirmation string as missing', () => {
-    expect(placedPriceText('', 84.99)).toBe('$84.99');
-    expect(placedPriceText('   ', 84.99)).toBe('$84.99');
-  });
-  it('formats the /spc fallback to two decimals', () => {
-    expect(placedPriceText(null, 79)).toBe('$79.00');
-    expect(placedPriceText(null, 1283.5)).toBe('$1283.50');
-  });
-  it('returns null when neither source is usable', () => {
-    expect(placedPriceText(null, null)).toBeNull();
-    expect(placedPriceText(null, 0)).toBeNull();
-    expect(placedPriceText(null, -5)).toBeNull();
-    expect(placedPriceText(null, NaN)).toBeNull();
-  });
-});
 
 function attempt(overrides: Partial<JobAttempt> = {}): JobAttempt {
   return {

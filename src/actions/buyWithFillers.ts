@@ -2,7 +2,6 @@ import type { Page } from 'playwright';
 import { randomUUID } from 'node:crypto';
 import { htmlToDocument } from '../shared/jsdom.js';
 import { logger as loggerImport } from '../shared/logger.js';
-import { placedPriceText } from '../shared/profit.js';
 // Top-level alias so existing call sites in helper functions that don't
 // shadow the import (most of the file) keep working — and so `buyWithFillers`
 // + tracked helpers can shadow this single binding with a context-bound
@@ -561,14 +560,6 @@ export async function buyWithFillers(
   // eslint-disable-next-line @typescript-eslint/no-shadow
   const logger = makeBoundLogger(loggerImport, logCtx);
   logger.info('step.fillerBuy.start', { productUrl: opts.productUrl }, cid);
-
-  // Per-unit /spc target price, scraped by the price-cap check below
-  // (step 13) before Place Order. Carried to function scope so the
-  // confirmation-report step can fall back to it for `placedPrice` when
-  // the confirmation page never rendered (the confirmation-timeout
-  // recovery path). Without this, ~half of completed buys report a null
-  // placedPrice and the BG dashboard shows "—" for Retail/Profit.
-  let spcTargetUnitPrice: number | null = null;
 
   // Step ordering (changed 2026-05-05 to eliminate the PDP→/cart→PDP
   // round-trip on clearCart's click-loop fallback):
@@ -1491,11 +1482,6 @@ export async function buyWithFillers(
         ...(priceCheck.detail ? { detail: priceCheck.detail } : {}),
       };
     }
-    // Capture the per-unit /spc price for the placedPrice fallback (see
-    // the spcTargetUnitPrice declaration). priceCheck.price is per-unit
-    // (line total ÷ qty); priceCheck.priceText is the line total — use
-    // the former so downstream qty math stays correct.
-    spcTargetUnitPrice = priceCheck.price;
     logger.info(
       'step.fillerBuy.spc.price.ok',
       { targetAsin, priceText: priceCheck.priceText, price: priceCheck.price },
@@ -2069,15 +2055,6 @@ export async function buyWithFillers(
       )
     : { orderId: null, finalPrice: null, finalPriceText: null, quantity: null };
 
-  // Price we report as placedPrice: confirmation-page price first, else
-  // the pre-Place-Order /spc unit price (populated even when the
-  // confirmation page never rendered). Keeps Retail/Profit from going
-  // blank on the confirmation-timeout recovery path.
-  const reportedPriceText = placedPriceText(
-    parsed.finalPriceText,
-    spcTargetUnitPrice,
-  );
-
   // 15. Fetch ALL order IDs that came out of this buy. Amazon fans a
   //     single Place Order click into multiple orders (split by
   //     warehouse / seller / shipping group), so we scan
@@ -2159,7 +2136,7 @@ export async function buyWithFillers(
     // /recover-order) can populate the BG purchase row instead of
     // leaving CB/Profit "—".
     placedCashbackPct: targetCashbackPct,
-    placedPrice: reportedPriceText,
+    placedPrice: parsed.finalPriceText ?? null,
     ...(orderMatches.length > 0
       ? { detail: `orderIds=${orderMatches.map((m) => m.orderId).join(',')}` }
       : {}),
@@ -2275,7 +2252,7 @@ export async function buyWithFillers(
       url: page.url(),
       amazonPurchaseId,
       placedCashbackPct: targetCashbackPct,
-      placedPrice: reportedPriceText,
+      placedPrice: parsed.finalPriceText ?? null,
       detail: clickThrew
         ? 'recovered via order-history scan after the Place Order click threw'
         : 'recovered via order-history scan after confirmation-URL timeout (no on-page signal)',
@@ -2454,9 +2431,7 @@ export async function buyWithFillers(
     // and fall back to the ASIN-walker the same as today).
     preBuyOrderIds: preBuyOrderIds ?? [],
     finalPrice: parsed.finalPrice,
-    // /spc-price fallback so placedPrice survives the confirmation-timeout
-    // recovery path (runForProfile maps this to placedPrice).
-    finalPriceText: reportedPriceText,
+    finalPriceText: parsed.finalPriceText,
   };
 }
 

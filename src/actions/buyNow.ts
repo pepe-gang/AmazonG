@@ -12,7 +12,6 @@ import {
 import { effectivePriceTolerance } from '../parsers/productConstraints.js';
 import type { BuyResult, BGAddress, PaymentCardFill } from '../shared/types.js';
 import { evaluateCashbackGate } from '../shared/cashbackGate.js';
-import { placedPriceText } from '../shared/profit.js';
 import { clearCart, type ClearCartResult } from './clearCart.js';
 import { addFillerViaHttp, waitForDeliverySettle } from './buyWithFillers.js';
 import { parseAsinFromUrl } from '../shared/sanitize.js';
@@ -314,14 +313,6 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
   const warn: StepEmitter = (message, data) =>
     logger.warn(message, { ...ctx, ...(data ?? {}) }, cid);
 
-  // Per-unit /spc price from the price-cap check (step 4 below). Carried
-  // to function scope so the confirmation report can fall back to it for
-  // placedPrice when the confirmation page never rendered (the
-  // confirmation-timeout recovery path). Stays null when the price check
-  // is skipped (no cap set, or bypassPriceCheck) — those rows keep the
-  // prior behavior.
-  let spcUnitPrice: number | null = null;
-
   // Capture deal ASIN from the PDP url at start. Used downstream by
   // verifyOrderContainsAsin to defend against the cross-deal orderId
   // contamination bug (2026-05-07: 6 BG purchases on cpnnick@gmail.com
@@ -557,8 +548,6 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
         });
         return fail('checkout_price', priceCheck.reason, priceCheck.detail);
       }
-      // Capture the per-unit /spc price for the placedPrice fallback.
-      spcUnitPrice = priceCheck.price;
       step('step.checkout.price.ok', {
         observed: priceCheck.priceText,
         max: opts.maxPrice,
@@ -889,7 +878,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       // CB + price so a ghost-recovery pass populates the BG row's
       // CB / Profit columns instead of leaving them "—".
       placedCashbackPct: cashbackPct,
-      placedPrice: placedPriceText(confirmation.finalPriceText, spcUnitPrice),
+      placedPrice: confirmation.finalPriceText ?? null,
     });
 
     step('step.buy.placed', {
@@ -912,9 +901,7 @@ export async function buyNow(page: Page, opts: BuyOptions): Promise<BuyResult> {
       orderId,
       amazonPurchaseId,
       finalPrice: confirmation.finalPrice,
-      // /spc-price fallback so placedPrice survives the confirmation-timeout
-      // recovery path (runForProfile maps finalPriceText → placedPrice).
-      finalPriceText: placedPriceText(confirmation.finalPriceText, spcUnitPrice),
+      finalPriceText: confirmation.finalPriceText,
       cashbackPct,
       quantity: qtyResolution.quantity,
     };
